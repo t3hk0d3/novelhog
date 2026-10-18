@@ -826,14 +826,12 @@ details.
 
 **Chapters, phone**: normal mode and select mode.
 
-<p>
-  <img src="sketches/phone-normal-mode.png" alt="Phone chapters, normal mode" width="300">
-  <img src="sketches/phone-select-mode.png" alt="Phone chapters, select mode" width="300">
-</p>
+![Phone chapters, normal mode](sketches/phone-normal-mode.png)
+![Phone chapters, select mode](sketches/phone-select-mode.png)
 
 **Chapter details, phone bottom sheet**
 
-<img src="sketches/phone-chapter-details.png" alt="Chapter details bottom sheet" width="300">
+![Chapter details bottom sheet](sketches/phone-chapter-details.png)
 
 ## 11. Error handling
 
