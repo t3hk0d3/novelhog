@@ -191,11 +191,12 @@ CREATE TABLE push_subscriptions (
 ) STRICT;
 
 CREATE TABLE changes (
-    seq      INTEGER PRIMARY KEY AUTOINCREMENT,  -- SSE event id
-    novel_id TEXT,                               -- NULL for global events
-    kind     TEXT NOT NULL CHECK (kind IN ('chapter', 'novel', 'export', 'release')),
-    payload  TEXT NOT NULL CHECK (json_valid(payload)),
-    at       TEXT NOT NULL
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT, -- SSE event id
+    novel_id  TEXT NOT NULL,                     -- for ?novel_id filtering
+    entity_id TEXT NOT NULL                      -- NV…/CH…/EX…; prefix = event type
+              CHECK (substr(entity_id, 1, 2) IN ('NV', 'CH', 'EX')),
+    payload   TEXT NOT NULL CHECK (json_valid(payload)),
+    at        TEXT NOT NULL
 ) STRICT;
 
 CREATE INDEX changes_by_novel ON changes (novel_id, seq);
@@ -380,14 +381,16 @@ and the cover, so they need no lease and can run while the worker is busy.
 
 `GET /api/v1/events?novel_id=<id>` (filter optional).
 
-| Event | Data |
-|---|---|
-| `chapter` | `{novel_id, chapter_id, number, state, error, title}` |
-| `novel` | `Novel` |
-| `export` | `Export` |
-| `release` | `{novel_id, numbers: int[]}`: new chapters found by a sync |
-| `resync` | `{}`: client must refetch over REST |
+| Event | Source (`entity_id` prefix) | Data |
+|---|---|---|
+| `novel` | `NV` | `Novel` |
+| `chapter` | `CH` | `Chapter` plus `novel_id` |
+| `export` | `EX` | `Export` |
+| `resync` | not stored | `{}`: client must refetch over REST |
 
+- The event name is derived from the `entity_id` prefix; `changes` stores no kind.
+- New chapters found by a sync arrive as `chapter` events with `released_at`
+  set; the UI updates "new" badges from them. There is no separate release event.
 - `id:` of every event is `changes.seq`.
 - On connect with `Last-Event-ID`, the API replays later changes; if that seq has
   been pruned it sends one `resync`.
@@ -452,7 +455,7 @@ refresh(novel):
     last_refreshed_at = now
     interval = MIN if new and not initial else min(interval * 2, MAX)
     next_refresh_at = now + interval ± 10% jitter
-    append changes: novel; release {numbers} if new and not initial
+    append changes: one per new or changed chapter, one for the novel
     if new and not initial and novel.followed: notifier.notify_release(novel, numbers)
 ```
 
