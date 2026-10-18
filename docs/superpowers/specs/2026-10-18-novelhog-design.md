@@ -537,8 +537,19 @@ Package `novelhog`, under `src/novelhog/`.
 
 ### 8.1 HTML → Markdown
 
-- Allowed tags: `p`, `br`, `em`/`i`, `strong`/`b`, `img`. Other tags are dropped,
-  keeping their text.
+- Allowed tags: `p`, `br`, `em`/`i`, `strong`/`b`, `img`, and the list tags
+  `ul`, `ol`, `li`, `dl`, `dt`, `dd`. Other tags are dropped, keeping their text.
+- Lists:
+  - `ul` → `- ` items; `ol` → `1. ` items, keeping a `start` attribute as the
+    first number.
+  - Nested lists are indented by 4 spaces per level (CommonMark nesting).
+  - A `li` containing several paragraphs keeps them as indented continuation
+    paragraphs of that item.
+  - Definition lists have no CommonMark form: each `dt` becomes a bold paragraph
+    and each `dd` a paragraph after it.
+  - Empty `li`/`dd` are dropped; a list left with no items is dropped.
+  - Text inside items is escaped like any other text, so a literal leading `-`
+    or `1.` inside an item never starts a new list.
 - `script`, `style`, `noscript`, `iframe` and their contents are removed entirely.
 - All text is escaped so Markdown metacharacters stay literal: backslash,
   asterisk, underscore, hash, greater-than, square brackets, backtick, pipe,
@@ -710,6 +721,9 @@ manifest makes the app installable.
 ## 13. Testing
 
 - **Unit:** `ids`; `html_to_markdown` (allowlist, escaping, empty paragraphs,
+  `ul`/`ol` with `start`, nested lists, multi-paragraph items, `dl` → bold term +
+  paragraph, empty items and lists dropped, round trip through `markdown-it-py`
+  yields the same list structure,
   images, failure placeholder); `image_fetcher` (magic bytes, SVG rejection, size
   cap); `images` (downscale only above the limit, aspect ratio kept, animated
   untouched, `0` disables, small images byte-identical; WebP → PNG with alpha /
