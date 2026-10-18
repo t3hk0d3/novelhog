@@ -684,6 +684,13 @@ manifest makes the app installable.
     Dismissal is stored in `localStorage` (`novelhog.pushBannerDismissed`); if
     storage is unavailable the banner simply shows again next load. Subscribing
     hides it.
+  - **Blocked variant**: when `Notification.permission` is `denied`, the banner
+    turns amber with a struck-through bell and reads "Notifications are blocked
+    for this site. Allow them in your browser's site settings, then reload the
+    page." It has no Turn on button (the browser will not prompt again), only
+    dismiss, stored separately as `novelhog.pushBlockedBannerDismissed` so a
+    later block shows it again. The header bell is shown struck through and
+    disabled with the tooltip "Blocked in browser settings".
   - Subscribing requests permission, calls `PushManager.subscribe` with
     `vapid_key`, then `POST /push/subscriptions`; unsubscribing calls
     `unsubscribe()` and `DELETE`. Over plain HTTP the bell is disabled with a
