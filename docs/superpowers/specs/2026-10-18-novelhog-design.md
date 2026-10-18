@@ -690,8 +690,18 @@ manifest makes the app installable.
     tooltip that HTTPS is required and the banner is not shown; on iOS outside an
     installed PWA the banner explains "Add to Home Screen" instead of Turn on.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
-- Light/dark theme follows the system. Visual design is done during
-  implementation with the `frontend-design` skill.
+- **Theme switcher**: an icon-only button in the header, immediately left of the
+  notifications bell (`aria-haspopup="menu"`, `aria-label` "Theme: <choice>").
+  Its icon shows the current choice: monitor (System), sun (Light), moon (Dark).
+  It opens a three-item menu (`menuitemradio`, check mark on the current one).
+  - System follows `prefers-color-scheme` and reacts to OS changes live; Light
+    and Dark set `data-theme="light"|"dark"` on `<html>`.
+  - The choice is stored per device in `localStorage` (`novelhog.theme`, default
+    `system`); if storage is unavailable the app uses System.
+  - A small inline script in `index.html` applies the stored theme before first
+    paint, so a reload never flashes the wrong theme.
+  - All colours are design tokens defined for both themes.
+- Visual design is done during implementation with the `frontend-design` skill.
 
 ## 11. Error handling
 
@@ -746,9 +756,10 @@ manifest makes the app installable.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
   paragraphs in output.
-- **Frontend:** Vitest + Testing Library for grid selection, SSE cache updates and
-  the notifications toggle states; one Playwright smoke test of the main flow
-  against a fake backend.
+- **Frontend:** Vitest + Testing Library for grid selection, SSE cache updates,
+  the notifications toggle states, and the theme switcher (stored choice applied,
+  System follows `prefers-color-scheme` changes, storage unavailable falls back
+  to System); one Playwright smoke test of the main flow against a fake backend.
 - No live-site tests in CI. `scripts/smoke_live.sh <url>` exists for manual
   checks.
 
