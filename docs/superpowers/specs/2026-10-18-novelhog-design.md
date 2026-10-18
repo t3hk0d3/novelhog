@@ -789,6 +789,52 @@ manifest makes the app installable.
   - All colours are design tokens defined for both themes.
 - Visual design is done during implementation with the `frontend-design` skill.
 
+### Sketches
+
+Static captures of the approved sketches, as a visual guide for implementers.
+Novel titles, chapter states and numbers are made-up sample data. Where a
+sketch and the text above differ, the text wins.
+
+**Library**: cards, header theme switcher and bell, push banner (device not
+subscribed).
+
+![Library](sketches/library.png)
+
+**Add novel dialog**
+
+![Add novel dialog](sketches/add-novel.png)
+
+**Notification banner**: default, iOS not installed, permission blocked, phone
+width, header bell states, theme menu.
+
+![Notification banner states](sketches/notification-banner.png)
+
+**Chapters, desktop, normal mode**: search, state filters, overview bar with
+frame, range chips, table with chevron status tabs; clicking a row opens
+details.
+
+![Desktop chapters, normal mode](sketches/desktop-normal-mode.png)
+
+**Chapters, desktop, select mode**: drawn checkboxes, header checkbox in the
+"some" state, plain status tabs, action bar.
+
+![Desktop chapters, select mode](sketches/desktop-select-mode.png)
+
+**Chapter details, desktop dialog**
+
+![Chapter details dialog](sketches/desktop-chapter-details.png)
+
+**Chapters, phone**: normal mode and select mode.
+
+<p>
+  <img src="sketches/phone-normal-mode.png" alt="Phone chapters, normal mode" width="300">
+  <img src="sketches/phone-select-mode.png" alt="Phone chapters, select mode" width="300">
+</p>
+
+**Chapter details, phone bottom sheet**
+
+<img src="sketches/phone-chapter-details.png" alt="Chapter details bottom sheet" width="300">
+
 ## 11. Error handling
 
 - `domain` and `repo` raise domain exceptions; only `api` maps them to HTTP.
