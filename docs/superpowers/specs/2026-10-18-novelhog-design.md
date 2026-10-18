@@ -609,11 +609,11 @@ manifest makes the app installable.
 ### Screens
 
 1. **Library (`/`)**: cards with cover (placeholder if none), title, host, a
-   stacked bar of downloaded / pending / error over total, a "N new" badge, a
+   stacked bar of downloaded / pending / error over total, a "N new" badge, the
    follow toggle, and a syncing/downloading indicator. "Add novel" button. Empty
    state with explanation.
 2. **Add novel (dialog)**: URL → Preview (title, host, cover) → editable title,
-   "Follow" checkbox (checked) → Add. Closes immediately; the new card shows
+   follow toggle (on by default) → Add. Closes immediately; the new card shows
    "Importing table of contents…" until the first `novel` event. `422
    unsupported_host` shows the supported-host list; `502` shows the message with
    Retry.
@@ -629,10 +629,24 @@ manifest makes the app installable.
    - Sticky action bar: Download, Cancel, Retry errors, Export EPUB… (range +
      chapters per book). PATCH results shown as a toast: "Queued N · skipped M".
    - Exports panel: filename, range, size, date, download link.
-- **Notifications toggle** in the header: requests permission, subscribes via
-  `PushManager` with the VAPID key, posts the subscription; off → unsubscribe and
-  `DELETE`. Over plain HTTP it is disabled with an explanation that HTTPS is
-  required; on iOS it explains "Add to Home Screen" first.
+- **Follow toggle**: a pill button with a star icon (`aria-pressed`). Following:
+  solid gold star, label "Following". Not following: grey outline star, label
+  "Follow". Used on library cards, the novel header and the add dialog.
+- **Device notifications** (only when `/settings` reports `push_enabled`):
+  - Header: a small icon-only bell button (`aria-label` "Notifications on this
+    device: on/off"); outline when this device is not subscribed, filled when it
+    is. Clicking it subscribes or unsubscribes this device.
+  - Banner below the header, shown only while this device is not subscribed and
+    the banner has not been dismissed: "Get a notification on this device when a
+    followed novel has new chapters." with **Turn on** and a dismiss (×) button.
+    Dismissal is stored in `localStorage` (`novelhog.pushBannerDismissed`); if
+    storage is unavailable the banner simply shows again next load. Subscribing
+    hides it.
+  - Subscribing requests permission, calls `PushManager.subscribe` with
+    `vapid_key`, then `POST /push/subscriptions`; unsubscribing calls
+    `unsubscribe()` and `DELETE`. Over plain HTTP the bell is disabled with a
+    tooltip that HTTPS is required and the banner is not shown; on iOS outside an
+    installed PWA the banner explains "Add to Home Screen" instead of Turn on.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
 - Light/dark theme follows the system. Visual design is done during
   implementation with the `frontend-design` skill.
