@@ -1,6 +1,6 @@
 # novelhog — Design Spec
 
-- **Date:** 2026-10-18
+- **Date:** 2026-10-18 (revised 2026-10-19)
 - **Status:** Approved in brainstorming; pending written-spec review
 - **Repo:** `~/dev/novel-shelf` (directory name is incidental; the project is `novelhog`)
 
@@ -8,75 +8,89 @@
 
 novelhog is a self-hosted web UI around
 [`web-novel-scraper`](https://github.com/ImagineBrkr/web-novel-scraper). It lets
-one person on a home LAN keep a library of web novels, queue chapters for
-background download, and export chapter ranges to EPUB for phones and e-readers.
+one person keep a library of web novels, have new chapters discovered and
+downloaded in the background, get push notifications for new releases, and export
+chapter ranges to EPUB for phones and e-readers.
 
 ### Success criteria
 
-1. Add a novel from any URL whose host `web-novel-scraper` supports; the title and
-   cover are detected, and the TOC is synced.
-2. Queue a single chapter or a range; downloads continue with the browser closed
-   and progress is visible live from any device.
-3. Export a downloaded range to an EPUB with a cover, without ads or empty
-   paragraphs, and download it from any LAN device.
-4. Running `docker compose up` next to an existing FlareSolverr is the whole
-   deployment.
+1. Add a novel from any URL whose host `web-novel-scraper` supports; title and
+   cover are detected and the TOC is imported in the background.
+2. Queue a single chapter, a list or a range; downloads continue with the browser
+   closed and progress is visible live from any device.
+3. Every novel's TOC is re-checked automatically, more often for active novels
+   and down to monthly for dormant ones.
+4. For followed novels, new chapters download automatically and a push
+   notification arrives even when no novelhog tab is open.
+5. Export a downloaded range to an EPUB with a cover, without ads or empty
+   paragraphs, and download it from any device.
+6. `docker compose up` next to an existing FlareSolverr, behind the user's own
+   HTTPS reverse proxy, is the whole deployment.
 
 ### In scope (v1)
 
-- Library, add novel (preview → create), TOC sync.
-- Chapter queueing (single, list, range), dequeue, retry errors, live progress.
-- EPUB export and download.
-- Cover detection and display.
+- Library, add novel (preview → create), automatic and manual TOC sync with
+  adaptive interval.
+- Follow switch: auto-download of new chapters + Web Push notifications.
+- Chapter queueing (single, list, range), dequeue, retry, live progress.
+- "New" badges for chapters released since the novel page was last opened.
+- EPUB export and download; cover detection and display.
+- Installable PWA (required for push on iOS).
 
 ### Out of scope (v1)
 
 - In-browser reader, full-text search, metadata editing, deleting novels.
-- Authentication (LAN-only, no auth; a reverse proxy can add it later).
+- Authentication (no auth; the reverse proxy can add it).
+- TLS termination (done by the user's reverse proxy).
 - Manual cover upload.
 - Splitting site "pages" into the novel's real chapters (titles are shown as the
   site provides them, e.g. fanmtl's "Page N").
-- S3 static backend (the interface exists; only the local backend ships).
-- Worker wake-up ("poke"); see §11.
+- S3 static backend (interface exists; only the local backend ships).
+- Worker wake-up ("poke"), see §12.
 
 ## 2. Architecture
 
 ```
- Browser (React SPA)
-      │  REST /api/v1  +  SSE /api/v1/events      static: STATIC_BASE_URL (/static)
+ Browser (React PWA + service worker)
+      │  REST /api/v1  +  SSE /api/v1/events        static: STATIC_BASE_URL (/static)
       ▼
- api (FastAPI) ───────── reads/writes ─────────►  SQLite  /data/app.db  (WAL)
-      │  serves SPA at /, static files at /static        ▲
-      │                                                  │ lease novel, claim batch,
-      ▼                                                  │ write content + changes
- /data/static  ◄──── writes covers/exports ──── worker ──┘
-                                                  │ web_novel_scraper (library)
-                                                  ▼
-                                             FlareSolverr ──► novel sites
+ HTTPS reverse proxy (user's)
+      ▼
+ api (FastAPI) ─────── reads/writes ───────►  SQLite  /data/app.db  (WAL)
+      │  serves SPA at /, /static, /sw.js              ▲
+      │  preview: read-only site fetch                 │ lease novel → sync TOC / claim batch,
+      │                                                │ write chapters, content, changes
+ /data/static ◄── covers ── worker ────────────────────┘
+ (exports written by api)     │ web_novel_scraper (library)         Web Push
+                              ├──────────► FlareSolverr ──► sites   ─────────► browser push service
 ```
 
 | Component | Responsibility |
 |---|---|
-| `api` | FastAPI app. REST under `/api/v1`, SSE stream, serves the built SPA at `/` and local static files at `/static`. Performs short synchronous operations: preview, export, and create/sync (the latter two under the novel lease). |
-| `worker` | Separate process/container from the same image. Polls SQLite for `pending` chapters, leases a novel, claims a batch, downloads → converts → stores each chapter. |
-| `web` | React SPA, built to static files and served by `api` (single origin, no CORS). |
-| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, change log. Accessed only through the repository layer. |
-| Static storage | Covers and EPUB files, behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
+| `api` | FastAPI app. REST under `/api/v1`, SSE stream, serves the built SPA at `/`, `sw.js` and `manifest.webmanifest` at the root, and local static files at `/static`. Builds EPUBs synchronously from the database. The only site access is `preview` (read-only, no scraper files written). |
+| `worker` | Separate process/container from the same image. The only writer of scraper working files. Runs due TOC syncs (with adaptive scheduling and push notifications) and downloads `pending` chapters in batches. |
+| `web` | React SPA + service worker, built to static files and served by `api` (single origin, no CORS). |
+| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, push subscriptions, change log. Accessed only through the repository layer. |
+| Static storage | Covers and EPUB files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
 
 ### Deployment
 
 - `compose.yaml` with services `novelhog-api` and `novelhog-worker`, one image,
   different commands (`novelhog api`, `novelhog worker`).
 - Both mount the `/data` volume and join FlareSolverr's Docker network.
-- `novelhog-api` publishes one LAN port (default `8080`).
+- `novelhog-api` publishes one port (default `8080`) for the reverse proxy.
+- The reverse proxy must terminate HTTPS (required for service workers and push),
+  disable response buffering for `/api/v1/events`, and not cache `/sw.js`. The
+  README includes Caddy and nginx snippets.
 - Scaling workers (`--scale novelhog-worker=N`) is safe on one host; multi-host
-  clustering requires a networked database (§11).
+  clustering requires a networked database (§12).
 
 ## 3. Identifiers
 
 - Format: two-letter uppercase type prefix + 12 random characters from
   `[a-z0-9]`, generated with `secrets`.
-  - `NV` novel, `CH` chapter, `EX` export. Example: `CHk3x9q2m7b4wz`.
+  - `NV` novel, `CH` chapter, `EX` export, `PS` push subscription.
+    Example: `CHk3x9q2m7b4wz`.
 - 36¹² ≈ 4.7·10¹⁸ (~62 bits). Primary keys are unique; an insert that collides is
   retried with a fresh ID.
 - IDs carry no ordering. Every listing orders by an explicit column
@@ -84,74 +98,132 @@ background download, and export chapter ranges to EPUB for phones and e-readers.
 - An ID with the wrong prefix or format in a path or body is treated as unknown →
   `404`.
 
-## 4. Data model (SQLite)
+## 4. Database schema (SQLite)
 
-All timestamps are UTC ISO-8601 strings. Schema is the contract; column types are
-SQLite affinities.
+SQLite ≥ 3.45, WAL mode, `foreign_keys = ON`. Timestamps are UTC ISO-8601 TEXT
+(`2026-10-19T08:15:00Z`). Schema version is tracked with `PRAGMA user_version`;
+migrations are numbered SQL files `migrations/NNNN_<name>.sql`, applied at startup
+in one transaction each. This DDL is the contract.
 
-### `novels`
+```sql
+CREATE TABLE novels (
+    id                TEXT PRIMARY KEY
+                      CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NV'
+                             AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    title             TEXT NOT NULL UNIQUE,      -- also the scraper's novel identifier
+    host              TEXT NOT NULL,
+    toc_url           TEXT NOT NULL,
+    cover_key         TEXT,                      -- static storage key; NULL = no cover
+    followed          INTEGER NOT NULL DEFAULT 1 CHECK (followed IN (0, 1)),
+    refresh_interval  INTEGER NOT NULL CHECK (refresh_interval > 0),  -- seconds, current
+    next_refresh_at   TEXT NOT NULL,
+    last_refreshed_at TEXT,                      -- NULL = initial import not done yet
+    seen_at           TEXT,                      -- last time the novel page was opened
+    lease_owner       TEXT,                      -- worker id
+    lease_expires_at  TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
+) STRICT;
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT PK | `NV…` |
-| `title` | TEXT UNIQUE | Also the scraper's novel identifier |
-| `host` | TEXT | From the TOC URL |
-| `toc_url` | TEXT | |
-| `cover_key` | TEXT NULL | Static storage key |
-| `lease_owner` | TEXT NULL | Worker ID or `api:<uuid>` |
-| `lease_expires_at` | TEXT NULL | |
-| `created_at`, `updated_at` | TEXT | |
+CREATE INDEX novels_due_refresh ON novels (next_refresh_at);
 
-### `chapters`
+CREATE TABLE chapters (
+    id           TEXT PRIMARY KEY
+                 CHECK (length(id) = 14 AND substr(id, 1, 2) = 'CH'
+                        AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    novel_id     TEXT NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+    number       INTEGER NOT NULL CHECK (number >= 1),   -- 1-based TOC position
+    url          TEXT NOT NULL,
+    title        TEXT,                                   -- set after download
+    state        TEXT NOT NULL DEFAULT 'not_requested'
+                 CHECK (state IN ('not_requested', 'pending', 'downloading',
+                                  'downloaded', 'error')),
+    error        TEXT,
+    has_images   INTEGER NOT NULL DEFAULT 0 CHECK (has_images IN (0, 1)),
+    released_at  TEXT,                                   -- NULL = part of initial import
+    queued_at    TEXT,
+    claimed_by   TEXT,
+    updated_at   TEXT NOT NULL,
+    UNIQUE (novel_id, number),
+    CHECK (error IS NULL OR state IN ('error', 'pending')),
+    CHECK ((state = 'pending') = (queued_at IS NOT NULL)),
+    CHECK ((state = 'downloading') = (claimed_by IS NOT NULL))
+) STRICT;
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT PK | `CH…` |
-| `novel_id` | TEXT FK | |
-| `number` | INTEGER | 1-based position in the TOC; `UNIQUE(novel_id, number)` |
-| `url` | TEXT | |
-| `title` | TEXT NULL | Set after download |
-| `state` | TEXT | `not_requested \| pending \| downloading \| downloaded \| error` |
-| `error` | TEXT NULL | Short message for `error` |
-| `has_images` | INTEGER | 0/1 |
-| `queued_at` | TEXT NULL | Set when moved to `pending` |
-| `claimed_by` | TEXT NULL | Worker ID while `downloading` |
-| `updated_at` | TEXT | |
+CREATE INDEX chapters_queue    ON chapters (queued_at) WHERE state = 'pending';
+CREATE INDEX chapters_claim    ON chapters (novel_id, state, number);
+CREATE INDEX chapters_released ON chapters (novel_id, released_at)
+    WHERE released_at IS NOT NULL;
 
-Index: `(state, novel_id, number)` for claiming.
+CREATE TABLE chapter_contents (
+    chapter_id TEXT PRIMARY KEY REFERENCES chapters (id) ON DELETE CASCADE,
+    markdown   TEXT NOT NULL,                    -- images inline as data: URIs
+    fetched_at TEXT NOT NULL
+) STRICT;
 
-### `chapter_contents`
+CREATE TABLE exports (
+    id          TEXT PRIMARY KEY
+                CHECK (length(id) = 14 AND substr(id, 1, 2) = 'EX'
+                       AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    novel_id    TEXT NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+    start       INTEGER NOT NULL CHECK (start >= 1),
+    "end"       INTEGER NOT NULL,
+    filename    TEXT NOT NULL,                   -- '<Title> Chapters <start>-<end>.epub'
+    storage_key TEXT NOT NULL UNIQUE,
+    size_bytes  INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_at  TEXT NOT NULL,
+    CHECK ("end" >= start)
+) STRICT;
 
-| Column | Type | Notes |
-|---|---|---|
-| `chapter_id` | TEXT PK FK | |
-| `markdown` | TEXT | Chapter body; images inline as `data:` URIs |
-| `fetched_at` | TEXT | |
+CREATE INDEX exports_by_novel ON exports (novel_id, created_at);
 
-### `exports`
+CREATE TABLE push_subscriptions (
+    id         TEXT PRIMARY KEY
+               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'PS'
+                      AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    endpoint   TEXT NOT NULL UNIQUE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    user_agent TEXT,
+    created_at TEXT NOT NULL
+) STRICT;
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT PK | `EX…` |
-| `novel_id` | TEXT FK | |
-| `start`, `end` | INTEGER | Inclusive chapter numbers |
-| `filename` | TEXT | `<Title> Chapters <start>-<end>.epub` |
-| `storage_key` | TEXT | |
-| `size_bytes` | INTEGER | |
-| `created_at` | TEXT | |
+CREATE TABLE changes (
+    seq      INTEGER PRIMARY KEY AUTOINCREMENT,  -- SSE event id
+    novel_id TEXT,                               -- NULL for global events
+    kind     TEXT NOT NULL CHECK (kind IN ('chapter', 'novel', 'export', 'release')),
+    payload  TEXT NOT NULL CHECK (json_valid(payload)),
+    at       TEXT NOT NULL
+) STRICT;
 
-### `changes`
+CREATE INDEX changes_by_novel ON changes (novel_id, seq);
+CREATE INDEX changes_by_time  ON changes (at);
+```
 
-| Column | Type | Notes |
-|---|---|---|
-| `seq` | INTEGER PK AUTOINCREMENT | SSE event ID |
-| `novel_id` | TEXT | |
-| `kind` | TEXT | `chapter \| novel \| export` |
-| `payload` | TEXT | JSON event body (§5.6) |
-| `at` | TEXT | |
+Notes:
 
-Every state-changing write appends to `changes` in the same transaction. Rows
-older than 24 h are pruned by the API on a timer.
+- Every state-changing write appends to `changes` in the same transaction. The API
+  prunes rows older than 24 h on a timer.
+- `error` may stay set while a chapter is re-queued (`pending`); the worker clears
+  it when it next processes the chapter.
+- The VAPID key pair lives in `/data/vapid.json`, not in the database, so a
+  database restore never changes the server's push identity. It is generated on
+  first start and never regenerated.
+- `ON DELETE CASCADE` is declared now so that deleting a novel later needs only a
+  route.
+
+### Derived values (not stored)
+
+| Value | Definition |
+|---|---|
+| `total_pages` | count of chapters |
+| `downloaded_pages` | count with `state = 'downloaded'` |
+| `pending_pages` | count with `state IN ('pending', 'downloading')` |
+| `error_pages` | count with `state = 'error'` |
+| `new_pages` | count with `released_at IS NOT NULL AND (seen_at IS NULL OR released_at > seen_at)` |
+| `syncing` | `next_refresh_at <= now` or the novel is leased by a worker running a sync |
+| `cover_url`, `Export.url` | `STATIC_BASE_URL` + storage key |
 
 ## 5. API
 
@@ -160,21 +232,25 @@ Base path `/api/v1`. JSON in/out. OpenAPI generated by FastAPI.
 ### 5.1 Routes
 
 ```
-GET   /api/v1/hosts
-GET   /api/v1/novels
-POST  /api/v1/novels/preview
-POST  /api/v1/novels
-GET   /api/v1/novels/{novel_id}
-POST  /api/v1/novels/{novel_id}/sync
-GET   /api/v1/novels/{novel_id}/chapters
-PATCH /api/v1/novels/{novel_id}/chapters
-GET   /api/v1/novels/{novel_id}/exports
-POST  /api/v1/novels/{novel_id}/exports
-GET   /api/v1/events
+GET    /api/v1/hosts
+GET    /api/v1/novels
+POST   /api/v1/novels/preview
+POST   /api/v1/novels
+GET    /api/v1/novels/{novel_id}
+PATCH  /api/v1/novels/{novel_id}
+POST   /api/v1/novels/{novel_id}/sync
+GET    /api/v1/novels/{novel_id}/chapters
+PATCH  /api/v1/novels/{novel_id}/chapters
+GET    /api/v1/novels/{novel_id}/exports
+POST   /api/v1/novels/{novel_id}/exports
+GET    /api/v1/push/vapid-key
+POST   /api/v1/push/subscriptions
+DELETE /api/v1/push/subscriptions/{subscription_id}
+GET    /api/v1/events
 ```
 
 Static files (covers, EPUBs) are not API routes; they are addressed by URLs built
-from `STATIC_BASE_URL` (§7).
+from `STATIC_BASE_URL` (§8.3).
 
 ### 5.2 Objects
 
@@ -184,15 +260,21 @@ scraper's decode guide.
 **Novel**
 
 ```
-id                 string   NV…
+id                 string          NV…
 title              string
 host               string
 toc_url            string
-cover_url          string | null    STATIC_BASE_URL-based URL
+cover_url          string | null
+followed           bool
+syncing            bool
+refresh_interval   int             seconds, current adaptive interval
+next_refresh_at    string
+last_refreshed_at  string | null
 total_pages        int
 downloaded_pages   int
-pending_pages      int              pending + downloading
+pending_pages      int
 error_pages        int
+new_pages          int
 created_at         string
 updated_at         string
 ```
@@ -207,6 +289,7 @@ title        string | null
 state        "not_requested" | "pending" | "downloading" | "downloaded" | "error"
 error        string | null
 has_images   bool
+released_at  string | null
 updated_at   string
 ```
 
@@ -219,7 +302,7 @@ filename     string
 start        int
 end          int
 size_bytes   int
-url          string   STATIC_BASE_URL-based URL
+url          string
 created_at   string
 ```
 
@@ -235,15 +318,19 @@ bounds, no extra keys.
 | Route | Request | Response | Errors |
 |---|---|---|---|
 | `GET /hosts` | — | `Host[]` | — |
-| `GET /novels` | — | `Novel[]` ordered by `created_at` desc | — |
+| `GET /novels` | — | `Novel[]` by `created_at` desc | — |
 | `POST /novels/preview` | `{url}` | `{title, host, toc_url, cover_url}`; `cover_url` is the remote URL | `422 unsupported_host`, `502 upstream_failed` |
-| `POST /novels` | `{title, toc_url}` | `201 Novel` after TOC sync and best-effort cover fetch | `409 title_exists`, `422 unsupported_host`, `502 upstream_failed` |
+| `POST /novels` | `{title, toc_url, followed?: bool = true}` | `201 Novel` immediately, with no chapters and `syncing = true` | `409 title_exists`, `422 unsupported_host` |
 | `GET /novels/{id}` | — | `Novel` | `404` |
-| `POST /novels/{id}/sync` | — | `Novel` | `404`, `409 novel_leased`, `502` |
+| `PATCH /novels/{id}` | `{followed?: bool, seen?: true}` | `Novel` | `404`, `422` |
+| `POST /novels/{id}/sync` | — | `202 Novel` | `404` |
 
-Sync upserts chapters by `number`: new numbers are inserted as `not_requested`;
-existing rows keep their state; a changed URL for an existing number updates the
-URL. Cover is fetched only if `cover_key` is null.
+- `POST /novels` sets `refresh_interval = REFRESH_MIN_INTERVAL` and
+  `next_refresh_at = now`; the worker performs the initial import.
+- `POST /sync` sets `next_refresh_at = now`. The result arrives over SSE.
+- `PATCH {seen: true}` sets `seen_at = now` (resets `new_pages`). The UI sends it
+  when the novel page is opened.
+- `PATCH {followed}` only changes the flag; it does not change the schedule.
 
 ### 5.4 Chapters
 
@@ -256,8 +343,6 @@ URL. Cover is fetched only if `cover_key` is null.
 request:  {state: "pending" | "not_requested", chapters: <selector>}
 response: {updated: int[], skipped: [{number: int, state: <current state>}]}
 ```
-
-Allowed client transitions:
 
 | From | To | Effect |
 |---|---|---|
@@ -274,11 +359,18 @@ Chapters in any other state are listed in `skipped`. Requesting `downloading`,
 | `GET /novels/{id}/exports` | — | `Export[]` by `created_at` desc | `404` |
 | `POST /novels/{id}/exports` | `{chapters: {start, end}, chapters_per_book?: int}` | `201 Export[]` (one per book) | `404`, `422` (list selector, or range not fully `downloaded`; `details.missing: int[]`) |
 
-`chapters_per_book` defaults to the full range (one book). Exports read only
-`chapter_contents` and the cover, never the scraper's working files, so they do
-not take the novel lease and can run while the worker downloads other chapters.
+`chapters_per_book` defaults to the full range. Exports read only the database
+and the cover, so they need no lease and can run while the worker is busy.
 
-### 5.6 Events (SSE)
+### 5.6 Push
+
+| Route | Request | Response | Errors |
+|---|---|---|---|
+| `GET /push/vapid-key` | — | `{public_key}` (URL-safe base64) | — |
+| `POST /push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 {id}`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422` |
+| `DELETE /push/subscriptions/{id}` | — | `204` | `404` |
+
+### 5.7 Events (SSE)
 
 `GET /api/v1/events?novel_id=<id>` (filter optional).
 
@@ -287,6 +379,7 @@ not take the novel lease and can run while the worker downloads other chapters.
 | `chapter` | `{novel_id, chapter_id, number, state, error, title}` |
 | `novel` | `Novel` |
 | `export` | `Export` |
+| `release` | `{novel_id, numbers: int[]}`: new chapters found by a sync |
 | `resync` | `{}`: client must refetch over REST |
 
 - `id:` of every event is `changes.seq`.
@@ -295,57 +388,85 @@ not take the novel lease and can run while the worker downloads other chapters.
 - The API polls `changes` about once per second and pushes new rows.
 - A comment line is sent every 15 s as keepalive.
 
-### 5.7 Status codes
+### 5.8 Status codes
 
-`404` unknown or malformed ID; `409` conflict (`novel_leased`, `title_exists`);
-`422` validation (including FastAPI's own validation errors, reshaped into the
-error body); `502` upstream (site or FlareSolverr) failure; `500` unexpected,
-generic message, traceback only in logs.
+`404` unknown or malformed ID; `409 title_exists`; `422` validation (including
+FastAPI's own errors, reshaped into the error body); `502 upstream_failed`
+(preview only); `503 push_disabled` (push routes when push is not configured);
+`500` unexpected, generic message, traceback only in logs.
 
 ## 6. Worker
 
 ### 6.1 Loop
 
 ```
-on start:  recover()
+on start: recover()
 loop:
     if shutting_down: exit
-    recover()                                   # cheap; expired leases only
-    novel = lease_next_novel()                  # oldest queued_at among novels with
-                                                # pending chapters and free/expired lease
-    if novel is none:
-        sleep(IDLE_SLEEP); continue
-    batch = claim(novel, BATCH_SIZE)            # lowest numbers first → downloading
-    for chapter in batch:
-        if shutting_down: requeue(rest of batch); break
-        if state(chapter) != downloading: continue   # dequeued meanwhile
-        try: fetch → convert → store → downloaded
-        except: error(message)
-        renew_lease(novel); sleep(REQUEST_DELAY)
-    release_lease(novel)
+    recover()                                        # expired leases only
+    if novel = lease_due_refresh():                  # next_refresh_at <= now, free lease,
+        refresh(novel); release_lease(novel)         # oldest next_refresh_at first
+        continue
+    if novel = lease_next_download():                # oldest queued_at with free lease
+        batch = claim(novel, BATCH_SIZE)             # lowest numbers → downloading
+        for chapter in batch:
+            if shutting_down: requeue(rest); break
+            if state(chapter) != downloading: continue   # dequeued meanwhile
+            try: fetch → convert → store → downloaded, error cleared
+            except: error(message)
+            renew_lease(novel); sleep(REQUEST_DELAY)
+        release_lease(novel)
+        continue
+    sleep(IDLE_SLEEP)
 ```
 
-- `lease_next_novel` and `claim` are each one atomic transaction.
-- `recover()` moves `downloading` chapters of novels whose lease has expired back
-  to `pending` and clears the lease.
-- On SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch
-  (`downloading` → `pending`), release the lease, exit 0.
-- Errors in the loop itself (e.g. database locked) are logged, followed by a
-  backoff of 5 s, 10 s, 20 s, … capped at `IDLE_SLEEP`.
+- Each lease/claim step is one atomic transaction.
+- `recover()` moves `downloading` chapters of novels whose lease expired back to
+  `pending` and clears the lease.
+- SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch,
+  release the lease, exit 0.
+- Errors in the loop itself (e.g. database locked) are logged, then back off 5 s,
+  10 s, 20 s, … capped at `IDLE_SLEEP`.
+- Refreshes take priority over downloads because they are short.
 
-### 6.2 Novel lease
+### 6.2 Refresh (TOC sync)
 
-- One writer per novel at a time, because the scraper rewrites its working
-  `main.json` on TOC operations.
-- The worker holds the lease while processing a batch and renews it after each
-  chapter (`lease_expires_at = now + LEASE_TTL`).
-- The API takes the same lease (`owner = api:<uuid>`, short TTL) for `create`
-  and `sync`, or answers `409 novel_leased`. Export does not need it (§5.5).
+```
+refresh(novel):
+    initial = novel.last_refreshed_at is null
+    try:
+        toc = scraper_adapter.sync_toc(novel.title, novel.toc_url)   # [(number, url)]
+    except:
+        log; interval = min(interval * 2, MAX); schedule; return
+    new = upsert chapters by number (existing rows keep state; changed URL updated)
+    for each new chapter:
+        released_at = null if initial else now
+        state = pending (queued_at = now) if novel.followed and not initial else not_requested
+    if cover_key is null: try fetch cover (failure is logged, never fatal)
+    last_refreshed_at = now
+    interval = MIN if new and not initial else min(interval * 2, MAX)
+    next_refresh_at = now + interval ± 10% jitter
+    append changes: novel; release {numbers} if new and not initial
+    if new and not initial and novel.followed: notifier.notify_release(novel, numbers)
+```
 
-### 6.3 Per-chapter pipeline
+- Initial import never sets `released_at`, never auto-queues, never notifies.
+- With `MIN = 6 h`, `MAX = 30 d` the interval walks 6 h → 12 h → 1 d → 2 d → 4 d
+  → 8 d → 16 d → 30 d while nothing is found, and resets to 6 h on any release.
+- A failed sync backs off the same way, so a dead site settles at monthly; a
+  manual sync forces an immediate retry.
+
+### 6.3 Novel lease
+
+- One writer of a novel's scraper working files at a time. Only the worker takes
+  leases (`lease_owner = worker id`, `lease_expires_at = now + LEASE_TTL`),
+  renewed after each chapter.
+- The API never touches scraper working files and never takes a lease.
+
+### 6.4 Per-chapter pipeline
 
 1. `scraper_adapter.fetch_chapter(title, number)` → `{title, body_html, http_session}`.
-   The body is selected with the scraper's decoder content selector for the host;
+   The body is selected with the scraper decoder's content selector for the host;
    the scraper's own cleaner is not used.
 2. `html_to_markdown.convert(body_html, fetch_image)` → `{markdown, has_images, warnings}`.
 3. `chapter_store.put(chapter_id, markdown)`; the chapter row gets `title`,
@@ -359,17 +480,18 @@ Package `novelhog`, under `src/novelhog/`.
 |---|---|
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
-| `domain` | Chapter state rules, selector validation, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`, `UpstreamFailed`) |
-| `repo` | All SQL: novels, chapters, contents, exports, changes, leases, claiming. The only module that talks to SQLite |
-| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts()`, `preview(url)`, `create(title, toc_url)`, `sync_toc(title) -> [(number, url)]`, `fetch_chapter(title, number)`, `find_cover_url(toc_html, toc_url)`. Builds `SCRAPER_*` env/config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). |
+| `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`, `UpstreamFailed`) |
+| `repo` | All SQL, migrations, leases, claiming, change log. The only module that talks to SQLite |
+| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts()`, `preview(url)`, `sync_toc(title, toc_url) -> [(number, url)]` (creates the scraper novel on first use), `fetch_chapter(title, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr) |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
-| `html_to_markdown` | Converts the chapter body to Markdown (§8.1) |
+| `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Plain HTTP image download reusing FlareSolverr cookies and user agent; validation (§8.2) |
 | `chapter_store` | `put(chapter_id, markdown)`, `get(chapter_id)` over `chapter_contents` |
-| `storage` | `StaticStorage` interface: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
+| `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
 | `exporter` | Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → EPUB (`ebooklib`); cover; inline images extracted to EPUB items |
-| `api` | FastAPI app, routers, SSE, error handlers, static mounts |
-| `worker` | Loop, signal handling, recovery |
+| `notifier` | `notify_release(novel, numbers)`: sends one Web Push to every subscription via `pywebpush`; deletes subscriptions answered with `404`/`410`; logs other failures, no retry. VAPID key load/generate |
+| `api` | FastAPI app, routers, SSE, error handlers, static mounts, `sw.js` and manifest |
+| `worker` | Loop, refresh, downloads, signal handling, recovery |
 | `cli` | `novelhog api`, `novelhog worker` |
 
 ### Site support
@@ -395,47 +517,54 @@ Package `novelhog`, under `src/novelhog/`.
   tilde, and a leading `-`, `+` or `<digits>.` at the start of a line.
 - Paragraphs are separated by one blank line; empty paragraphs are dropped.
 - In-text headings such as "Chapter 29 …" remain plain paragraphs.
-- `img` → `![alt](data:<mime>;base64,…)` via `image_fetcher`; failure →
-  the literal text `[image unavailable]` plus a warning; the chapter still
-  succeeds. `has_images` is true if at least one image was embedded.
+- `img` → `![alt](data:<mime>;base64,…)` via `image_fetcher`; failure → the
+  literal text `[image unavailable]` plus a warning; the chapter still succeeds.
+  `has_images` is true if at least one image was embedded.
 
 ### 8.2 Images (chapter images and covers)
 
 - Fetched over plain HTTP with the cookies and user agent from the FlareSolverr
   session (FlareSolverr itself returns HTML only).
-- Type detected from magic bytes; allowed: PNG, JPEG, GIF, WebP. SVG and
-  anything else are rejected.
+- Type detected from magic bytes; allowed: PNG, JPEG, GIF, WebP. SVG and anything
+  else are rejected.
 - Size cap `NOVELHOG_MAX_IMAGE_BYTES` (default 2 MiB).
-- Chapter images are inlined in Markdown. Covers go to static storage.
-- A cover failure never fails create or sync.
+- Chapter images are inlined in Markdown; covers go to static storage.
 
 ### 8.3 Static storage keys
 
 - Covers: `covers/<novel_id>/<sha256[:16]>.<ext>` (content-addressed, cached as
   immutable).
-- Exports: `exports/<novel_id>/<export_id>/<Title> Chapters <start>-<end>.epub`.
-  The last path segment is the download filename.
-- `LocalStaticStorage` writes under `/data/static` and the API serves it at
+- Exports: `exports/<novel_id>/<export_id>/<Title> Chapters <start>-<end>.epub`;
+  the last path segment is the download filename (URL-encoded in URLs).
+- `LocalStaticStorage` writes under `/data/static`; the API serves it at
   `/static` with long-lived cache headers; EPUBs get
   `Content-Disposition: attachment`.
 
 ### 8.4 EPUB
 
-- One XHTML document per chapter, in `number` order; its heading is the chapter
-  title as stored.
-- The cover, when present, is set as the book cover.
+- One XHTML document per chapter in `number` order, headed by the stored title.
+- The cover, when present, is the book cover.
 - Inline `data:` images become EPUB image items.
-- Metadata: title, language from the scraper metadata if known, identifier =
-  export ID.
+- Metadata: title; identifier = export ID.
+
+### 8.5 Push notification
+
+- Payload: `{title: <novel title>, body: "<N> new chapters (<first>–<last>)",
+  url: <PUBLIC_URL>/novels/<id>, icon: <cover_url or app icon>}`.
+- The service worker shows it and opens/focuses `url` on click.
 
 ## 9. Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NOVELHOG_DATA_DIR` | `/data` | Holds `app.db`, `work/`, `static/` |
+| `NOVELHOG_DATA_DIR` | `/data` | Holds `app.db`, `vapid.json`, `work/`, `static/` |
+| `NOVELHOG_PUBLIC_URL` | — (required for push) | External HTTPS URL, used in push links and the VAPID claim |
+| `NOVELHOG_VAPID_SUBJECT` | — (required for push) | `mailto:` contact for the VAPID claim |
 | `NOVELHOG_FLARESOLVERR_URL` | `http://flaresolverr:8191` | |
 | `NOVELHOG_STATIC_BACKEND` | `local` | Only `local` in v1 |
 | `NOVELHOG_STATIC_BASE_URL` | `/static` | May be an absolute URL (separate domain/CDN) |
+| `NOVELHOG_REFRESH_MIN_INTERVAL` | `21600` (6 h) | |
+| `NOVELHOG_REFRESH_MAX_INTERVAL` | `2592000` (30 d) | |
 | `NOVELHOG_BATCH_SIZE` | `10` | Chapters claimed per batch |
 | `NOVELHOG_LEASE_TTL` | `300` s | |
 | `NOVELHOG_IDLE_SLEEP` | `30` s | Worker sleep when no work |
@@ -444,96 +573,113 @@ Package `novelhog`, under `src/novelhog/`.
 | `NOVELHOG_WORKER_ID` | `<hostname>:<pid>` | |
 | `NOVELHOG_HTTP_PORT` | `8080` | API listen port |
 
+If push variables are missing, push routes return `503 push_disabled` and the UI
+hides the notification toggle; everything else works.
+
 ## 10. UI
 
-React 19 + TypeScript + Vite; TanStack Query for server state; React Router;
-Tailwind CSS with a few local components; API types generated with
-`openapi-typescript` from the FastAPI schema. One app-wide `EventSource` patches
-the query cache from SSE events.
+React 19 + TypeScript + Vite; TanStack Query; React Router; Tailwind CSS with a
+few local components; API types generated with `openapi-typescript`. One app-wide
+`EventSource` patches the query cache from SSE events. Service worker (`sw.js`)
+handles `push` and `notificationclick` only (no offline caching in v1). A web app
+manifest makes the app installable.
 
 ### Screens
 
-1. **Library (`/`)**: novel cards with cover (placeholder if none), title, host,
-   and a stacked bar of downloaded / pending / error over total; an activity
-   indicator while chapters are `downloading`. "Add novel" button. Empty state
-   with explanation.
-2. **Add novel (dialog)**: URL → Preview (shows title, host, cover) → editable
-   title → Add. Spinner text "Fetching table of contents…" (can take 10–60 s).
-   `422 unsupported_host` shows the supported-host list; `502` shows the message
-   with Retry.
-3. **Novel (`/novels/:id`)**
-   - Header: cover, title, host, TOC link, Sync button (shows `409` as "busy
-     downloading, try later"), counters.
-   - Chapter grid: one cell per chapter, coloured by state (`not_requested`
-     grey, `pending` outlined, `downloading` pulsing, `downloaded` solid,
-     `error` red); hover/tap shows number, title, state, error.
+1. **Library (`/`)**: cards with cover (placeholder if none), title, host, a
+   stacked bar of downloaded / pending / error over total, a "N new" badge, a
+   follow toggle, and a syncing/downloading indicator. "Add novel" button. Empty
+   state with explanation.
+2. **Add novel (dialog)**: URL → Preview (title, host, cover) → editable title,
+   "Follow" checkbox (checked) → Add. Closes immediately; the new card shows
+   "Importing table of contents…" until the first `novel` event. `422
+   unsupported_host` shows the supported-host list; `502` shows the message with
+   Retry.
+3. **Novel (`/novels/:id`)**: sends `PATCH {seen: true}` on open.
+   - Header: cover, title, host, TOC link, follow toggle, Sync button,
+     "checked 2 h ago · next in 4 h", counters.
+   - Chapter grid: one cell per chapter coloured by state (`not_requested` grey,
+     `pending` outlined, `downloading` pulsing, `downloaded` solid, `error` red),
+     "new" marker for chapters released since the previous visit; hover/tap shows
+     number, title, state, error.
    - Selection: click, shift-click range (touch: range toggle), From/To inputs,
-     state filter chips (all `not_requested`, all `error`).
-   - Sticky action bar: Download (→ `pending`), Cancel (→ `not_requested`),
-     Retry errors, Export EPUB… (dialog: range + chapters per book). PATCH
-     results shown as a toast: "Queued N · skipped M (reason)".
+     state filter chips.
+   - Sticky action bar: Download, Cancel, Retry errors, Export EPUB… (range +
+     chapters per book). PATCH results shown as a toast: "Queued N · skipped M".
    - Exports panel: filename, range, size, date, download link.
+- **Notifications toggle** in the header: requests permission, subscribes via
+  `PushManager` with the VAPID key, posts the subscription; off → unsubscribe and
+  `DELETE`. Over plain HTTP it is disabled with an explanation that HTTPS is
+  required; on iOS it explains "Add to Home Screen" first.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
 - Light/dark theme follows the system. Visual design is done during
   implementation with the `frontend-design` skill.
 
-## 11. Future work (not part of v1)
+## 11. Error handling
+
+- `domain` and `repo` raise domain exceptions; only `api` maps them to HTTP.
+- The worker never dies on a single chapter or refresh: the chapter goes to
+  `error` with a short message (`<ExceptionType>: <summary>`); a failed refresh is
+  logged and backed off; tracebacks go to logs.
+- The scraper's own retry settings apply to upstream requests.
+- Push failures are logged and not retried; `404`/`410` deletes the subscription.
+- Logging: structured JSON to stdout (`structlog`) with `novel_id`, `chapter_id`,
+  `worker_id`, `host` bound where relevant.
+
+## 12. Future work (not part of v1)
 
 - **Worker wake-up.** A `Waker` interface (`wait(timeout) -> bool` in the worker,
   `notify()` in the API). First implementation: UDP datagram to every address the
-  worker service name resolves to, with the timed sleep kept as a fallback; the
+  worker service name resolves to, with the timed sleep kept as fallback; the
   worker always re-checks the database. With Postgres: `LISTEN/NOTIFY`.
-- **Postgres** for multi-host clustering, behind the existing `repo` layer.
+- **Postgres** for multi-host clustering, behind the `repo` layer.
 - **S3 static backend** (`S3StaticStorage`), setting `Content-Type` and
   `Content-Disposition` per object.
 - **Image table**: move inline images of chapters with `has_images` into a
   content-addressed table.
-- In-browser reader, FTS5 search, manual cover upload, splitting pages into real
-  chapters.
-
-## 12. Error handling
-
-- `domain` and `repo` raise domain exceptions; only `api` maps them to HTTP.
-- The worker never dies on a single chapter: the chapter goes to `error` with a
-  short message (`<ExceptionType>: <summary>`); the traceback is logged.
-- The scraper's own retry settings apply to upstream requests; when exhausted, the
-  chapter goes to `error` and the user retries from the UI.
-- Logging: structured JSON to stdout (`structlog`), with `novel_id`,
-  `chapter_id`, `worker_id` bound where relevant.
+- In-browser reader, FTS5 search, manual cover upload, offline PWA caching,
+  splitting pages into real chapters.
 
 ## 13. Testing
 
 - **Unit:** `ids`; `html_to_markdown` (allowlist, escaping, empty paragraphs,
   images, failure placeholder); `image_fetcher` (magic bytes, SVG rejection, size
   cap); `find_cover_url` (each heuristic, relative URLs); `exporter` (order, cover,
-  image extraction); chapter state rules; selector validation.
-- **Integration (real temporary SQLite):** lease and claim, including two
-  competing workers; recovery of expired leases; SIGTERM requeue; dequeue during a
-  claimed batch; SSE replay from `Last-Event-ID` and `resync`.
+  image extraction); chapter state rules; selector validation; refresh interval
+  rule (reset, doubling, cap, jitter bounds).
+- **Integration (real temporary SQLite):** lease and claim with two competing
+  workers; recovery of expired leases; SIGTERM requeue; dequeue during a claimed
+  batch; refresh scheduling and priority over downloads; initial import vs later
+  release (`released_at`, auto-queue for followed only); `new_pages` vs
+  `seen_at`; SSE replay from `Last-Event-ID` and `resync`.
+- **Notifier (fake sender):** exactly one push per sync with new chapters of a
+  followed novel; none for no new chapters, initial import or unfollowed novels;
+  `410` deletes the subscription; VAPID keys stable across restarts.
 - **API:** `httpx` against the app with a fake `scraper_adapter`; every route,
-  success and each error code.
+  success and each error code, including `503 push_disabled`.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
   paragraphs in output.
-- **Frontend:** Vitest + Testing Library for grid selection and SSE cache updates;
-  one Playwright smoke test of the main flow against a fake backend.
+- **Frontend:** Vitest + Testing Library for grid selection, SSE cache updates and
+  the notifications toggle states; one Playwright smoke test of the main flow
+  against a fake backend.
 - No live-site tests in CI. `scripts/smoke_live.sh <url>` exists for manual
   checks.
 
 ## 14. Styleguide (to be written to `STYLEGUIDE.md` as the plan's first step)
 
 - **Python:** 3.14, `uv`; `ruff format` + `ruff check`; `mypy --strict`;
-  `pytest`. `snake_case`; tests named
-  `test_<unit>__<behaviour>`, e.g. `test_claim_batch__skips_leased_novel`.
-  No bare `except:`.
+  `pytest`. `snake_case`; tests named `test_<unit>__<behaviour>`, e.g.
+  `test_claim_batch__skips_leased_novel`. No bare `except:`.
 - **TypeScript:** strict mode; `eslint` + `prettier`; components
   `PascalCase.tsx`, hooks `useX.ts`, tests colocated as `*.test.tsx`.
 - **Layout:**
 
   ```
-  src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,
+  src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,notifier,
                 html_to_markdown,image_fetcher,chapter_store,ids.py,config.py,cli.py}
-  web/src/{routes,components,api,hooks}
+  migrations/
+  web/src/{routes,components,api,hooks}   web/public/{sw.js,manifest.webmanifest}
   tests/{unit,integration,api,fixtures}
   docker/   compose.yaml   STYLEGUIDE.md   docs/superpowers/specs/
   ```
