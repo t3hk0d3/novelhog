@@ -662,12 +662,41 @@ manifest makes the app installable.
 3. **Novel (`/novels/:id`)**: sends `PATCH {seen: true}` on open.
    - Header: cover, title, host, TOC link, follow toggle, Sync button,
      "checked 2 h ago · next in 4 h", counters.
-   - Chapter grid: one cell per chapter coloured by state (`not_requested` grey,
-     `pending` outlined, `downloading` pulsing, `downloaded` solid, `error` red),
-     "new" marker for chapters released since the previous visit; hover/tap shows
-     number, title, state, error.
-   - Selection: click, shift-click range (touch: range toggle), From/To inputs,
-     state filter chips.
+   - **Overview bar** (both layouts): a full-width strip of the whole novel, one
+     segment per run of consecutive chapters in the same state, widths
+     proportional to run length (minimum 2 px). Colours: downloaded solid blue,
+     pending light blue, downloading amber, error red, not requested grey. Tick
+     labels at the start, end and two evenly spaced points. A dark frame marks
+     the chapters currently shown below. Tapping or clicking the bar jumps to
+     the range containing that chapter (the frame snaps to ranges; no
+     fine-grained drag). It updates live from SSE events. While a search or
+     filter is active, non-matching segments are dimmed. It has a text
+     alternative summarising the runs.
+   - **Search and filters** (both layouts): a search field matching chapter
+     number or title, and filter chips per state (each with its status icon and
+     count) plus "New". While search or a filter is active, results from all
+     ranges are shown, grouped under range headings.
+   - **Desktop (≥ 720 px)**: chapter grid below the overview bar, one cell per
+     chapter coloured by state (`not_requested` grey, `pending` outlined,
+     `downloading` pulsing, `downloaded` solid, `error` red), "new" marker for
+     chapters released since the previous visit; hover/tap shows number, title,
+     state, error. Selection: click, shift-click range, From/To inputs.
+   - **Phone (< 720 px)**:
+     - Range chips of 50 chapters ("1–50" … "601–630"), scrollable sideways,
+       each with a mini bar of downloaded / pending / error. Default: the range
+       holding the newest chapter. Hidden while search or a filter is active.
+     - A table of the chosen range (`role="listbox"`, multi-select): number,
+       title, a "new" dot, the error message under the title when there is one,
+       and a status icon at the end of the row.
+     - Status icons (each with a text label for screen readers, colours that
+       also differ in lightness): not requested = grey empty circle; pending =
+       blue clock; downloading = amber down arrow; downloaded = blue check in a
+       circle; error = red warning triangle. A compact icon legend sits above
+       the action bar.
+     - Selection without checkboxes: tapping a row toggles it and selected rows
+       get a tinted background; long-pressing a row selects everything from the
+       last selected row to it. The action bar shows "N selected · from–to" with
+       Clear.
    - Sticky action bar: Download, Cancel, Retry errors, Export EPUB… (range +
      chapters per book). PATCH results shown as a toast: "Queued N · skipped M".
    - Exports panel: filename, range, size, date, download link.
@@ -763,7 +792,13 @@ manifest makes the app installable.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
   paragraphs in output.
-- **Frontend:** Vitest + Testing Library for grid selection, SSE cache updates,
+- **Frontend:** Vitest + Testing Library for grid selection (click, shift-click,
+  From/To), phone table selection (tap toggles, long-press selects a range,
+  Clear), overview bar (runs and proportions from chapter states, frame position,
+  tap jumps to the containing range, dimming under search/filter, live update
+  from a `chapter` event), range chips (default to newest, hidden while
+  searching), search by number and title, state filters across all ranges, SSE
+  cache updates,
   the notifications toggle states, and the theme switcher (stored choice applied,
   System follows `prefers-color-scheme` changes, storage unavailable falls back
   to System); one Playwright smoke test of the main flow against a fake backend.
