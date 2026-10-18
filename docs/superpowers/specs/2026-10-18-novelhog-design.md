@@ -167,13 +167,14 @@ CREATE TABLE exports (
                 CHECK (length(id) = 14 AND substr(id, 1, 2) = 'EX'
                        AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
     novel_id    TEXT NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
-    start       INTEGER NOT NULL CHECK (start >= 1),
-    "end"       INTEGER NOT NULL,
-    filename    TEXT NOT NULL,                   -- '<Title> Chapters <start>-<end>.epub'
-    storage_key TEXT NOT NULL UNIQUE,
-    size_bytes  INTEGER NOT NULL CHECK (size_bytes >= 0),
-    created_at  TEXT NOT NULL,
-    CHECK ("end" >= start)
+    chapter_from INTEGER NOT NULL CHECK (chapter_from >= 1),
+    chapter_to   INTEGER NOT NULL,
+    mime         TEXT NOT NULL,                  -- e.g. 'application/epub+zip'
+    filename     TEXT NOT NULL,                  -- '<Title> Chapters <from>-<to>.<ext>'
+    storage_key  TEXT NOT NULL UNIQUE,
+    size_bytes   INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_at   TEXT NOT NULL,
+    CHECK (chapter_to >= chapter_from)
 ) STRICT;
 
 CREATE INDEX exports_by_novel ON exports (novel_id, created_at);
@@ -299,8 +300,10 @@ updated_at   string
 id           string   EX…
 novel_id     string
 filename     string
-start        int
-end          int
+chapter_from int
+chapter_to   int
+format       "epub"           v1; later "pdf", "fb2", …
+mime         string           e.g. "application/epub+zip"
 size_bytes   int
 url          string
 created_at   string
@@ -357,9 +360,12 @@ Chapters in any other state are listed in `skipped`. Requesting `downloading`,
 | Route | Request | Response | Errors |
 |---|---|---|---|
 | `GET /novels/{id}/exports` | — | `Export[]` by `created_at` desc | `404` |
-| `POST /novels/{id}/exports` | `{chapters: {start, end}, chapters_per_book?: int}` | `201 Export[]` (one per book) | `404`, `422` (list selector, or range not fully `downloaded`; `details.missing: int[]`) |
+| `POST /novels/{id}/exports` | `{chapters: {start, end}, format?: "epub", chapters_per_book?: int}` | `201 Export[]` (one per book) | `404`, `422` (list selector, unsupported format, or range not fully `downloaded`; `details.missing: int[]`) |
 
-`chapters_per_book` defaults to the full range. Exports read only the database
+`format` defaults to `"epub"`, the only format in v1. Formats live in a registry
+in `exporter` mapping `format → (mime, extension, builder)`; `Export.format` is
+derived from the stored `mime` through that registry, so adding PDF or FB2 later
+needs no schema change. `chapters_per_book` defaults to the full range. Exports read only the database
 and the cover, so they need no lease and can run while the worker is busy.
 
 ### 5.6 Push
@@ -534,11 +540,11 @@ Package `novelhog`, under `src/novelhog/`.
 
 - Covers: `covers/<novel_id>/<sha256[:16]>.<ext>` (content-addressed, cached as
   immutable).
-- Exports: `exports/<novel_id>/<export_id>/<Title> Chapters <start>-<end>.epub`;
+- Exports: `exports/<novel_id>/<export_id>/<Title> Chapters <from>-<to>.<ext>`;
   the last path segment is the download filename (URL-encoded in URLs).
 - `LocalStaticStorage` writes under `/data/static`; the API serves it at
-  `/static` with long-lived cache headers; EPUBs get
-  `Content-Disposition: attachment`.
+  `/static` with long-lived cache headers; export files are served with their
+  stored `mime` and `Content-Disposition: attachment`.
 
 ### 8.4 EPUB
 
