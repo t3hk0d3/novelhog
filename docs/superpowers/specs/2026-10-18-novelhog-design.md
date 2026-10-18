@@ -139,14 +139,12 @@ CREATE TABLE chapters (
     state        TEXT NOT NULL DEFAULT 'not_requested'
                  CHECK (state IN ('not_requested', 'pending', 'downloading',
                                   'downloaded', 'error')),
-    error        TEXT,
     has_images   INTEGER NOT NULL DEFAULT 0 CHECK (has_images IN (0, 1)),
     released_at  TEXT,                                   -- NULL = part of initial import
     queued_at    TEXT,
     claimed_by   TEXT,
     updated_at   TEXT NOT NULL,
     UNIQUE (novel_id, number),
-    CHECK (error IS NULL OR state IN ('error', 'pending')),
     CHECK ((state = 'pending') = (queued_at IS NOT NULL)),
     CHECK ((state = 'downloading') = (claimed_by IS NOT NULL))
 ) STRICT;
@@ -199,16 +197,22 @@ CREATE TABLE changes (
     at        TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX changes_by_novel ON changes (novel_id, seq);
-CREATE INDEX changes_by_time  ON changes (at);
+CREATE INDEX changes_by_novel  ON changes (novel_id, seq);
+CREATE INDEX changes_by_entity ON changes (entity_id, seq);
+CREATE INDEX changes_by_time   ON changes (at);
 ```
 
 Notes:
 
-- Every state-changing write appends to `changes` in the same transaction. The API
-  prunes rows older than 24 h on a timer.
-- `error` may stay set while a chapter is re-queued (`pending`); the worker clears
-  it when it next processes the chapter.
+- Every state-changing write appends to `changes` in the same transaction.
+- Pruning: the API deletes rows older than 24 h on a timer, **except the newest
+  row of each `entity_id`**, so every novel, chapter and export always keeps its
+  latest event.
+- Error messages are not stored on `chapters`. A chapter that fails gets
+  `state = 'error'` and a `CH` change whose payload carries `"error": "<message>"`.
+  `Chapter.error` in the API is read from the chapter's newest change when its
+  state is `error`, and is `null` otherwise. Re-queuing writes a new change, so
+  the old message stops being current without any clearing.
 - The VAPID key pair lives in `/data/vapid.json`, not in the database, so a
   database restore never changes the server's push identity. It is generated on
   first start and never regenerated.
@@ -350,8 +354,8 @@ response: {updated: int[], skipped: [{number: int, state: <current state>}]}
 
 | From | To | Effect |
 |---|---|---|
-| `not_requested`, `error` | `pending` | Sets `queued_at`; keeps `error` until the next attempt |
-| `pending` | `not_requested` | Clears `queued_at` and `error` |
+| `not_requested`, `error` | `pending` | Sets `queued_at` |
+| `pending` | `not_requested` | Clears `queued_at` |
 
 Chapters in any other state are listed in `skipped`. Requesting `downloading`,
 `downloaded` or `error` → `422`. Each updated chapter appends a `chapter` change.
@@ -404,8 +408,10 @@ false, and uses `vapid_key` for `PushManager.subscribe`.
 - New chapters found by a sync arrive as `chapter` events with `released_at`
   set; the UI updates "new" badges from them. There is no separate release event.
 - `id:` of every event is `changes.seq`.
-- On connect with `Last-Event-ID`, the API replays later changes; if that seq has
-  been pruned it sends one `resync`.
+- On connect with `Last-Event-ID`, the API replays later changes. Because pruning
+  keeps the newest row per entity, older history has gaps: if the row with that
+  seq no longer exists or is older than 24 h, the API sends one `resync` instead
+  of replaying.
 - The API polls `changes` about once per second and pushes new rows.
 - A comment line is sent every 15 s as keepalive.
 
@@ -433,8 +439,8 @@ loop:
         for chapter in batch:
             if shutting_down: requeue(rest); break
             if state(chapter) != downloading: continue   # dequeued meanwhile
-            try: fetch → convert → store → downloaded, error cleared
-            except: error(message)
+            try: fetch → convert → store → downloaded
+            except: state = error; change payload carries the message
             renew_lease(novel); sleep(REQUEST_DELAY)
         release_lease(novel)
         continue
@@ -491,7 +497,7 @@ refresh(novel):
    the scraper's own cleaner is not used.
 2. `html_to_markdown.convert(body_html, fetch_image)` → `{markdown, has_images, warnings}`.
 3. `chapter_store.put(chapter_id, markdown)`; the chapter row gets `title`,
-   `has_images`, `state = downloaded`, `error = null`.
+   `has_images`, `state = downloaded`.
 
 ## 7. Modules
 
@@ -687,7 +693,9 @@ manifest makes the app installable.
   workers; recovery of expired leases; SIGTERM requeue; dequeue during a claimed
   batch; refresh scheduling and priority over downloads; initial import vs later
   release (`released_at`, auto-queue for followed only); `new_pages` vs
-  `seen_at`; SSE replay from `Last-Event-ID` and `resync`.
+  `seen_at`; SSE replay from `Last-Event-ID` and `resync`; pruning keeps the
+  newest change per entity; `Chapter.error` comes from the newest change only
+  while the state is `error` and survives pruning.
 - **Notifier (fake sender):** exactly one push per sync with new chapters of a
   followed novel; none for no new chapters, initial import or unfollowed novels;
   `410` deletes the subscription; VAPID keys stable across restarts.
