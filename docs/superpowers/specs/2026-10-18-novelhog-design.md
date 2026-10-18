@@ -515,7 +515,8 @@ Package `novelhog`, under `src/novelhog/`.
 | `image_fetcher` | Plain HTTP image download reusing FlareSolverr cookies and user agent; validation (§8.2) |
 | `chapter_store` | `put(chapter_id, markdown)`, `get(chapter_id)` over `chapter_contents` |
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
-| `exporter` | Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → EPUB (`ebooklib`); cover; inline images extracted to EPUB items |
+| `exporter` | Format registry (`format → mime, extension, accepted image types, builder`). EPUB: Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → `ebooklib`; cover; inline images extracted to EPUB items and converted per §8.4 |
+| `images` | Pillow helpers: `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)` |
 | `notifier` | `notify_release(novel, numbers)`: sends one Web Push to every subscription via `pywebpush`; deletes subscriptions answered with `404`/`410`; logs other failures, no retry. VAPID key load/generate |
 | `api` | FastAPI app, routers, SSE, error handlers, static mounts, `sw.js` and manifest |
 | `worker` | Loop, refresh, downloads, signal handling, recovery |
@@ -554,8 +555,18 @@ Package `novelhog`, under `src/novelhog/`.
   session (FlareSolverr itself returns HTML only).
 - Type detected from magic bytes; allowed: PNG, JPEG, GIF, WebP. SVG and anything
   else are rejected.
-- Size cap `NOVELHOG_MAX_IMAGE_BYTES` (default 2 MiB).
-- Chapter images are inlined in Markdown; covers go to static storage.
+- Size cap `NOVELHOG_MAX_IMAGE_BYTES` (default 2 MiB), checked on the downloaded
+  bytes before any processing.
+- **Originals are kept**: images are stored in the format they were served in; no
+  format conversion at ingest.
+- **Oversized images are downscaled** at ingest, in their original format, when
+  either side exceeds `NOVELHOG_IMAGE_MAX_DIMENSION` (default 1600 px; `0`
+  disables). Aspect ratio is preserved; animated GIF/WebP are left untouched;
+  JPEG is re-encoded at quality 90; images within the limit are stored byte for
+  byte as downloaded.
+- Chapter images are inlined in Markdown; covers go to static storage. The UI
+  shows covers as stored (all four types render in current browsers).
+- Image processing uses Pillow.
 
 ### 8.3 Static storage keys
 
@@ -567,14 +578,27 @@ Package `novelhog`, under `src/novelhog/`.
   `/static` with long-lived cache headers; export files are served with their
   stored `mime` and `Content-Disposition: attachment`.
 
-### 8.4 EPUB
+### 8.4 Export image compatibility
+
+Every export format declares the image types it accepts. The exporter converts
+any other image to an accepted type at export time; stored originals are never
+modified, so each export starts from the best available source.
+
+| Format | Accepted | Conversion of anything else |
+|---|---|---|
+| EPUB | JPEG, PNG, GIF | WebP with alpha → PNG; other WebP → JPEG (quality 90); animated WebP → first frame |
+| FB2 (future) | JPEG, PNG | as EPUB; GIF → PNG (first frame) |
+
+The cover goes through the same conversion.
+
+### 8.5 EPUB
 
 - One XHTML document per chapter in `number` order, headed by the stored title.
 - The cover, when present, is the book cover.
-- Inline `data:` images become EPUB image items.
+- Inline `data:` images become EPUB image items, converted per §8.4.
 - Metadata: title; identifier = export ID.
 
-### 8.5 Push notification
+### 8.6 Push notification
 
 - Payload: `{title: <novel title>, body: "<N> new chapters (<first>–<last>)",
   url: <PUBLIC_URL>/novels/<id>, icon: <cover_url or app icon>}`.
@@ -596,7 +620,8 @@ Package `novelhog`, under `src/novelhog/`.
 | `NOVELHOG_LEASE_TTL` | `300` s | |
 | `NOVELHOG_IDLE_SLEEP` | `30` s | Worker sleep when no work |
 | `NOVELHOG_REQUEST_DELAY` | `1` s | Pause between chapter fetches |
-| `NOVELHOG_MAX_IMAGE_BYTES` | `2097152` | |
+| `NOVELHOG_MAX_IMAGE_BYTES` | `2097152` | Download size cap per image |
+| `NOVELHOG_IMAGE_MAX_DIMENSION` | `1600` | Longest side in px before downscaling; `0` disables |
 | `NOVELHOG_WORKER_ID` | `<hostname>:<pid>` | |
 | `NOVELHOG_HTTP_PORT` | `8080` | API listen port |
 
@@ -686,8 +711,11 @@ manifest makes the app installable.
 
 - **Unit:** `ids`; `html_to_markdown` (allowlist, escaping, empty paragraphs,
   images, failure placeholder); `image_fetcher` (magic bytes, SVG rejection, size
-  cap); `find_cover_url` (each heuristic, relative URLs); `exporter` (order, cover,
-  image extraction); chapter state rules; selector validation; refresh interval
+  cap); `images` (downscale only above the limit, aspect ratio kept, animated
+  untouched, `0` disables, small images byte-identical; WebP → PNG with alpha /
+  JPEG without, animated → first frame); `find_cover_url` (each heuristic,
+  relative URLs); `exporter` (order, cover, image extraction, no WebP in EPUB
+  output, stored originals unchanged); chapter state rules; selector validation; refresh interval
   rule (reset, doubling, cap, jitter bounds).
 - **Integration (real temporary SQLite):** lease and claim with two competing
   workers; recovery of expired leases; SIGTERM requeue; dequeue during a claimed
@@ -721,7 +749,7 @@ manifest makes the app installable.
 
   ```
   src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,notifier,
-                html_to_markdown,image_fetcher,chapter_store,ids.py,config.py,cli.py}
+                html_to_markdown,image_fetcher,images,chapter_store,ids.py,config.py,cli.py}
   migrations/
   web/src/{routes,components,api,hooks}   web/public/{sw.js,manifest.webmanifest}
   tests/{unit,integration,api,fixtures}
