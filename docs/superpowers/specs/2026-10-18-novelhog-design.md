@@ -293,9 +293,11 @@ number       int
 url          string
 title        string | null
 state        "not_requested" | "pending" | "downloading" | "downloaded" | "error"
-error        string | null
+error        string | null    from the newest change, only in "error" state
+error_at     string | null    time of that change, only in "error" state
 has_images   bool
 released_at  string | null
+queued_at    string | null    only in "pending" state
 updated_at   string
 ```
 
@@ -676,29 +678,77 @@ manifest makes the app installable.
      number or title, and filter chips per state (each with its status icon and
      count) plus "New". While search or a filter is active, results from all
      ranges are shown, grouped under range headings.
-   - **Desktop (≥ 720 px)**: chapter grid below the overview bar, one cell per
-     chapter coloured by state (`not_requested` grey, `pending` outlined,
-     `downloading` pulsing, `downloaded` solid, `error` red), "new" marker for
-     chapters released since the previous visit; hover/tap shows number, title,
-     state, error. Selection: click, shift-click range, From/To inputs.
-   - **Phone (< 720 px)**:
-     - Range chips of 50 chapters ("1–50" … "601–630"), scrollable sideways,
-       each with a mini bar of downloaded / pending / error. Default: the range
-       holding the newest chapter. Hidden while search or a filter is active.
-     - A table of the chosen range (`role="listbox"`, multi-select): number,
-       title, a "new" dot, the error message under the title when there is one,
-       and a status icon at the end of the row.
-     - Status icons (each with a text label for screen readers, colours that
-       also differ in lightness): not requested = grey empty circle; pending =
-       blue clock; downloading = amber down arrow; downloaded = blue check in a
-       circle; error = red warning triangle. A compact icon legend sits above
-       the action bar.
-     - Selection without checkboxes: tapping a row toggles it and selected rows
-       get a tinted background; long-pressing a row selects everything from the
-       last selected row to it. The action bar shows "N selected · from–to" with
-       Clear.
-   - Sticky action bar: Download, Cancel, Retry errors, Export EPUB… (range +
-     chapters per book). PATCH results shown as a toast: "Queued N · skipped M".
+   - **Range chips** (both layouts): ranges of 50 chapters ("1–50" … "601–630"),
+     each with a mini bar of downloaded / pending / error. Default: the range
+     holding the newest chapter. Hidden while search or a filter is active. On
+     desktop they wrap onto several rows; on phones (< 720 px) they scroll
+     sideways.
+   - **Chapter table** of the chosen range (both layouts). Error messages are
+     never shown in the table; an error is visible only as the red status tab.
+     - Desktop (≥ 720 px) columns: `#` · title (with "new" dot) · **Added** ·
+       **Updated** · status tab. Added shows the date only, from
+       `released_at`; chapters from the initial import show "—" with the
+       tooltip "Part of the initial import". Updated is relative ("12 min ago")
+       from `updated_at`.
+     - Phone (< 720 px) rows: number · title (with "new" dot) · status tab. No
+       Added/Updated columns.
+     - **Status tab**: a full-row-height block at the end of each row, about
+       44–52 px wide, holding the status icon (display only; text label for
+       screen readers). Calm states use soft tints, attention states full
+       colour; icon colours keep at least 3:1 contrast in both themes:
+
+       | State | Tab | Icon |
+       |---|---|---|
+       | not requested | pale grey | grey empty circle |
+       | pending | pale blue | blue clock |
+       | downloading | amber | dark down arrow |
+       | downloaded | pale blue | blue check in a circle |
+       | error | red | white warning triangle |
+
+       In normal mode the tab's leading edge is a chevron point facing into the
+       row (mirrored for right-to-left); in select mode it is a plain
+       rectangle.
+   - **Normal mode** (default):
+     - Clicking or tapping a row opens chapter details. Rows are links named
+       "<title>, <status>, open details".
+     - The toolbar has a **Select** button. Long-press (phone) or
+       Shift-/Ctrl-/Cmd-click (desktop) on a row enters select mode with that
+       row (or range) selected.
+     - No action bar.
+   - **Select mode**:
+     - A drawn rounded-square checkbox slides in at the start of every row
+       (visual only, hidden from assistive tech; reduced motion: no slide).
+       Selected rows show a filled checkbox with a check mark and a tinted
+       background distinct from the downloaded tint.
+     - Clicking or tapping anywhere on a row toggles it; long-press (phone) or
+       Shift-click (desktop) selects from the last selected row to that one;
+       Ctrl/Cmd-click toggles one.
+     - Rows form a multi-select list (`aria-multiselectable`, `aria-selected`
+       per row); entering the mode is announced ("Select mode, N selected").
+     - Header shows "N selected", **Select all** (all visible rows, including
+       search/filter results) and **Done**. Desktop also has a header checkbox
+       (a real button with none / some / all states).
+     - Action bar: "N selected · from–to · summary" with Download, Cancel
+       queued, Retry errors and Export EPUB… (phone: Download, Retry, More…).
+     - Leaving: Done, Escape, the back gesture, or completing any bulk action
+       (toast "Queued N · skipped M", then back to normal mode, selection
+       cleared).
+     - Selection survives live SSE updates of the selected chapters.
+   - **Chapter details**: opened from a row in normal mode; a modal dialog on
+     desktop and a bottom sheet on phones, with the same content:
+     - Heading: "Chapter N of M" and the chapter title; previous/next buttons to
+       step through chapters without closing; close (also Escape / swipe down).
+     - Error box (only in `error` state): when it failed (relative, from the
+       newest change) and the full error message in monospace with a copy
+       button.
+     - Fields: status (icon + name), source URL (link), added (date only, from
+       `released_at`, or "—"), queued (`queued_at`, when pending), last change
+       (`updated_at`), images (yes / no / not downloaded yet).
+     - Actions: "Open on site" plus one state-dependent primary action:
+       Download (`not_requested`), Cancel (`pending`), Retry download
+       (`error`), none for `downloading`/`downloaded`. Actions use the same
+       `PATCH /chapters` call with a one-item list.
+   - Export EPUB… opens a dialog with the selected range and chapters per book.
    - Exports panel: filename, range, size, date, download link.
 - **Follow toggle**: a pill button with a star icon (`aria-pressed`). Following:
   solid gold star, label "Following". Not following: grey outline star, label
@@ -792,9 +842,17 @@ manifest makes the app installable.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
   paragraphs in output.
-- **Frontend:** Vitest + Testing Library for grid selection (click, shift-click,
-  From/To), phone table selection (tap toggles, long-press selects a range,
-  Clear), overview bar (runs and proportions from chapter states, frame position,
+- **Frontend:** Vitest + Testing Library for normal mode (row click/tap opens
+  details; Select, long-press and Shift/Ctrl-click enter select mode with the
+  right selection), select mode (tap toggles, long-press and Shift-click select
+  a range, Select all covers search/filter results, header checkbox none/some/
+  all, Done/Escape/back and finishing a bulk action leave the mode and clear the
+  selection, selection survives SSE updates), table rendering (no error text in
+  rows; status tab colour and icon per state; chevron only in normal mode;
+  Added shows date only from `released_at`, "—" for initial import), chapter
+  details (dialog on desktop, sheet on phone, error box only in `error` state,
+  copy button, previous/next, state-dependent primary action sends the right
+  PATCH), overview bar (runs and proportions from chapter states, frame position,
   tap jumps to the containing range, dimming under search/filter, live update
   from a `chapter` event), range chips (default to newest, hidden while
   searching), search by number and title, state filters across all ranges, SSE
