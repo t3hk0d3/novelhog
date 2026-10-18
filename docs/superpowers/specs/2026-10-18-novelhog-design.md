@@ -833,6 +833,28 @@ details.
 
 ![Chapter details bottom sheet](sketches/phone-chapter-details.png)
 
+**Export dialog, desktop**: valid range, chapters per book, preview of the
+resulting files.
+
+![Export dialog](sketches/export-dialog.png)
+
+**Export sheet, phone, chapters missing**: export disabled; offers to queue the
+missing chapters or shrink the range to the downloaded part.
+
+![Export sheet with missing chapters](sketches/phone-export-missing.png)
+
+**Dark mode**: generated from the light sketches with one dark palette (library,
+desktop chapters, export dialog, phone normal and select mode).
+
+![Dark library](sketches/dark-library.png)
+
+![Dark desktop chapters](sketches/dark-desktop-normal-mode.png)
+
+![Dark export dialog](sketches/dark-export-dialog.png)
+
+![Dark phone chapters, normal mode](sketches/dark-phone-normal-mode.png)
+![Dark phone chapters, select mode](sketches/dark-phone-select-mode.png)
+
 ## 11. Error handling
 
 - `domain` and `repo` raise domain exceptions; only `api` maps them to HTTP.
