@@ -20,6 +20,11 @@ describe('relative', () => {
     expect(relative('2026-10-19T11:48:00.000Z', now)).toBe('12 min ago');
   });
 
+  it('never prints NaN for an invalid date', () => {
+    expect(relative('not a date', now)).toBe('unknown');
+    expect(relative(new Date(NaN), now)).toBe('unknown');
+  });
+
   it('describes the future with "in"', () => {
     expect(relative(new Date(now.getTime() + 4 * 60 * MIN), now)).toBe('in 4 h');
   });
@@ -29,5 +34,9 @@ describe('dateOnly', () => {
   it('gives the local date only', () => {
     const d = new Date(2026, 9, 5, 23, 59);
     expect(dateOnly(d)).toBe('2026-10-05');
+  });
+
+  it('gives a dash for an invalid date', () => {
+    expect(dateOnly('not a date')).toBe('—');
   });
 });

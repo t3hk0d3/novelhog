@@ -15,6 +15,7 @@ function amount(ms: number): string {
 /** "12 min ago", "2 h ago", "3 d ago"; "in 4 h" for the future; "just now" under a minute. */
 export function relative(date: Date | string, now: Date = new Date()): string {
   const diff = now.getTime() - toDate(date).getTime();
+  if (Number.isNaN(diff)) return 'unknown';
   if (Math.abs(diff) < MINUTE) return 'just now';
   return diff > 0 ? `${amount(diff)} ago` : `in ${amount(-diff)}`;
 }
@@ -22,6 +23,7 @@ export function relative(date: Date | string, now: Date = new Date()): string {
 /** The local calendar date as YYYY-MM-DD. */
 export function dateOnly(date: Date | string): string {
   const d = toDate(date);
+  if (Number.isNaN(d.getTime())) return '—';
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${String(d.getFullYear())}-${mm}-${dd}`;

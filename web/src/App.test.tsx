@@ -19,7 +19,7 @@ describe('App', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('banner')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Theme: system' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Theme: System' })).toBeInTheDocument();
   });
 
   it('renders a placeholder per route', () => {

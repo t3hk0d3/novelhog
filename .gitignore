@@ -18,4 +18,3 @@ web/coverage/
 *.sqlite
 *.sqlite3
 .env
-web/node_modules/
