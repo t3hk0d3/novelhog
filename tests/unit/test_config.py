@@ -115,3 +115,19 @@ class TestLoad__WithUnknownStaticBackend:
     def test_load__raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="NOVELHOG_STATIC_BACKEND"):
             config.load({"NOVELHOG_STATIC_BACKEND": "s3"})
+
+
+class TestLoad__WithEmptyValues:
+    def test_load__empty_data_dir_uses_the_default(self) -> None:
+        s = config.load({"NOVELHOG_DATA_DIR": ""})
+        assert s.data_dir == Path("/data")
+        assert s.database_url == "sqlite:////data/db/app.db"
+
+    def test_load__empty_numeric_value_uses_the_default(self) -> None:
+        assert config.load({"NOVELHOG_BATCH_SIZE": ""}).batch_size == 10
+
+
+class TestLoad__WithMixedCaseAllowedHosts:
+    def test_load__lowercases_names_and_drops_empty_entries(self) -> None:
+        s = config.load({"NOVELHOG_ALLOWED_HOSTS": "A.Lan,, B.LAN ,"})
+        assert s.allowed_hosts == ("a.lan", "b.lan")

@@ -50,16 +50,22 @@ class Settings:
         return self.public_url is not None and self.vapid_subject is not None
 
 
-def _text(env: Mapping[str, str], name: str, default: str) -> str:
-    return env.get(_PREFIX + name, default)
-
-
-def _optional(env: Mapping[str, str], name: str) -> str | None:
+def _get(env: Mapping[str, str], name: str) -> str | None:
+    """Return the variable's value, treating an empty value as unset."""
     return env.get(_PREFIX + name) or None
 
 
+def _text(env: Mapping[str, str], name: str, default: str) -> str:
+    raw = _get(env, name)
+    return default if raw is None else raw
+
+
+def _optional(env: Mapping[str, str], name: str) -> str | None:
+    return _get(env, name)
+
+
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
-    raw = env.get(_PREFIX + name)
+    raw = _get(env, name)
     if raw is None:
         return default
     try:
@@ -70,7 +76,7 @@ def _int(env: Mapping[str, str], name: str, default: int) -> int:
 
 
 def _float(env: Mapping[str, str], name: str, default: float) -> float:
-    raw = env.get(_PREFIX + name)
+    raw = _get(env, name)
     if raw is None:
         return default
     try:
@@ -81,12 +87,13 @@ def _float(env: Mapping[str, str], name: str, default: float) -> float:
 
 
 def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
-    raw = env.get(_PREFIX + name)
+    raw = _get(env, name)
     if raw is None:
         return default
-    if raw in _TRUE:
+    value = raw.strip().lower()
+    if value in _TRUE:
         return True
-    if raw in _FALSE:
+    if value in _FALSE:
         return False
     msg = f"{_PREFIX}{name} must be true, false, 1 or 0, got {raw!r}"
     raise ValueError(msg)
@@ -99,7 +106,9 @@ def load(env: Mapping[str, str] = os.environ) -> Settings:
     if backend != "local":
         msg = f"{_PREFIX}STATIC_BACKEND must be 'local', got {backend!r}"
         raise ValueError(msg)
-    hosts = tuple(h.strip() for h in _text(env, "ALLOWED_HOSTS", "").split(",") if h.strip())
+    hosts = tuple(
+        h.strip().lower() for h in _text(env, "ALLOWED_HOSTS", "").split(",") if h.strip()
+    )
     return Settings(
         data_dir=data_dir,
         database_url=_text(env, "DATABASE_URL", f"sqlite:///{data_dir / 'db' / 'app.db'}"),

@@ -4,16 +4,25 @@ import logging
 from typing import Literal
 
 import structlog
-from structlog.typing import FilteringBoundLogger
+from structlog.typing import EventDict, FilteringBoundLogger, Processor
+
+
+def _add_service(service: str) -> Processor:
+    """Return a processor that stamps every event with `service`, in any thread."""
+
+    def add(_logger: object, _method: str, event_dict: EventDict) -> EventDict:
+        event_dict["service"] = service
+        return event_dict
+
+    return add
 
 
 def setup(service: Literal["api", "worker", "cli"]) -> None:
     """Configure structlog to emit one JSON object per line on stdout, tagged with `service`."""
     structlog.reset_defaults()
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(service=service)
     structlog.configure(
         processors=[
+            _add_service(service),
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True, key="timestamp"),

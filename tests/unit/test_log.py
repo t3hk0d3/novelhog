@@ -1,6 +1,7 @@
 """Unit tests for novelhog.log."""
 
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -59,3 +60,15 @@ class TestGet__OnException:
         (line,) = _lines(capsys)
         assert "Traceback" in line["exception"]
         assert "RuntimeError: boom" in line["exception"]
+
+
+class TestSetup__OnLoggingFromAnotherThread:
+    def test_setup__service_is_present_in_the_thread_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        log.setup("worker")
+        thread = threading.Thread(target=lambda: log.get().info("from thread"))
+        thread.start()
+        thread.join()
+        (line,) = _lines(capsys)
+        assert line["service"] == "worker"
