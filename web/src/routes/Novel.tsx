@@ -36,7 +36,7 @@ function Results({ view }: { view: ChapterView }) {
         ) : (
           view.groups.map((group) => (
             <div key={group.range.index}>
-              <h3 className="mt-3 font-semibold">{`${String(group.range.from)}–${String(group.range.to)}`}</h3>
+              <h2 className="mt-3 font-semibold">{`${String(group.range.from)}–${String(group.range.to)}`}</h2>
               <ChapterList chapters={group.chapters} />
             </div>
           ))
@@ -58,7 +58,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
   const chapters = useChapters(novel.id);
   // What was new before this visit marked the novel seen; frozen for the visit.
   const [newBeforeVisit] = useState(novel.new_pages);
-  const view = useChapterView(chapters.data ?? [], newBeforeVisit);
+  const view = useChapterView(chapters.data, newBeforeVisit);
   const seenSent = useRef(false);
 
   useEffect(() => {
@@ -85,7 +85,9 @@ function NovelPage({ novel }: { novel: NovelData }) {
         matches={view.filterActive ? view.matches : null}
         onSelectRange={view.setRange}
       />
-      {chapters.data?.length === 0 ? (
+      {chapters.data === undefined ? (
+        !chapters.isError && <p className="text-ink-muted">Loading chapters…</p>
+      ) : chapters.data.length === 0 ? (
         <p className="rounded-xl border border-dashed border-line p-8 text-center text-ink-muted">
           {emptyMessage(novel)}
         </p>

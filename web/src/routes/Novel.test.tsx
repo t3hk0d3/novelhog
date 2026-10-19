@@ -74,7 +74,7 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
     );
     await userEvent.click(await screen.findByRole('button', { name: /^Error/ }));
     expect(screen.queryByRole('group', { name: 'Chapter ranges' })).toBeNull();
-    const headings = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings).toEqual(['1–50', '101–120']);
     expect(screen.getByText('Page 7')).toBeInTheDocument();
     expect(screen.getByText('Page 110')).toBeInTheDocument();
@@ -102,6 +102,27 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
         .getAllByRole('listitem')
         .map((li) => li.textContent),
     ).toEqual([expect.stringContaining('Page 3'), expect.stringContaining('Page 4')]);
+  });
+
+  it.each([
+    ['2 new chapters at open', 2, 'New 3'],
+    ['no new chapters at open', 0, 'New 1'],
+  ])('"New" counts a chapter released during the visit (%s)', async (_name, newPages, label) => {
+    const chapters = makeChapters(4).map((c) =>
+      c.position > 2 ? { ...c, released_at: '2026-10-19T09:00:00.000Z' } : c,
+    );
+    mount(makeNovel({ total_pages: 4, new_pages: newPages }), chapters);
+    await screen.findByText('Page 4');
+    act(() => {
+      FakeEventSource.instances[0]?.emit('chapter', {
+        ...makeChapter(5, { released_at: '2026-10-19T11:00:00.000Z' }),
+        novel_id: 'NV000000000001',
+      });
+    });
+    await userEvent.click(await screen.findByRole('button', { name: label }));
+    const items = within(screen.getByRole('region', { name: 'Chapters' })).getAllByRole('listitem');
+    expect(items).toHaveLength(newPages === 2 ? 3 : 1);
+    expect(items.at(-1)).toHaveTextContent('Page 5');
   });
 
   it('updates the overview bar when a chapter event arrives', async () => {

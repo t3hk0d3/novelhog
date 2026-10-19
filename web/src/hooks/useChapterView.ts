@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { Chapter, ChapterState } from '../api/client';
 
 export const RANGE_SIZE = 50;
@@ -51,14 +51,17 @@ export function buildRanges(chapters: Chapter[]): ChapterRange[] {
   return [...ranges.values()].sort((a, b) => a.index - b.index);
 }
 
-/** The oldest release time still counted as new: that of the `newCount`-th newest release. */
-function newThreshold(chapters: Chapter[], newCount: number): string | null {
-  if (newCount <= 0) return null;
+/**
+ * The release time standing in for the previous `seen_at`: the (newCount+1)-th newest release,
+ * so exactly the `newCount` newest chapters are later than it (ties count as new together).
+ * Null when fewer chapters than that were released: then every released chapter is new.
+ */
+function newCutoff(chapters: Chapter[], newCount: number): string | null {
   const released = chapters
     .flatMap((c) => (c.released_at === null ? [] : [c.released_at]))
     .sort()
     .reverse();
-  return released[Math.min(newCount, released.length) - 1] ?? null;
+  return released[newCount] ?? null;
 }
 
 function matchesQuery(chapter: Chapter, query: string): boolean {
@@ -71,9 +74,14 @@ function matchesQuery(chapter: Chapter, query: string): boolean {
 /**
  * Range, search and filter selection over a novel's cached chapter list (position order).
  * `newCount` is how many chapters were released since the last visit, as the novel reported
- * before the page marked it seen.
+ * before the page marked it seen. When the list first loads it fixes a release-time cutoff from
+ * it (the stand-in for the old `seen_at`); chapters released later, live, are new too.
+ * `chapters` is undefined until the list has loaded.
  */
-export function useChapterView(chapters: Chapter[], newCount: number) {
+export function useChapterView(loaded: Chapter[] | undefined, newCount: number) {
+  const chapters = useMemo(() => loaded ?? [], [loaded]);
+  const [cutoff, setCutoff] = useState<string | null | undefined>(undefined);
+  if (cutoff === undefined && loaded) setCutoff(newCutoff(loaded, newCount));
   const [query, setQuery] = useState('');
   const [states, setStates] = useState<ReadonlySet<ChapterState>>(new Set());
   const [newOnly, setNewOnly] = useState(false);
@@ -85,16 +93,14 @@ export function useChapterView(chapters: Chapter[], newCount: number) {
     for (const chapter of chapters) counts[chapter.state] += 1;
     return counts;
   }, [chapters]);
-  const threshold = useMemo(() => newThreshold(chapters, newCount), [chapters, newCount]);
-  const newChapters = useMemo(
-    () =>
-      new Set(
-        threshold === null
-          ? []
-          : chapters.filter((c) => c.released_at !== null && c.released_at >= threshold),
-      ),
-    [chapters, threshold],
+  const isNew = useCallback(
+    (chapter: Chapter) =>
+      cutoff !== undefined &&
+      chapter.released_at !== null &&
+      (cutoff === null || chapter.released_at > cutoff),
+    [cutoff],
   );
+  const newTotal = useMemo(() => chapters.filter(isNew).length, [chapters, isNew]);
 
   const trimmed = query.trim();
   const filterActive = trimmed !== '' || states.size > 0 || newOnly;
@@ -105,10 +111,10 @@ export function useChapterView(chapters: Chapter[], newCount: number) {
             (c) =>
               matchesQuery(c, trimmed) &&
               (states.size === 0 || states.has(c.state)) &&
-              (!newOnly || newChapters.has(c)),
+              (!newOnly || isNew(c)),
           )
         : chapters,
-    [chapters, filterActive, trimmed, states, newOnly, newChapters],
+    [chapters, filterActive, trimmed, states, newOnly, isNew],
   );
 
   const lastRange = ranges[ranges.length - 1];
@@ -149,7 +155,8 @@ export function useChapterView(chapters: Chapter[], newCount: number) {
     toggleNew: () => {
       setNewOnly((current) => !current);
     },
-    newCount: newChapters.size,
+    newCount: newTotal,
+    isNew,
     stateCounts,
     filterActive,
     matches,

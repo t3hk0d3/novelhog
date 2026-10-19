@@ -16,7 +16,8 @@ function initials(name: string): string {
 function schedule(novel: Novel): string {
   const parts: string[] = [];
   if (novel.last_refreshed_at) parts.push(`checked ${relative(novel.last_refreshed_at)}`);
-  parts.push(`next ${relative(novel.next_refresh_at)}`);
+  const next = new Date(novel.next_refresh_at);
+  parts.push(next.getTime() <= Date.now() ? 'next check due' : `next ${relative(next)}`);
   return parts.join(' · ');
 }
 
@@ -26,7 +27,9 @@ function counters(novel: Novel): string {
     `${String(novel.downloaded_pages)} downloaded`,
     `${String(novel.pending_pages)} pending`,
   ];
-  if (novel.error_pages > 0) parts.push(`${String(novel.error_pages)} errors`);
+  if (novel.error_pages > 0) {
+    parts.push(`${String(novel.error_pages)} ${novel.error_pages === 1 ? 'error' : 'errors'}`);
+  }
   return parts.join(' · ');
 }
 
@@ -90,10 +93,14 @@ function Title({ novel, name }: { novel: Novel; name: string }) {
 function MoreMenu({ onDelete }: { onDelete: () => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="relative">
+    <div
+      className="relative"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setOpen(false);
+      }}
+    >
       <button
         type="button"
-        aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
           setOpen(!open);
@@ -103,13 +110,9 @@ function MoreMenu({ onDelete }: { onDelete: () => void }) {
         More
       </button>
       {open && (
-        <div
-          role="menu"
-          className="absolute right-0 z-10 mt-1 min-w-40 rounded-lg border border-line bg-surface p-1 shadow-lg"
-        >
+        <div className="absolute right-0 z-10 mt-1 min-w-40 rounded-lg border border-line bg-surface p-1 shadow-lg">
           <button
             type="button"
-            role="menuitem"
             onClick={() => {
               setOpen(false);
               onDelete();

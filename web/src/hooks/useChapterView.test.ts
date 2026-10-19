@@ -103,6 +103,27 @@ describe('useChapterView', () => {
       expect(result.current.matches.map((c) => c.position)).toEqual([2, 3]);
     });
 
+    it('keeps older new chapters new and adds one released later, even with none new at open', () => {
+      const at = (day: string) => `2026-10-${day}T00:00:00.000Z`;
+      const initial = [
+        makeChapter(1, { released_at: at('01') }),
+        makeChapter(2, { released_at: at('05') }),
+        makeChapter(3, { released_at: at('06') }),
+      ];
+      const added = [...initial, makeChapter(4, { released_at: at('09') })];
+      for (const [newCount, expected] of [
+        [2, [2, 3, 4]],
+        [0, [4]],
+      ] as const) {
+        const { result, rerender } = renderHook(({ list }) => useChapterView(list, newCount), {
+          initialProps: { list: initial },
+        });
+        rerender({ list: added });
+        expect(result.current.newCount).toBe(expected.length);
+        expect(added.filter(result.current.isNew).map((c) => c.position)).toEqual(expected);
+      }
+    });
+
     it('finds nothing new when no chapter was released since the last visit', () => {
       const { result } = renderHook(() => useChapterView(makeChapters(5), 0));
       expect(result.current.newCount).toBe(0);

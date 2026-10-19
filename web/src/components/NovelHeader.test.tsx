@@ -123,10 +123,28 @@ describe('NovelHeader', () => {
     expect(screen.getByRole('button', { name: 'Syncing…' })).toBeDisabled();
   });
 
+  it('closes the More disclosure on Escape', async () => {
+    renderWithProviders(<NovelHeader novel={makeNovel()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'More' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: 'Delete novel…' })).toBeNull();
+  });
+
+  it('says "1 error" in the singular and "next check due" once the refresh is overdue', () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-19T13:00:00.000Z') });
+    renderWithProviders(
+      <NovelHeader
+        novel={makeNovel({ error_pages: 1, next_refresh_at: '2026-10-19T12:00:00.000Z' })}
+      />,
+    );
+    expect(screen.getByText(/· 1 error$/)).toBeInTheDocument();
+    expect(screen.getByText('next check due')).toBeInTheDocument();
+  });
+
   it('More → Delete novel… opens the confirmation', async () => {
     renderWithProviders(<NovelHeader novel={makeNovel({ downloaded_pages: 3 })} />);
     await userEvent.click(screen.getByRole('button', { name: 'More' }));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete novel…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete novel…' }));
     const dialog = screen.getByRole('dialog', { name: 'Delete novel' });
     expect(within(dialog).getByText(/The Ninth Cartographer/)).toBeInTheDocument();
   });
