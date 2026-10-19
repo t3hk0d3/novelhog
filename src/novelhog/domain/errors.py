@@ -26,3 +26,7 @@ class Conflict(DomainError):  # noqa: N818 - names fixed by the spec
 
 class ValidationFailed(DomainError):  # noqa: N818 - names fixed by the spec
     """The request is well-formed but its content is not acceptable."""
+
+
+class ServiceUnavailable(DomainError):  # noqa: N818 - names fixed by the spec
+    """The service cannot handle the request yet (for example, hosts were never published)."""
