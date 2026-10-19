@@ -99,8 +99,13 @@ Responsibilities are split by concern, not by load:
 
 ### Deployment
 
-- `compose.yaml` with services `novelhog-web` and `novelhog-worker`, one image,
-  different commands (`novelhog web`, `novelhog worker`).
+- `compose.yaml` with services `novelhog-migrate`, `novelhog-web` and
+  `novelhog-worker`, one image, different commands (`novelhog db migrate`,
+  `novelhog web`, `novelhog worker`).
+- `novelhog-migrate` is a one-shot service (`restart: "no"`) that applies
+  pending migrations and exits. `novelhog-web` and `novelhog-worker` declare
+  `depends_on: {novelhog-migrate: {condition: service_completed_successfully}}`,
+  so every `docker compose up` migrates exactly once before anything starts.
 - `novelhog web` starts the API (uvicorn on `127.0.0.1:8000`) and Caddy
   (`:8080`, config in `docker/Caddyfile`) under `tini`; if either process exits,
   the other is stopped and the container exits so Docker restarts it.
@@ -145,9 +150,21 @@ The database is accessed through **SQLAlchemy Core 2.x** (no ORM) inside
   logical schema, written in its SQLite form; `schema.py` reproduces every
   table, column, default, foreign key, unique constraint, check and index,
   applying the portability mapping after the DDL.
-- Migrations are **Alembic** revisions under `migrations/`, applied by the API
-  and the worker at startup (`alembic upgrade head`, serialised by the
-  database). Each revision must run on both SQLite (batch mode) and Postgres.
+- Migrations are **Alembic** revisions under `migrations/`. Each revision must
+  run on both SQLite (batch mode) and Postgres.
+- **Only `novelhog db migrate` applies migrations** (`alembic upgrade head`,
+  exit 0 on success). In Compose it runs as the one-shot `novelhog-migrate`
+  service (§2 Deployment); locally it is run by hand.
+- **The API and the worker never migrate.** At startup each compares the
+  database's revision with the code's head revision and refuses to start if
+  they differ, logging "Database schema is at <current>, this build needs
+  <head>; run `novelhog db migrate`" and exiting non-zero. This avoids several
+  processes migrating at once and silent schema changes under running
+  instances.
+- `novelhog db status` prints the current and head revisions and exits 0 when
+  they match, 1 otherwise; the startup check uses the same function.
+- `novelhog api --migrate` is a development shortcut (migrate, then serve); it
+  is never used in Compose.
 - SQLite connections use WAL, `foreign_keys = ON` and `busy_timeout = 5000`.
 
 ```sql
@@ -895,7 +912,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `vapid` | `ensure_keys(repo)`: creates the VAPID key pair in `settings` if missing (API startup) |
 | `api` | FastAPI app under `/api/v1`: routers, SSE, error handlers. Serves no files. Uses only `repo`, `domain`, `ids`, `vapid`, `storage.url` |
 | `worker` | Loop, host publishing, refresh, downloads, export builds, notification dispatch, pruning, signal handling, recovery |
-| `cli` | `novelhog web` (API + Caddy), `novelhog api` (API only, for development), `novelhog worker` |
+| `cli` | `novelhog db migrate`, `novelhog db status`, `novelhog web` (API + Caddy), `novelhog api [--migrate]` (API only, for development), `novelhog worker` |
 
 ### Site support
 
@@ -1370,9 +1387,13 @@ desktop chapters, export dialog, phone normal and select mode).
   on both databases that concurrent workers never claim the same row, that a
   worker losing a race retries and gets the next candidate, and that an expired
   claim is taken over.
-- **Migrations:** `alembic upgrade head` on an empty database produces the same
+- **Migrations:** `novelhog db migrate` on an empty database produces the same
   schema as `schema.py` (Alembic autogenerate reports no differences) on both
-  databases.
+  databases; running it again changes nothing; `novelhog db status` exits 0
+  only at head; the API and the worker refuse to start on a database that is
+  behind (or ahead of) the build, with the message above; in the container
+  smoke test the web and worker services start only after `novelhog-migrate`
+  completes.
 - **API:** `httpx` against the app with a real temporary database and no
   scraper, network or worker; every route,
   success and each error code, including `503 channel_disabled`.
