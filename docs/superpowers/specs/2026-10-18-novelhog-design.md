@@ -712,7 +712,8 @@ stateDiagram-v2
 
 A chapter claimed in a batch but not started yet stays `pending`; its claim only
 reserves it for that worker. If a sync removes a chapter from the TOC it keeps
-its state and content but loses its position (§6.2).
+its state and content but loses its position (§6.2); a removed chapter that was
+still `pending` is dequeued, since it can no longer be shown or cancelled.
 
 ### 5.5 Exports
 
@@ -949,7 +950,8 @@ finish_sync(...):                                     # ONE fenced transaction; 
                             state = pending (queued_at = now, priority = 1) if followed and not initial,
                             else not_requested
             known url     → position = its index (+1); a removed chapter that came back gets removed_at = null
-            missing url   → position = null, removed_at = now (state and content kept; logged as a warning)
+            missing url   → position = null, removed_at = now (state and content kept, except that a
+                            pending chapter is dequeued; logged as a warning)
         title = toc.title if novel.title is null; language = toc.language; cover_key if found
         import_error = null; last_refreshed_at = now
         interval = MIN if (new chapters and not initial) else min(interval * 2, MAX)
