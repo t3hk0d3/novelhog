@@ -105,13 +105,49 @@ describe('SelectionBar', () => {
     });
 
     it('Download requests the pending state for the selected positions', async () => {
-      const { fetchMock } = mount([makeChapter(3, { state: 'not_requested' }), makeChapter(5)]);
+      const { fetchMock } = mount([
+        makeChapter(3, { state: 'not_requested' }),
+        makeChapter(5, { state: 'not_requested' }),
+      ]);
       await userEvent.click(screen.getByRole('button', { name: 'Download' }));
       expect(sent(fetchMock)).toEqual({
         url: `/api/v1/novels/${NOVEL}/chapters`,
         method: 'PATCH',
         body: { state: 'pending', chapters: [3, 5] },
       });
+    });
+
+    it('Download never re-downloads: a mixed selection sends only the not_requested chapters', async () => {
+      const mixed = [
+        makeChapter(1),
+        makeChapter(2, { state: 'not_requested' }),
+        makeChapter(3, { state: 'error' }),
+        makeChapter(4, { state: 'not_requested' }),
+        makeChapter(5, { state: 'pending' }),
+      ];
+      const { fetchMock } = mount(mixed, {
+        response: Response.json({
+          updated: [2],
+          skipped: [{ position: 4, state: 'downloading' }],
+        }),
+      });
+      await userEvent.click(screen.getByRole('button', { name: 'Download' }));
+      expect(sent(fetchMock).body).toEqual({ state: 'pending', chapters: [2, 4] });
+      // 3 selected chapters were not sent, plus 1 skipped by the server.
+      expect(await screen.findByText('Queued 1 · skipped 4')).toBeInTheDocument();
+    });
+
+    it('Retry errors counts the chapters it left out as skipped', async () => {
+      mount([makeChapter(1), makeChapter(2, { state: 'error' })], {
+        response: Response.json({ updated: [2], skipped: [] }),
+      });
+      await userEvent.click(screen.getByRole('button', { name: 'Retry errors' }));
+      expect(await screen.findByText('Queued 1 · skipped 1')).toBeInTheDocument();
+    });
+
+    it('disables Download when nothing selected is waiting to be requested', () => {
+      mount([makeChapter(1), makeChapter(2, { state: 'error' })]);
+      expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
     });
 
     it('Cancel queued requests not_requested when no waiting export needs the chapters', async () => {
@@ -192,7 +228,8 @@ describe('SelectionBar', () => {
 
   describe('after a bulk action', () => {
     it('shows "Queued N · skipped M" and leaves select mode', async () => {
-      const { onDone } = mount(queued(1, 3), {
+      const fresh = [1, 2, 3].map((n) => makeChapter(n, { state: 'not_requested' }));
+      const { onDone } = mount(fresh, {
         response: Response.json({
           updated: [1, 2],
           skipped: [{ position: 3, state: 'downloading' }],
@@ -204,7 +241,8 @@ describe('SelectionBar', () => {
     });
 
     it('on failure shows the error and stays in select mode', async () => {
-      const { onDone } = mount(queued(1, 3), {
+      const fresh = [1, 2, 3].map((n) => makeChapter(n, { state: 'not_requested' }));
+      const { onDone } = mount(fresh, {
         response: Response.json(
           { error: { code: 'validation_error', message: 'Bad selector' } },
           { status: 422 },

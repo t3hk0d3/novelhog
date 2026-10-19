@@ -1,4 +1,4 @@
-import { useRef, type MouseEvent } from 'react';
+import { useEffect, useRef, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useHref } from 'react-router';
 import type { Chapter } from '../api/client';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -48,27 +48,35 @@ function Checkbox({ checked, animate }: { checked: boolean; animate: boolean }) 
 }
 
 /** Press-and-hold on a row: fires `onLongPress` once, and the click that follows is swallowed. */
-function useLongPress(onLongPress: () => void) {
+function useLongPress(onLongPress: () => void, enabled: boolean) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const start = useRef<{ x: number; y: number }>(undefined);
   const fired = useRef(false);
   const cancel = () => {
     clearTimeout(timer.current);
+    timer.current = undefined;
     start.current = undefined;
   };
+  const fire = () => {
+    cancel();
+    fired.current = true;
+    onLongPress();
+  };
+  useEffect(
+    () => () => {
+      clearTimeout(timer.current);
+    },
+    [],
+  );
   return {
     handlers: {
-      onPointerDown: (event: React.PointerEvent) => {
-        if (event.button !== 0) return;
+      onPointerDown: (event: ReactPointerEvent) => {
+        if (!enabled || event.button !== 0) return;
         fired.current = false;
         start.current = { x: event.clientX, y: event.clientY };
-        timer.current = setTimeout(() => {
-          fired.current = true;
-          start.current = undefined;
-          onLongPress();
-        }, LONG_PRESS_MS);
+        timer.current = setTimeout(fire, LONG_PRESS_MS);
       },
-      onPointerMove: (event: React.PointerEvent) => {
+      onPointerMove: (event: ReactPointerEvent) => {
         const from = start.current;
         if (from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > LONG_PRESS_SLOP_PX)
           cancel();
@@ -76,9 +84,14 @@ function useLongPress(onLongPress: () => void) {
       onPointerUp: cancel,
       onPointerCancel: cancel,
       onPointerLeave: cancel,
-      // A touch long press also opens the context menu; the row owns that gesture.
+      // Touch browsers open the link menu (Android: after about 400 ms, before our timer) on a
+      // long press. While a press is pending or just fired the row owns the gesture: suppress the
+      // menu, and treat the menu's arrival as the long press itself.
       onContextMenu: (event: MouseEvent) => {
-        if (fired.current) event.preventDefault();
+        if (timer.current !== undefined) {
+          event.preventDefault();
+          fire();
+        } else if (fired.current) event.preventDefault();
       },
     },
     /** True (once) when the click just ended a long press. */
@@ -93,12 +106,12 @@ function useLongPress(onLongPress: () => void) {
 function Row({
   chapter,
   wide,
+  reducedMotion,
   isNew,
   onOpenDetails,
   selection,
-}: { chapter: Chapter; wide: boolean } & Omit<Props, 'chapters'>) {
+}: { chapter: Chapter; wide: boolean; reducedMotion: boolean } & Omit<Props, 'chapters'>) {
   const title = chapter.title ?? `Chapter ${String(chapter.position)}`;
-  const reducedMotion = useMediaQuery(REDUCED_MOTION);
   // In-app target (current route plus ?chapter=<id>) so every way of following the link stays here.
   const href = useHref({ search: `?chapter=${chapter.id}` });
   const selecting = selection?.active === true;
@@ -107,7 +120,7 @@ function Row({
     if (!selection) return;
     if (selection.active) selection.rangeTo(chapter.id);
     else selection.enter(chapter.id);
-  });
+  }, selection !== undefined);
 
   function onClick(event: MouseEvent) {
     event.preventDefault();
@@ -158,12 +171,14 @@ function Row({
       </span>
     </>
   );
-  const layout = 'flex min-h-11 select-none items-stretch gap-3 ps-3 text-sm min-[720px]:ps-5';
+  const layout =
+    'flex min-h-11 select-none [-webkit-touch-callout:none] items-stretch gap-3 ps-3 text-sm min-[720px]:ps-5';
 
   if (selecting) {
     return (
       <li
         role="option"
+        data-chapter-id={chapter.id}
         aria-selected={selected}
         aria-label={`${title}, ${STATE_LABELS[chapter.state]}`}
         tabIndex={0}
@@ -184,6 +199,7 @@ function Row({
     <li className="border-b border-line">
       <a
         href={href}
+        data-chapter-id={chapter.id}
         aria-label={`${title}, ${STATE_LABELS[chapter.state]}, open details`}
         onClick={onClick}
         {...press.handlers}
@@ -205,6 +221,10 @@ export function ChapterTable({ chapters, isNew, onOpenDetails, selection }: Prop
   const wide = useMediaQuery(DESKTOP);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const selecting = selection?.active === true;
+  const first = chapters[0];
+  const last = chapters[chapters.length - 1];
+  const listLabel =
+    first && last ? `Chapters ${String(first.position)}–${String(last.position)}` : 'Chapters';
   return (
     <div>
       {wide && (
@@ -258,12 +278,17 @@ export function ChapterTable({ chapters, isNew, onOpenDetails, selection }: Prop
           <span className="w-12 shrink-0" />
         </div>
       )}
-      <ul role={selecting ? 'listbox' : undefined} aria-multiselectable={selecting || undefined}>
+      <ul
+        role={selecting ? 'listbox' : undefined}
+        aria-label={selecting ? listLabel : undefined}
+        aria-multiselectable={selecting || undefined}
+      >
         {chapters.map((chapter) => (
           <Row
             key={chapter.id}
             chapter={chapter}
             wide={wide}
+            reducedMotion={reducedMotion}
             isNew={isNew}
             onOpenDetails={onOpenDetails}
             selection={selection}

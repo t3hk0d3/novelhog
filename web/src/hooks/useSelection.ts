@@ -19,6 +19,10 @@ export function useSelection(chapters: Chapter[], visible: Chapter[]) {
   // Whether our history entry is on the stack, and whether the next popstate is our own back().
   const pushed = useRef(false);
   const ownPop = useRef(false);
+  // The row that started the mode (null: the Select button) and the previous `active`, so focus
+  // can move into the mode and back out of it.
+  const origin = useRef<string | null>(null);
+  const wasActive = useRef(false);
 
   const selected = useMemo(() => chapters.filter((c) => ids.has(c.id)), [chapters, ids]);
   const selectedVisible = visible.reduce((n, c) => n + (ids.has(c.id) ? 1 : 0), 0);
@@ -33,6 +37,7 @@ export function useSelection(chapters: Chapter[], visible: Chapter[]) {
   }, []);
 
   const enter = useCallback((id?: string) => {
+    origin.current = id ?? null;
     setActive(true);
     setIds(new Set(id === undefined ? [] : [id]));
     setAnchor(id ?? null);
@@ -51,6 +56,21 @@ export function useSelection(chapters: Chapter[], visible: Chapter[]) {
       window.history.back();
     }
   }, [leave]);
+
+  // Entering unmounts the focused Select button or row link, and leaving unmounts Done or the
+  // action bar; without this focus would fall to <body>.
+  useEffect(() => {
+    if (active === wasActive.current) return;
+    wasActive.current = active;
+    const id = origin.current;
+    const target = active
+      ? document.querySelector<HTMLElement>(
+          id === null ? '[data-select-heading]' : `[data-chapter-id="${id}"]`,
+        )
+      : ((id === null ? null : document.querySelector<HTMLElement>(`[data-chapter-id="${id}"]`)) ??
+        document.querySelector<HTMLElement>('[data-select-button]'));
+    target?.focus({ preventScroll: true });
+  }, [active]);
 
   useEffect(() => {
     const onPop = () => {
@@ -72,25 +92,31 @@ export function useSelection(chapters: Chapter[], visible: Chapter[]) {
   useEffect(() => {
     if (!active) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.key !== 'Escape') return;
       if (document.querySelector('dialog[open]')) return;
       exit();
     };
-    // Capture phase: it must see Escape before the dialog's own handling closes the dialog.
+    // Capture phase, so it checks for an open dialog before the dialog's own Escape handling runs.
     document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('keydown', onKey, true);
     };
   }, [active, exit]);
 
-  const toggle = useCallback((id: string) => {
-    setIds((current) => {
-      const next = new Set(current);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
-    setAnchor(id);
-  }, []);
+  const toggle = useCallback(
+    (id: string) => {
+      const adding = !ids.has(id);
+      setIds((current) => {
+        const next = new Set(current);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      });
+      // The anchor is the last selected row, so deselecting leaves it where it was.
+      if (adding) setAnchor(id);
+      else if (id === anchor) setAnchor([...ids].filter((other) => other !== id).at(-1) ?? null);
+    },
+    [ids, anchor],
+  );
 
   /** Adds the visible rows between the last selected row and `id` (just `id` without one). */
   const rangeTo = useCallback(

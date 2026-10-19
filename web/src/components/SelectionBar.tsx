@@ -57,16 +57,23 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
     enabled: useLiveReady(),
   });
   const patch = useMutation({
-    mutationFn: ({ state, chapters }: { state: ChapterState; chapters: Chapter[] }) =>
+    mutationFn: ({
+      state,
+      chapters,
+    }: {
+      state: ChapterState;
+      chapters: Chapter[];
+      /** The chapters of the selection that were left out of the request. */
+      unsent: number;
+    }) =>
       api.patchChapters(
         novelId,
         state,
         chapters.map((c) => c.position),
       ),
-    onSuccess: (result) => {
-      toast.show(
-        `Queued ${String(result.updated.length)} · skipped ${String(result.skipped.length)}`,
-      );
+    onSuccess: (result, { unsent }) => {
+      const skipped = unsent + result.skipped.length;
+      toast.show(`Queued ${String(result.updated.length)} · skipped ${String(skipped)}`);
       onDone();
     },
   });
@@ -74,6 +81,8 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
   const first = selected[0];
   const last = selected[selected.length - 1];
   const queued = selected.filter((c) => c.state === 'pending');
+  // Bulk Download only fetches chapters not yet requested; re-downloading is a per-chapter action.
+  const fresh = selected.filter((c) => c.state === 'not_requested');
   const failed = selected.filter((c) => c.state === 'error');
   // Waiting exports that cannot finish without the chapters this would dequeue.
   const needed = (exports.data ?? []).filter(
@@ -90,7 +99,7 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
   const cancelQueued = () => {
     setSheetOpen(false);
     if (needed.length > 0) setConfirmCancel(true);
-    else patch.mutate({ state: 'not_requested', chapters: selected });
+    else patch.mutate({ state: 'not_requested', chapters: selected, unsent: 0 });
   };
   const exportEpub = () => {
     setSheetOpen(false);
@@ -100,9 +109,13 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
   const download = (
     <button
       type="button"
-      disabled={none || busy}
+      disabled={fresh.length === 0 || busy}
       onClick={() => {
-        patch.mutate({ state: 'pending', chapters: selected });
+        patch.mutate({
+          state: 'pending',
+          chapters: fresh,
+          unsent: selected.length - fresh.length,
+        });
       }}
       className={primary}
     >
@@ -114,7 +127,11 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
       type="button"
       disabled={failed.length === 0 || busy}
       onClick={() => {
-        patch.mutate({ state: 'pending', chapters: failed });
+        patch.mutate({
+          state: 'pending',
+          chapters: failed,
+          unsent: selected.length - failed.length,
+        });
       }}
       className={button}
     >
@@ -132,7 +149,7 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
     </button>
   );
   const exportButton = (
-    <button type="button" disabled={none} onClick={exportEpub} className={button}>
+    <button type="button" disabled={none || busy} onClick={exportEpub} className={button}>
       Export EPUB…
     </button>
   );
@@ -231,7 +248,7 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
               type="button"
               onClick={() => {
                 setConfirmCancel(false);
-                patch.mutate({ state: 'not_requested', chapters: selected });
+                patch.mutate({ state: 'not_requested', chapters: selected, unsent: 0 });
               }}
               className="min-h-11 rounded-lg bg-danger px-4 text-sm font-semibold text-page"
             >

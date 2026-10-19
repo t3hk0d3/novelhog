@@ -188,6 +188,23 @@ describe('ChapterTable', () => {
         vi.useRealTimers();
       });
 
+      it('suppresses the browser context menu while a press is pending', () => {
+        vi.useFakeTimers();
+        render(<Harness />);
+        const target = row(4);
+        fireEvent.pointerDown(target, { button: 0 });
+        // The menu arriving before our timer (Android) is cancelled and counts as the long press.
+        const notCancelled = fireEvent.contextMenu(target);
+        expect(notCancelled).toBe(false);
+        expect(selectedOutput()).toBe('4');
+        vi.useRealTimers();
+      });
+
+      it('leaves the context menu alone when no press is pending', () => {
+        render(<Harness />);
+        expect(fireEvent.contextMenu(row(4))).toBe(true);
+      });
+
       it('a short press does not enter select mode', () => {
         vi.useFakeTimers();
         render(<Harness />);
@@ -274,6 +291,16 @@ describe('ChapterTable', () => {
         expect(selectedOutput()).toBe('3');
       });
 
+      it('Shift-click ranges from the last selected row, not from a deselected one', () => {
+        render(<Harness />);
+        fireEvent.click(screen.getByText('Select'));
+        fireEvent.click(option(2));
+        fireEvent.click(option(4));
+        fireEvent.click(option(4));
+        fireEvent.click(option(6), { shiftKey: true });
+        expect(selectedOutput()).toBe('2,3,4,5,6');
+      });
+
       it('Shift-click selects from the last selected row', async () => {
         render(<Harness />);
         await userEvent.click(screen.getByText('Select'));
@@ -311,7 +338,10 @@ describe('ChapterTable', () => {
         render(<Harness />);
         await userEvent.click(screen.getByText('Select'));
         await userEvent.click(option(2));
-        expect(screen.getByRole('listbox')).toHaveAttribute('aria-multiselectable', 'true');
+        expect(screen.getByRole('listbox', { name: 'Chapters 1–6' })).toHaveAttribute(
+          'aria-multiselectable',
+          'true',
+        );
         expect(option(2)).toHaveAttribute('aria-selected', 'true');
         expect(option(3)).toHaveAttribute('aria-selected', 'false');
       });
@@ -324,11 +354,18 @@ describe('ChapterTable', () => {
     });
 
     describe('the desktop header checkbox', () => {
-      it('is absent in normal mode and on phones', () => {
+      it('is absent in normal mode', () => {
         setWide(true);
         render(<Harness />);
         expect(screen.queryByRole('checkbox')).toBeNull();
+      });
+
+      it('is absent on phones, even in select mode', async () => {
         setWide(false);
+        render(<Harness />);
+        await userEvent.click(screen.getByText('Select'));
+        expect(screen.getByRole('listbox')).toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).toBeNull();
       });
 
       it('shows none, some and all, and toggles every visible row', async () => {

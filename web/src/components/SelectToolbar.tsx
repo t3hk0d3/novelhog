@@ -14,7 +14,11 @@ export function SelectToolbar({ selection }: { selection: Selection }) {
       </p>
       {selection.active ? (
         <>
-          <p className="font-bold">{`${String(selection.selected.length)} selected`}</p>
+          <p
+            tabIndex={-1}
+            data-select-heading
+            className="font-bold outline-none"
+          >{`${String(selection.selected.length)} selected`}</p>
           <div className="flex items-center gap-2">
             <button type="button" onClick={selection.selectAll} className={link}>
               Select all
@@ -33,6 +37,7 @@ export function SelectToolbar({ selection }: { selection: Selection }) {
           <p className="font-bold">Chapters</p>
           <button
             type="button"
+            data-select-button
             onClick={() => {
               selection.enter();
             }}

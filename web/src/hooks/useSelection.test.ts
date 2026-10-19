@@ -1,4 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { createElement, type ReactNode } from 'react';
+import { BrowserRouter, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { makeChapter, makeChapters } from '../test/fixtures';
 import { useSelection } from './useSelection';
@@ -219,6 +221,48 @@ describe('useSelection', () => {
       const rest = chapters.filter((c) => c.position !== 2);
       rerender({ a: rest, v: rest });
       expect(positions(result)).toEqual([]);
+    });
+  });
+
+  describe('under a BrowserRouter', () => {
+    it('the back gesture leaves the mode and leaves the location alone', async () => {
+      window.history.replaceState(null, '', '/novels/NV1?x=1');
+      const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(BrowserRouter, null, children);
+      const { result } = renderHook(
+        () => ({ selection: useSelection(chapters, chapters), location: useLocation() }),
+        { wrapper },
+      );
+      act(() => {
+        result.current.selection.enter(chapters[0]?.id);
+      });
+      act(() => {
+        window.history.back();
+      });
+      await waitFor(() => {
+        expect(result.current.selection.active).toBe(false);
+      });
+      expect(result.current.location.pathname).toBe('/novels/NV1');
+      expect(result.current.location.search).toBe('?x=1');
+    });
+  });
+
+  describe('toggle and the anchor', () => {
+    it('a deselected row stops being the anchor for ranges', () => {
+      const { result } = setup();
+      act(() => {
+        result.current.enter(chapters[1]?.id);
+      });
+      act(() => {
+        result.current.toggle(chapters[3]?.id ?? '');
+      });
+      act(() => {
+        result.current.toggle(chapters[3]?.id ?? '');
+      });
+      act(() => {
+        result.current.rangeTo(chapters[5]?.id ?? '');
+      });
+      expect(positions(result)).toEqual([2, 3, 4, 5, 6]);
     });
   });
 });
