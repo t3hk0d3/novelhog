@@ -243,14 +243,6 @@ CREATE TABLE hosts (                             -- published by the worker from
     updated_at     TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE host_slots (                        -- download concurrency per site
-    host             TEXT NOT NULL REFERENCES hosts (host) ON DELETE CASCADE,
-    slot             INTEGER NOT NULL CHECK (slot >= 1), -- 1..HOST_CONCURRENCY
-    claimed_by       TEXT,                       -- worker downloading from this host
-    claim_expires_at TEXT,
-    PRIMARY KEY (host, slot),
-    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL))
-) STRICT;
 
 CREATE TABLE settings (                          -- small key/value store
     key        TEXT PRIMARY KEY,                 -- e.g. 'vapid'
@@ -309,8 +301,8 @@ CREATE TABLE consumers (                         -- durable readers of the event
 **Claims** use optimistic compare-and-set updates, identical on both
 databases; there is no `SELECT … FOR UPDATE`.
 
-Every claimable table (`novels`, `chapters`, `exports`, `consumers`,
-`host_slots`) has the same two columns, set and cleared together:
+Every claimable table (`novels`, `chapters`, `exports`, `consumers`) has the
+same two columns, set and cleared together:
 
 | Column | Meaning |
 |---|---|
@@ -338,7 +330,7 @@ Renewal and release are equally uniform: renewing sets
 columns to `NULL` where `claimed_by = :me`. Recovery finds rows with
 `claimed_by IS NOT NULL AND claim_expires_at < :now` and applies the
 table-specific reset (chapter → `pending`, export → `waiting`, novel,
-consumer and host slot → just freed).
+consumer → just freed).
 
 - The outer `WHERE` repeats the "free or expired" condition. SQLite executes
   write statements one at a time; Postgres (`READ COMMITTED`) re-evaluates the
@@ -691,15 +683,13 @@ loop:
     if export = claim_ready_export():                # waiting, range fully downloaded,
         build(export)                                # oldest created_at first (§6.5)
         continue
-    if slot = claim_host_slot():                     # host of the oldest queued chapter
-        batch = claim_batch(slot.host, BATCH_SIZE)   # that host's pending chapters → downloading
+    if batch = claim_batch(BATCH_SIZE):              # oldest queued_at, any novel → downloading
         for chapter in batch:                        # (no novel claim involved)
             if shutting_down: requeue(rest); break
             if state(chapter) != downloading: continue   # dequeued meanwhile
             try: fetch(host, url) → convert → store → downloaded (if url unchanged)
             except: state = error; event payload carries the message
-            renew(slot and the rest of the batch); sleep(REQUEST_DELAY)
-        release(slot)
+            renew(rest of the batch); sleep(REQUEST_DELAY)
         continue
     prune()                                          # event log, at most hourly
     sleep(IDLE_SLEEP)
@@ -755,7 +745,7 @@ refresh(novel):
 - A failed sync backs off the same way, so a dead site settles at monthly; a
   manual sync forces an immediate retry.
 
-### 6.3 Novel claims and host slots
+### 6.3 Novel and chapter claims
 
 - **Novel claim: syncs only.** A worker claims the novel (`claimed_by`,
   `claim_expires_at = now + CLAIM_TTL`) for a TOC sync and releases it
@@ -763,17 +753,15 @@ refresh(novel):
   insert the same new chapters twice and notify twice). Chapter downloads never
   claim the novel; a sync and downloads of the same novel can run at the same
   time.
-- **Host slots: download politeness.** `publish_hosts()` keeps exactly
-  `HOST_CONCURRENCY` rows per host in `host_slots` (adding missing slots,
-  deleting free surplus ones). To download, a worker claims a free slot of the
-  host whose pending chapter has the oldest `queued_at` (compare-and-set like
-  every other claim; a lost race moves on to the next host), then claims a batch
-  of that host's pending chapters, oldest `queued_at` first, then by number,
-  across all novels of the host. At most `HOST_CONCURRENCY` workers download
-  from one site at any time; different sites download in parallel.
-- The slot and the batch's chapter claims share one expiry and are renewed
-  together after each chapter; the slot is released after the batch. Expired
-  slots are freed and their chapters return to `pending` (§4 recovery).
+- **Chapter claims: downloads.** A worker claims a batch of up to
+  `BATCH_SIZE` pending chapters directly, oldest `queued_at` first, then by
+  number, across all novels. The batch's claims are renewed after each chapter;
+  a finished chapter clears its own claim; expired chapter claims return to
+  `pending` (§4 recovery).
+- **Politeness** comes only from `REQUEST_DELAY` per worker. With the default
+  single worker that means one request at a time to any site. Running several
+  workers can fetch from the same site in parallel; per-site limits are future
+  work (§12).
 - The API never uses the scraper and never claims anything.
 
 ### 6.4 Per-chapter pipeline
@@ -1028,7 +1016,6 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 | `NOVELHOG_REFRESH_MIN_INTERVAL` | `21600` (6 h) | |
 | `NOVELHOG_REFRESH_MAX_INTERVAL` | `2592000` (30 d) | |
 | `NOVELHOG_BATCH_SIZE` | `10` | Chapters claimed per batch |
-| `NOVELHOG_HOST_CONCURRENCY` | `1` | Workers allowed to download from one site at the same time (`host_slots` per host) |
 | `NOVELHOG_CLAIM_TTL` | `300` s | Lifetime of every claim (novels, chapters, exports, consumers) before renewal |
 | `NOVELHOG_IDLE_SLEEP` | `30` s | Worker sleep when no work |
 | `NOVELHOG_REQUEST_DELAY` | `1` s | Pause between chapter fetches |
@@ -1312,6 +1299,9 @@ desktop chapters, export dialog, phone normal and select mode).
   also read the event log with its own `consumers` row. No change to the event
   log or the worker loop.
 - **Delete novel** (`DELETE /novels/{id}`); the schema already cascades.
+- **Per-site download limits** for multi-worker setups: e.g. claimable host
+  slots (N rows per host with the standard claim columns) that a worker must
+  hold before claiming that host's chapters.
 - In-browser reader, FTS5 search, manual cover upload, offline PWA caching,
   splitting pages into real chapters.
 
@@ -1389,13 +1379,11 @@ desktop chapters, export dialog, phone normal and select mode).
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   `fetch_chapter` writes no scraper files and needs no scraper `Novel`; no
   scripts and no empty paragraphs in output.
-- **Host slots (real database, both engines):** `publish_hosts` keeps exactly
-  `HOST_CONCURRENCY` slots per host without deleting claimed ones; with
-  `HOST_CONCURRENCY = 1` and three workers, never more than one downloads from a
-  host at a time while other hosts proceed; with `2`, at most two; a lost slot
-  race moves to the next host; expired slots are freed and their chapters
-  requeued; a sync and a download batch of the same novel run concurrently; a
-  chapter whose URL changed during download returns to `pending`.
+- **Download claims (real database, both engines):** two workers claiming
+  batches never get the same chapter; batches follow `queued_at`, then number;
+  expired chapter claims are requeued; a sync and a download batch of the same
+  novel run concurrently; a chapter whose URL changed during download returns to
+  `pending`.
 - **Frontend:** Vitest + Testing Library for normal mode (row click/tap opens
   details; Select, long-press and Shift/Ctrl-click enter select mode with the
   right selection), select mode (tap toggles, long-press and Shift-click select
