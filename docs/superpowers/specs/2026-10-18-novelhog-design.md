@@ -29,8 +29,8 @@ chapter ranges to EPUB for phones and e-readers.
 
 ### In scope (v1)
 
-- Library, add novel (preview → create), automatic and manual TOC sync with
-  adaptive interval.
+- Library, add novel from a URL (details filled in by the first import),
+  automatic and manual TOC sync with adaptive interval.
 - Follow switch: auto-download of new chapters + Web Push notifications.
 - Chapter queueing (single, list, range), dequeue, retry, live progress.
 - "New" badges for chapters released since the novel page was last opened.
@@ -56,41 +56,65 @@ chapter ranges to EPUB for phones and e-readers.
       ▼
  HTTPS reverse proxy (user's)
       ▼
- api (FastAPI) ─────── reads/writes ───────►  SQLite  /data/app.db  (WAL)
-      │  serves SPA at /, /static, /sw.js              ▲
-      │  preview: read-only site fetch                 │ lease novel → sync TOC / claim batch,
-      │                                                │ write chapters, content, changes
- /data/static ◄── covers ── worker ────────────────────┘
- (exports written by api)     │ web_novel_scraper (library)         Web Push
-                              ├──────────► FlareSolverr ──► sites   ─────────► browser push service
+ novelhog-web container
+ ┌──────────────────────────────────────────────┐
+ │ Caddy :8080                                   │
+ │   /            → SPA files (/srv/web)         │
+ │   /sw.js, /manifest.webmanifest               │
+ │   /static/*    → /data/static (read only)     │
+ │   /api/*       → api (uvicorn :8000)          │
+ │ api (FastAPI, stateless) ── novelhog.repo ────┼──►  SQLite  /data/app.db  (WAL)
+ └──────────────────────────────────────────────┘          ▲
+                                                           │ novelhog.repo: syncs, downloads,
+                                                           │ export builds, outbox, changes
+ /data/static ◄── covers, exports ── worker ───────────────┘
+                                      │ web_novel_scraper        notification channels
+                                      ├──► FlareSolverr ──► sites  ──► Web Push (v1), Telegram (later)
 ```
+
+Responsibilities are split by concern, not by load:
 
 | Component | Responsibility |
 |---|---|
-| `api` | FastAPI app. REST under `/api/v1`, SSE stream, serves the built SPA at `/`, `sw.js` and `manifest.webmanifest` at the root, and local static files at `/static`. Builds EPUBs synchronously from the database. The only site access is `preview` (read-only, no scraper files written). |
-| `worker` | Separate process/container from the same image. The only writer of scraper working files. Runs due TOC syncs (with adaptive scheduling and push notifications) and downloads `pending` chapters in batches. |
-| `web` | React SPA + service worker, built to static files and served by `api` (single origin, no CORS). |
-| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, push subscriptions, change log. Accessed only through the repository layer. |
-| Static storage | Covers and EPUB files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
+| `novelhog-web` (container) | Everything that faces people, and nothing about novel sites. Runs two processes: **Caddy** (the only exposed port) and the **API**. |
+| Caddy (in `novelhog-web`) | Serves the built SPA at `/` (with SPA fallback to `index.html`), `sw.js` and `manifest.webmanifest` at the root, and local static files from `/data/static` at `/static`; reverse-proxies `/api/*` to the API on `127.0.0.1:8000` with response buffering off (SSE). Owns cache and download headers (§8.3). |
+| API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push target registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
+| `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the change log it writes. |
+| SPA | React app + service worker, built to static files baked into the image at `/srv/web` and served by Caddy (single origin, no CORS). |
+| `novelhog.repo` | The database interface: a standalone package (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
+| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, notification targets and outbox, change log. Accessed only through `novelhog.repo`. |
+| Static storage | Covers and export files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
 
 ### Deployment
 
-- `compose.yaml` with services `novelhog-api` and `novelhog-worker`, one image,
-  different commands (`novelhog api`, `novelhog worker`).
-- Both mount the `/data` volume and join FlareSolverr's Docker network.
-- `novelhog-api` publishes one port (default `8080`) for the reverse proxy.
-- The reverse proxy must terminate HTTPS (required for service workers and push),
-  disable response buffering for `/api/v1/events`, and not cache `/sw.js`. The
-  README includes Caddy and nginx snippets.
-- Scaling workers (`--scale novelhog-worker=N`) is safe on one host; multi-host
-  clustering requires a networked database (§12).
+- `compose.yaml` with services `novelhog-web` and `novelhog-worker`, one image,
+  different commands (`novelhog web`, `novelhog worker`).
+- `novelhog web` starts the API (uvicorn on `127.0.0.1:8000`) and Caddy
+  (`:8080`, config in `docker/Caddyfile`) under `tini`; if either process exits,
+  the other is stopped and the container exits so Docker restarts it.
+- Both services mount the `/data` volume (`novelhog-web` read-only except
+  `app.db`); only `novelhog-worker` joins FlareSolverr's Docker network.
+- `novelhog-web` publishes one port (default `8080`) for the user's HTTPS
+  reverse proxy.
+- The API process needs only FastAPI, the repository layer and `py-vapid` for key
+  generation; the scraper, FlareSolverr access, Pillow, `ebooklib` and
+  `pywebpush` are used only by the worker. One image still serves both for
+  simplicity; the import-linter contract (§13) keeps the boundary.
+- Both `NOVELHOG_PUBLIC_URL` and `NOVELHOG_VAPID_SUBJECT` are set on both
+  services: the API reports `push_enabled`, the worker builds links and VAPID
+  claims.
+- The user's reverse proxy must terminate HTTPS (required for service workers and
+  push) and must not buffer `/api/v1/events`. The README includes Caddy and
+  nginx snippets. Cache headers come from the built-in Caddy.
+- Scaling: `novelhog-web` (stateless) and `novelhog-worker` can both be scaled on
+  one host; multi-host clustering requires a networked database (§12).
 
 ## 3. Identifiers
 
 - Format: two-letter uppercase type prefix + 12 random characters from
   `[a-z0-9]`, generated with `secrets`.
-  - `NV` novel, `CH` chapter, `EX` export, `PS` push subscription.
-    Example: `CHk3x9q2m7b4wz`.
+  - `NV` novel, `CH` chapter, `EX` export, `NT` notification target,
+    `NF` notification. Example: `CHk3x9q2m7b4wz`.
 - 36¹² ≈ 4.7·10¹⁸ (~62 bits). Primary keys are unique; an insert that collides is
   retried with a fresh ID.
 - IDs carry no ordering. Every listing orders by an explicit column
@@ -110,9 +134,10 @@ CREATE TABLE novels (
     id                TEXT PRIMARY KEY
                       CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NV'
                              AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
-    title             TEXT NOT NULL UNIQUE,      -- also the scraper's novel identifier
-    host              TEXT NOT NULL,
-    toc_url           TEXT NOT NULL,
+    title             TEXT,                      -- display only; NULL until the initial import
+    host              TEXT NOT NULL REFERENCES hosts (host),
+    toc_url           TEXT NOT NULL UNIQUE,
+    import_error      TEXT,                      -- set if the initial import failed
     cover_key         TEXT,                      -- static storage key; NULL = no cover
     followed          INTEGER NOT NULL DEFAULT 1 CHECK (followed IN (0, 1)),
     refresh_interval  INTEGER NOT NULL CHECK (refresh_interval > 0),  -- seconds, current
@@ -188,16 +213,45 @@ CREATE TABLE exports (
 CREATE INDEX exports_by_novel ON exports (novel_id, created_at);
 CREATE INDEX exports_waiting  ON exports (created_at) WHERE state = 'waiting';
 
-CREATE TABLE push_subscriptions (
-    id         TEXT PRIMARY KEY
-               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'PS'
-                      AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
-    endpoint   TEXT NOT NULL UNIQUE,
-    p256dh     TEXT NOT NULL,
-    auth       TEXT NOT NULL,
-    user_agent TEXT,
-    created_at TEXT NOT NULL
+CREATE TABLE hosts (                             -- published by the worker from the scraper
+    host           TEXT PRIMARY KEY,             -- e.g. 'fanmtl.com'
+    has_pagination INTEGER NOT NULL CHECK (has_pagination IN (0, 1)),
+    updated_at     TEXT NOT NULL
 ) STRICT;
+
+CREATE TABLE settings (                          -- small key/value store
+    key        TEXT PRIMARY KEY,                 -- e.g. 'vapid'
+    value      TEXT NOT NULL CHECK (json_valid(value)),
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE notification_targets (              -- where notifications are delivered
+    id         TEXT PRIMARY KEY
+               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NT'
+                      AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    channel    TEXT NOT NULL,                    -- 'webpush' (v1); 'telegram', … later
+    address    TEXT NOT NULL CHECK (json_valid(address)), -- channel-specific
+    address_key TEXT NOT NULL,                   -- channel-specific identity, e.g. push endpoint
+    label      TEXT,                             -- e.g. user agent, chat name
+    created_at TEXT NOT NULL,
+    UNIQUE (channel, address_key)
+) STRICT;
+
+CREATE TABLE notifications (                     -- outbox, written with the event
+    id         TEXT PRIMARY KEY
+               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NF'
+                      AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
+    kind       TEXT NOT NULL CHECK (kind IN ('release', 'export_ready')),
+    novel_id   TEXT NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+    payload    TEXT NOT NULL CHECK (json_valid(payload)), -- kind-specific facts
+    created_at TEXT NOT NULL,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    sent_at    TEXT,
+    CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
+) STRICT;
+
+CREATE INDEX notifications_pending ON notifications (created_at) WHERE sent_at IS NULL;
 
 CREATE TABLE changes (
     seq       INTEGER PRIMARY KEY AUTOINCREMENT, -- SSE event id
@@ -216,17 +270,21 @@ CREATE INDEX changes_by_time   ON changes (at);
 Notes:
 
 - Every state-changing write appends to `changes` in the same transaction.
-- Pruning: the API deletes rows older than 24 h on a timer, **except the newest
-  row of each `entity_id`**, so every novel, chapter and export always keeps its
-  latest event.
+- Pruning: the worker, which writes `changes`, deletes rows older than 24 h on
+  its idle passes, **except the newest row of each `entity_id`**, so every novel,
+  chapter and export always keeps its latest event. It also deletes sent
+  `notifications` older than 7 days.
 - Error messages are not stored on `chapters`. A chapter that fails gets
   `state = 'error'` and a `CH` change whose payload carries `"error": "<message>"`.
   `Chapter.error` in the API is read from the chapter's newest change when its
   state is `error`, and is `null` otherwise. Re-queuing writes a new change, so
   the old message stops being current without any clearing.
-- The VAPID key pair lives in `/data/vapid.json`, not in the database, so a
-  database restore never changes the server's push identity. It is generated on
-  first start and never regenerated.
+- The VAPID key pair lives in `settings` under `vapid`
+  (`{"public_key", "private_key"}`). The API creates it on startup when it is
+  missing, with an insert that is a no-op if another instance won the race, and
+  never regenerates it. The worker reads it to deliver Web Push.
+- The scraper identifies a novel by its novel ID, which is also the name of its
+  working folder under `/data/work`; `title` is display only.
 - `ON DELETE CASCADE` is declared now so that deleting a novel later needs only a
   route.
 
@@ -252,7 +310,6 @@ Base path `/api/v1`. JSON in/out. OpenAPI generated by FastAPI.
 GET    /api/v1/settings
 GET    /api/v1/hosts
 GET    /api/v1/novels
-POST   /api/v1/novels/preview
 POST   /api/v1/novels
 GET    /api/v1/novels/{novel_id}
 PATCH  /api/v1/novels/{novel_id}
@@ -272,16 +329,17 @@ from `STATIC_BASE_URL` (§8.3).
 
 ### 5.2 Objects
 
-**Host**: `{host: string, has_pagination: bool}`, read from the installed
-scraper's decode guide.
+**Host**: `{host: string, has_pagination: bool}`, read from the `hosts` table
+(published by the worker from the installed scraper's decode guide).
 
 **Novel**
 
 ```
 id                 string          NV…
-title              string
+title              string | null   null until the initial import
 host               string
 toc_url            string
+import_error       string | null   initial import failed; cleared by a later successful sync
 cover_url          string | null
 followed           bool
 syncing            bool
@@ -349,14 +407,17 @@ bounds, no extra keys.
 |---|---|---|---|
 | `GET /hosts` | — | `Host[]` | — |
 | `GET /novels` | — | `Novel[]` by `created_at` desc | — |
-| `POST /novels/preview` | `{url}` | `{title, host, toc_url, cover_url}`; `cover_url` is the remote URL | `422 unsupported_host`, `502 upstream_failed` |
-| `POST /novels` | `{title, toc_url, followed?: bool = true}` | `201 Novel` immediately, with no chapters and `syncing = true` | `409 title_exists`, `422 unsupported_host` |
+| `POST /novels` | `{toc_url, followed?: bool = true}` | `201 Novel` immediately: `title = null`, no chapters, `syncing = true` | `409 novel_exists` (same `toc_url`; `details.novel_id`), `422 unsupported_host` |
 | `GET /novels/{id}` | — | `Novel` | `404` |
-| `PATCH /novels/{id}` | `{followed?: bool, seen?: true}` | `Novel` | `404`, `422` |
+| `PATCH /novels/{id}` | `{followed?: bool, seen?: true, title?: string}` | `Novel` | `404`, `422` |
 | `POST /novels/{id}/sync` | — | `202 Novel` | `404` |
 
-- `POST /novels` sets `refresh_interval = REFRESH_MIN_INTERVAL` and
-  `next_refresh_at = now`; the worker performs the initial import.
+- `POST /novels` only writes the database: it checks the URL's host against the
+  `hosts` table, then inserts the novel with `refresh_interval =
+  REFRESH_MIN_INTERVAL` and `next_refresh_at = now`. The worker's initial import
+  fills in title, cover and chapters; a failure sets `import_error`.
+- `PATCH {title}` renames the novel (display only, non-empty, trimmed). A later
+  sync never overwrites a title set by the user.
 - `POST /sync` sets `next_refresh_at = now`. The result arrives over SSE.
 - `PATCH {seen: true}` sets `seen_at = now` (resets `new_pages`). The UI sends it
   when the novel page is opened.
@@ -422,12 +483,19 @@ refresh_max_interval   int              seconds
 ```
 
 The UI loads it once, hides the notifications toggle when `push_enabled` is
-false, and uses `vapid_key` for `PushManager.subscribe`.
+false, and uses `vapid_key` for `PushManager.subscribe`. `vapid_key` is read
+from the `settings` table.
 
 | Route | Request | Response | Errors |
 |---|---|---|---|
-| `POST /push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 {id}`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422` |
-| `DELETE /push/subscriptions/{id}` | — | `204` | `404` |
+| `POST /push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 {id}`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422`, `503 push_disabled` |
+| `DELETE /push/subscriptions/{id}` | — | `204` | `404`, `503 push_disabled` |
+
+The push routes are the Web Push front door to `notification_targets`: a
+subscription is stored as a target with `channel = 'webpush'`,
+`address = {endpoint, keys}`, `address_key = endpoint`, `label = User-Agent`,
+and `{id}` is the target's `NT…` ID. Other channels register their targets
+through their own services (e.g. a Telegram bot), not through these routes.
 
 ### 5.7 Events (SSE)
 
@@ -453,20 +521,22 @@ false, and uses `vapid_key` for `PushManager.subscribe`.
 
 ### 5.8 Status codes
 
-`404` unknown or malformed ID; `409 title_exists`; `422` validation (including
-FastAPI's own errors, reshaped into the error body); `502 upstream_failed`
-(preview only); `503 push_disabled` (push routes when push is not configured);
-`500` unexpected, generic message, traceback only in logs.
+`404` unknown or malformed ID; `409 novel_exists`; `422` validation (including
+FastAPI's own errors, reshaped into the error body, and `unsupported_host`);
+`503 push_disabled` (push routes when push is not configured); `500`
+unexpected, generic message, traceback only in logs. The API never calls
+external services, so it has no `502`.
 
 ## 6. Worker
 
 ### 6.1 Loop
 
 ```
-on start: recover()
+on start: publish_hosts(); recover()                 # hosts table from the decode guide
 loop:
     if shutting_down: exit
-    recover()                                        # expired leases only
+    recover()                                        # expired leases and claims only
+    dispatch_notifications()                         # outbox → channels (§6.6)
     if novel = lease_due_refresh():                  # next_refresh_at <= now, free lease,
         refresh(novel); release_lease(novel)         # oldest next_refresh_at first
         continue
@@ -483,13 +553,18 @@ loop:
             renew_lease(novel); sleep(REQUEST_DELAY)
         release_lease(novel)
         continue
+    prune()                                          # changes + sent notifications, at most hourly
     sleep(IDLE_SLEEP)
 ```
 
 - Each lease/claim step is one atomic transaction.
+- `publish_hosts()` replaces the `hosts` table with the hosts in the installed
+  scraper's decode guide (one transaction). Novels whose host is no longer
+  listed keep working until a sync fails.
 - `recover()` moves `downloading` chapters of novels whose lease expired back to
-  `pending` and clears the lease, and moves `building` exports whose
-  `claimed_at` is older than `LEASE_TTL` back to `waiting`.
+  `pending` and clears the lease, moves `building` exports whose `claimed_at` is
+  older than `LEASE_TTL` back to `waiting`, and releases notification claims
+  older than `LEASE_TTL`.
 - SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch,
   release the lease, exit 0.
 - Errors in the loop itself (e.g. database locked) are logged, then back off 5 s,
@@ -503,9 +578,13 @@ loop:
 refresh(novel):
     initial = novel.last_refreshed_at is null
     try:
-        toc = scraper_adapter.sync_toc(novel.title, novel.toc_url)   # [(number, url)]
+        toc = scraper_adapter.sync_toc(novel.id, novel.toc_url)  # {title, cover_url, chapters: [(number, url)]}
     except:
-        log; interval = min(interval * 2, MAX); schedule; return
+        log
+        if initial: import_error = '<ExceptionType>: <summary>'
+        interval = min(interval * 2, MAX); schedule; append novel change; return
+    import_error = null
+    if novel.title is null: title = toc.title          # never overwrite a user-set title
     new = upsert chapters by number (existing rows keep state; changed URL updated)
     for each new chapter:
         released_at = null if initial else now
@@ -515,9 +594,13 @@ refresh(novel):
     interval = MIN if new and not initial else min(interval * 2, MAX)
     next_refresh_at = now + interval ± 10% jitter
     append changes: one per new or changed chapter, one for the novel
-    if new and not initial and novel.followed: notifier.notify_release(novel, numbers)
+    if new and not initial and novel.followed:
+        insert notification(kind = 'release', novel_id, payload = {numbers})   # same transaction
 ```
 
+- The initial import is the first sync after `POST /novels`: it fills in title,
+  cover and chapters. If it fails, `import_error` is set and shown on the card;
+  the novel keeps its backoff schedule and a manual sync retries.
 - Initial import never sets `released_at`, never auto-queues, never notifies.
 - With `MIN = 6 h`, `MAX = 30 d` the interval walks 6 h → 12 h → 1 d → 2 d → 4 d
   → 8 d → 16 d → 30 d while nothing is found, and resets to 6 h on any release.
@@ -533,7 +616,7 @@ refresh(novel):
 
 ### 6.4 Per-chapter pipeline
 
-1. `scraper_adapter.fetch_chapter(title, number)` → `{title, body_html, http_session}`.
+1. `scraper_adapter.fetch_chapter(novel_id, number)` → `{title, body_html, http_session}`.
    The body is selected with the scraper decoder's content selector for the host;
    the scraper's own cleaner is not used.
 2. `html_to_markdown.convert(body_html, fetch_image)` → `{markdown, has_images, warnings}`.
@@ -553,7 +636,8 @@ build(export):
         data = exporter.build(export.format, novel, chapters of the range, cover)
         storage.put(key, data, mime, download_name = filename)
         state = 'ready', storage_key, size_bytes, ready_at = now
-        if export.waited: notifier.notify_export_ready(novel, export)
+        if export.waited:                              # same transaction
+            insert notification(kind = 'export_ready', novel_id, payload = {export_id, filename})
     except:
         state = 'failed', error = '<ExceptionType>: <summary>' (traceback logged)
     clear claimed_by / claimed_at; append an export change
@@ -564,7 +648,33 @@ build(export):
 - A `failed` export is final; the UI offers "Try again", which creates a new
   export for the same range.
 - Exports whose range was already complete at request time (`waited = 0`) do
-  not send a push; the user is still on the page.
+  not notify; the user is still on the page.
+
+### 6.6 Notification delivery
+
+Events that should reach a person are written to the `notifications` outbox in
+the same transaction as the event itself (§6.2, §6.5). Delivery is a separate
+step, so a crash between the two loses nothing and a channel outage never rolls
+back novel work.
+
+```
+dispatch_notifications():
+    claim up to 20 notifications with sent_at null and no live claim
+      (one transaction: claimed_by = me, claimed_at = now)
+    for each notification:
+        message = messages.render(notification)          # channel-neutral text
+        for each target in notification_targets:
+            channel = channels[target.channel]           # unknown channel: skip, log
+            result = channel.send(target, message)
+            Gone   → delete the target
+            Failed → log (no retry)
+        sent_at = now, clear the claim
+```
+
+- Every target receives every notification in v1 (one person, no per-target
+  filters).
+- If push is not configured (no `NOVELHOG_PUBLIC_URL` / `VAPID_SUBJECT`), the
+  `webpush` channel is not registered; notifications are still marked sent.
 
 ## 7. Modules
 
@@ -574,9 +684,9 @@ Package `novelhog`, under `src/novelhog/`.
 |---|---|
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
-| `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`, `UpstreamFailed`) |
-| `repo` | All SQL, migrations, leases, claiming, change log. The only module that talks to SQLite |
-| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts()`, `preview(url)`, `sync_toc(title, toc_url) -> [(number, url)]` (creates the scraper novel on first use), `fetch_chapter(title, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr) |
+| `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
+| `repo` | The database interface: all SQL, migrations, leases, claiming, change log, outbox, targets, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Plain HTTP image download reusing FlareSolverr cookies and user agent; validation (§8.2) |
@@ -584,10 +694,13 @@ Package `novelhog`, under `src/novelhog/`.
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
 | `exporter` | Format registry (`format → mime, extension, accepted image types, builder`). EPUB: Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → `ebooklib`; cover; inline images extracted to EPUB items and converted per §8.4 |
 | `images` | Pillow helpers: `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)` |
-| `notifier` | `notify_release(novel, numbers)` and `notify_export_ready(novel, export)`: send one Web Push to every subscription via `pywebpush`; delete subscriptions answered with `404`/`410`; log other failures, no retry. VAPID key load/generate |
-| `api` | FastAPI app, routers, SSE, error handlers, static mounts, `sw.js` and manifest |
-| `worker` | Loop, refresh, downloads, signal handling, recovery |
-| `cli` | `novelhog api`, `novelhog worker` |
+| `notifications.messages` | `render(notification) -> NotificationMessage(title, body, url, icon)`: channel-neutral wording per `kind` (§8.6) |
+| `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(target, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
+| `notifications.dispatcher` | `dispatch()`: claims outbox rows and delivers them through the registry (§6.6) |
+| `vapid` | `ensure_keys(repo)`: creates the VAPID key pair in `settings` if missing (API startup) |
+| `api` | FastAPI app under `/api/v1`: routers, SSE, error handlers. Serves no files. Uses only `repo`, `domain`, `ids`, `vapid`, `storage.url` |
+| `worker` | Loop, host publishing, refresh, downloads, export builds, notification dispatch, pruning, signal handling, recovery |
+| `cli` | `novelhog web` (API + Caddy), `novelhog api` (API only, for development), `novelhog worker` |
 
 ### Site support
 
@@ -652,9 +765,14 @@ Package `novelhog`, under `src/novelhog/`.
   immutable).
 - Exports: `exports/<novel_id>/<export_id>/<Title> Chapters <from>-<to>.<ext>`;
   the last path segment is the download filename (URL-encoded in URLs).
-- `LocalStaticStorage` writes under `/data/static`; the API serves it at
-  `/static` with long-lived cache headers; export files are served with their
-  stored `mime` and `Content-Disposition: attachment`.
+- `LocalStaticStorage` writes under `/data/static` (worker only). Caddy in
+  `novelhog-web` serves it read-only at `/static`:
+  - `/static/covers/*`: `Cache-Control: public, max-age=31536000, immutable`.
+  - `/static/exports/*`: `Content-Disposition: attachment`, and an explicit
+    `Content-Type` per extension (`.epub` → `application/epub+zip`), since
+    Caddy's default type table may not know it.
+  - `/sw.js`: `Cache-Control: no-cache`; other SPA assets are hashed by Vite and
+    cached as immutable; `index.html` is `no-cache`.
 
 ### 8.4 Export image compatibility
 
@@ -676,20 +794,24 @@ The cover goes through the same conversion.
 - Inline `data:` images become EPUB image items, converted per §8.4.
 - Metadata: title; identifier = export ID.
 
-### 8.6 Push notification
+### 8.6 Notification messages
 
-- New chapters: `{title: <novel title>, body: "<N> new chapters (<first>–<last>)",
-  url: <PUBLIC_URL>/novels/<id>, icon: <cover_url or app icon>}`.
-- Export ready (only for exports that had to wait): `{title: <novel title>,
-  body: "<filename> is ready", url: <PUBLIC_URL>/novels/<id>#exports,
-  icon: <cover_url or app icon>}`.
-- The service worker shows it and opens/focuses `url` on click.
+`messages.render` turns an outbox row into a channel-neutral
+`NotificationMessage`; each channel decides how to present it.
+
+| Kind | title | body | url |
+|---|---|---|---|
+| `release` | novel title | "<N> new chapters (<first>–<last>)" | `<PUBLIC_URL>/novels/<id>` |
+| `export_ready` | novel title | "<filename> is ready" | `<PUBLIC_URL>/novels/<id>#exports` |
+
+`icon` is the novel's cover URL, or the app icon. Web Push sends the message as
+the JSON payload; the service worker shows it and opens/focuses `url` on click.
 
 ## 9. Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NOVELHOG_DATA_DIR` | `/data` | Holds `app.db`, `vapid.json`, `work/`, `static/` |
+| `NOVELHOG_DATA_DIR` | `/data` | Holds `app.db`, `work/`, `static/` |
 | `NOVELHOG_PUBLIC_URL` | — (required for push) | External HTTPS URL, used in push links and the VAPID claim |
 | `NOVELHOG_VAPID_SUBJECT` | — (required for push) | `mailto:` contact for the VAPID claim |
 | `NOVELHOG_FLARESOLVERR_URL` | `http://flaresolverr:8191` | |
@@ -724,11 +846,14 @@ manifest makes the app installable.
    stacked bar of downloaded / pending / error over total, a "N new" badge, the
    follow toggle, and a syncing/downloading indicator. "Add novel" button. Empty
    state with explanation.
-2. **Add novel (dialog)**: URL → Preview (title, host, cover) → editable title,
-   follow toggle (on by default) → Add. Closes immediately; the new card shows
-   "Importing table of contents…" until the first `novel` event. `422
-   unsupported_host` shows the supported-host list; `502` shows the message with
-   Retry.
+2. **Add novel (dialog)**: one step: table-of-contents URL, follow toggle (on by
+   default), **Add**. The host check is a database lookup, so `422
+   unsupported_host` (with the supported-host list) and `409 novel_exists` (with
+   a link to the existing novel) appear immediately. On success the dialog
+   closes and the new card shows the URL's host and "Importing…" until the first
+   `novel` event fills in title and cover. If the import fails, the card shows
+   "Import failed: <message>" with **Retry** (`POST /sync`). The title can be
+   edited later on the novel page (`PATCH {title}`).
 3. **Novel (`/novels/:id`)**: sends `PATCH {seen: true}` on open.
    - Header: cover, title, host, TOC link, follow toggle, Sync button,
      "checked 2 h ago · next in 4 h", counters.
@@ -891,7 +1016,8 @@ subscribed).
 
 ![Library](sketches/library.png)
 
-**Add novel dialog**
+**Add novel dialog**: one step; the host check is a database lookup and the
+details arrive with the first import.
 
 ![Add novel dialog](sketches/add-novel.png)
 
@@ -967,6 +1093,12 @@ desktop chapters, export dialog, phone normal and select mode).
   `Content-Disposition` per object.
 - **Image table**: move inline images of chapters with `has_images` into a
   content-addressed table.
+- **Telegram notifications.** A `TelegramChannel` registered in the worker's
+  channel registry (`address = {chat_id}`), plus a separate `novelhog-telegram`
+  bot service that uses `novelhog.repo` to register targets on `/start`, remove
+  them on `/stop`, and answer simple commands (library, new chapters). No change
+  to the outbox or the worker loop.
+- **Delete novel** (`DELETE /novels/{id}`); the schema already cascades.
 - In-browser reader, FTS5 search, manual cover upload, offline PWA caching,
   splitting pages into real chapters.
 
@@ -990,10 +1122,24 @@ desktop chapters, export dialog, phone normal and select mode).
   `seen_at`; SSE replay from `Last-Event-ID` and `resync`; pruning keeps the
   newest change per entity; `Chapter.error` comes from the newest change only
   while the state is `error` and survives pruning.
-- **Notifier (fake sender):** exactly one push per sync with new chapters of a
-  followed novel; none for no new chapters, initial import or unfollowed novels;
-  `410` deletes the subscription; VAPID keys stable across restarts; one
-  export-ready push for an export with `waited = 1`, none with `waited = 0`.
+- **Notifications (fake channel):** exactly one `release` outbox row per sync
+  with new chapters of a followed novel, written in the same transaction; none
+  for no new chapters, initial import or unfollowed novels; one `export_ready`
+  row for an export with `waited = 1`, none with `waited = 0`; the dispatcher
+  delivers each row to every target once, marks it sent, skips unknown channels,
+  deletes targets on `Gone`, logs `Failed`; two dispatchers never deliver the
+  same row; stale claims are released; `messages.render` wording per kind;
+  `WebPushChannel` maps `404`/`410` to `Gone`.
+- **VAPID:** `ensure_keys` creates the pair once, is a no-op when it exists, and
+  two concurrent callers end with one pair; `/settings` exposes only the public
+  key.
+- **Hosts and novels:** `publish_hosts` replaces the table from the decode guide;
+  `POST /novels` rejects unknown hosts and duplicate `toc_url`; the initial import
+  sets the title only when none is set and records `import_error` on failure; a
+  later successful sync clears it; `PATCH {title}` survives syncs.
+- **Process boundaries:** the API package imports neither `scraper_adapter`,
+  `exporter`, `images` nor `notifications.channels` (import-linter contract);
+  `repo` imports nothing beyond the standard library, `ids` and `domain`.
 - **Exports (real temporary SQLite):** `POST` queues `not_requested` and `error`
   chapters of the range and creates a `waiting` export with the right `waited`;
   an identical waiting export is returned instead of a duplicate; the worker
@@ -1004,7 +1150,8 @@ desktop chapters, export dialog, phone normal and select mode).
   export, leaves its chapters queued and answers `409` once building; expired
   `building` claims return to `waiting`; every state change emits an `export`
   change.
-- **API:** `httpx` against the app with a fake `scraper_adapter`; every route,
+- **API:** `httpx` against the app with a real temporary database and no
+  scraper, network or worker; every route,
   success and each error code, including `503 push_disabled`.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
@@ -1027,6 +1174,12 @@ desktop chapters, export dialog, phone normal and select mode).
   the notifications toggle states, and the theme switcher (stored choice applied,
   System follows `prefers-color-scheme` changes, storage unavailable falls back
   to System); one Playwright smoke test of the main flow against a fake backend.
+- **Container smoke test** (`docker compose up` in CI, no worker network access):
+  Caddy serves the SPA with fallback to `index.html`, `/sw.js` with `no-cache`,
+  a file under `/static/exports/` with `Content-Disposition: attachment` and
+  `application/epub+zip`, proxies `/api/v1/settings`, and streams
+  `/api/v1/events` without buffering; the container exits when either process
+  dies.
 - No live-site tests in CI. `scripts/smoke_live.sh <url>` exists for manual
   checks.
 
@@ -1040,10 +1193,11 @@ desktop chapters, export dialog, phone normal and select mode).
 - **Layout:**
 
   ```
-  src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,notifier,
-                html_to_markdown,image_fetcher,images,chapter_store,ids.py,config.py,cli.py}
+  src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,notifications,
+                html_to_markdown,image_fetcher,images,chapter_store,vapid.py,ids.py,
+                config.py,cli.py}
   migrations/
   web/src/{routes,components,api,hooks}   web/public/{sw.js,manifest.webmanifest}
   tests/{unit,integration,api,fixtures}
-  docker/   compose.yaml   STYLEGUIDE.md   docs/superpowers/specs/
+  docker/{Dockerfile,Caddyfile}   compose.yaml   STYLEGUIDE.md   docs/superpowers/specs/
   ```
