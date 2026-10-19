@@ -1209,7 +1209,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `image_fetcher` | Image download through `net`; validation (§8.2) |
 | `chapter_store` | Worker-side read access to stored chapter Markdown (`get(chapter_id)`), over `repo` |
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `put_file(key, path, mime, download_name=None)`, `get(key) -> bytes \| None`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage`; `cover_key(novel_id, data, ext)` |
-| `exporter` | Builders per format. EPUB: `ebooklib` (§8.5); Markdown → XHTML with `markdown-it-py` (raw HTML disabled); cover; inline images extracted to EPUB items and converted per §8.4 |
+| `exporter` | Format-neutral export pipeline (§8.5): the `Exporter` protocol, the registry and `build(fmt, book, out)`. v1 registers one exporter, `exporter.epub` (`ebooklib`; Markdown → XHTML with `markdown-it-py`, raw HTML disabled; cover; inline images extracted to EPUB items and converted per §8.4) |
 | `images` | Pillow helpers: `sniff`, `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)`, pixel-count guard |
 | `notifications.rules` | `match(event, novel) -> NotificationMessage(title, body, url, icon) \| None` (§6.6, §8.6) |
 | `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(subscription, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
@@ -1324,7 +1324,38 @@ modified, so each export starts from the best available source.
 
 The cover goes through the same conversion.
 
-### 8.5 EPUB
+### 8.5 Export formats
+
+Exports go through one format-neutral pipeline, so a new format is an
+additional module, not a redesign. v1 ships EPUB only.
+
+```mermaid
+flowchart LR
+    build["worker.builds.build"] --> input["BookInput<br/>metadata, cover, chapters as Markdown"]
+    input --> registry{"exporter registry<br/>by Format"}
+    registry --> epub["exporter.epub<br/>(v1)"]
+    registry -.-> pdf["exporter.pdf<br/>(future)"]
+    registry -.-> fb2["exporter.fb2<br/>(future)"]
+    epub --> file["file → StaticStorage"]
+```
+
+- `domain.exports` owns the format list: `Format` and `FORMATS[format] =
+  (mime, extension, accepted image types)`. The API validates `format` against
+  it and stores `mime`; it never imports `exporter`.
+- `exporter` defines the `Exporter` protocol (`format: Format`,
+  `build(book: BookInput, out: Path) -> None`), a registry `Format → Exporter`,
+  and `build(fmt, book, out)`, which dispatches to the registered exporter.
+- `BookInput` is format-neutral: identifier, title, language, the cover (bytes
+  and mime) and the chapters (position, title, Markdown). Each exporter renders
+  Markdown and converts images to its accepted types itself (§8.4).
+- Adding a format later (PDF, FB2, …) means: a `Format` member and `FORMATS`
+  entry in `domain.exports`, one module `exporter/<format>.py` implementing
+  `Exporter`, and registering it. No schema, API or worker change; the UI shows
+  the formats it knows.
+- A format in `domain.exports` without a registered exporter is a programming
+  error caught by a test (every `Format` has an exporter).
+
+#### EPUB (v1)
 
 - EPUB 3, built with `ebooklib`: one XHTML document per chapter in `position`
   order, plus a navigation document.
@@ -1735,7 +1766,8 @@ desktop chapters, export dialog, phone normal and select mode).
   (downscale only above the limit, aspect ratio kept, animated untouched, `0`
   disables, small images byte-identical; WebP → PNG with alpha / JPEG without,
   animated → first frame); `find_title`, `find_cover_url` (each heuristic,
-  relative URLs); `exporter` (order, cover, image extraction, no WebP in EPUB
+  relative URLs); `exporter` (every `Format` has a registered exporter, dispatch by
+  format; EPUB: order, cover, image extraction, no WebP in EPUB
   output, stored originals unchanged, well-formed XML with hostile titles,
   `dc:language`);
   notification rules.
