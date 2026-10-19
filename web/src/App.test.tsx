@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -36,5 +37,18 @@ describe('App', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('main')).toHaveTextContent('NV123');
+  });
+});
+
+describe('App header', () => {
+  it('Add novel opens the add-novel dialog', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+    const banner = screen.getByRole('banner');
+    await userEvent.click(within(banner).getByRole('button', { name: 'Add novel' }));
+    expect(screen.getByRole('dialog', { name: 'Add novel' })).toBeInTheDocument();
   });
 });
