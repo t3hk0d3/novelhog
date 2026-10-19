@@ -4,11 +4,20 @@ import io
 import warnings
 from dataclasses import dataclass
 
-from PIL import Image, ImageSequence
+from PIL import Image, ImageOps, ImageSequence
 
 JPEG_QUALITY = 90
 
 _FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image/webp": "WEBP"}
+
+
+# Images between 1x and 2x Pillow's limit only warn; check_pixels rejects them explicitly.
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+
+
+def configure_pixel_limit(max_pixels: int) -> None:
+    """Set Pillow's decompression-bomb limit to ``max_pixels`` (idempotent; call at startup)."""
+    Image.MAX_IMAGE_PIXELS = max_pixels
 
 
 class TooLarge(Exception):  # noqa: N818 - name fixed by the task contract
@@ -39,10 +48,8 @@ def sniff(data: bytes) -> str | None:
 def check_pixels(data: bytes, max_pixels: int) -> None:
     """Raise TooLarge when the header declares more than ``max_pixels``; never decodes."""
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                width, height = image.size
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
     except Image.DecompressionBombError as exc:
         raise TooLarge(str(exc)) from exc  # noqa: TRY003
     if width * height > max_pixels:
@@ -53,24 +60,40 @@ def _is_animated(image: Image.Image) -> bool:
     return bool(getattr(image, "is_animated", False))
 
 
+def _is_lossless_webp(data: bytes) -> bool:
+    return b"VP8L" in data[:32]
+
+
 def downscale(data: bytes, mime: str, max_dimension: int) -> bytes:
-    """Shrink so the longest side is at most ``max_dimension``, in the original format."""
+    """Shrink so the longest side is at most ``max_dimension``, in the original format.
+
+    EXIF orientation is applied first and the ICC profile is kept; lossless WebP stays lossless.
+    """
     if max_dimension <= 0:
         return data
     with Image.open(io.BytesIO(data)) as image:
         if _is_animated(image) or max(image.size) <= max_dimension:
             return data
         image.load()
-        resized = image.copy()
-        resized.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
-    out = io.BytesIO()
+        resized = ImageOps.exif_transpose(image)
+    resized.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
     fmt = _FORMATS[mime]
+    options: dict[str, object] = {}
+    icc = resized.info.get("icc_profile")
+    if icc:
+        options["icc_profile"] = icc
+    exif = resized.getexif()
+    if exif:
+        options["exif"] = exif.tobytes()
     if fmt == "JPEG":
-        resized.save(out, fmt, quality=JPEG_QUALITY)
+        options["quality"] = JPEG_QUALITY
     elif fmt == "WEBP":
-        resized.save(out, fmt, quality=JPEG_QUALITY)
-    else:
-        resized.save(out, fmt)
+        if _is_lossless_webp(data):
+            options["lossless"] = True
+        else:
+            options["quality"] = JPEG_QUALITY
+    out = io.BytesIO()
+    resized.save(out, fmt, **options)
     return out.getvalue()
 
 
@@ -82,7 +105,7 @@ def convert_for(data: bytes, mime: str, accepted: frozenset[str]) -> tuple[bytes
         frame = next(ImageSequence.Iterator(image)).copy()
     has_alpha = "A" in frame.getbands() or "transparency" in frame.info
     out = io.BytesIO()
-    if has_alpha and "image/png" in accepted:
+    if (has_alpha or mime == "image/gif") and "image/png" in accepted:
         frame.convert("RGBA").save(out, "PNG")
         return out.getvalue(), "image/png"
     if "image/jpeg" in accepted:

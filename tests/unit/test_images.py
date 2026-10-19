@@ -3,10 +3,10 @@
 import io
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageCms
 
 from novelhog import images
-from tests.fixtures.images.conftest import make_animated, make_image
+from tests.fixtures.images.helpers import make_animated, make_image
 
 EXPORT = frozenset({"image/jpeg", "image/png", "image/gif"})
 
@@ -109,9 +109,48 @@ class TestConvertFor__Webp:
         assert mime == "image/jpeg"
         assert r > b
 
-    def test_convert_for__gif_to_png_when_gif_not_accepted(self) -> None:
+    def test_convert_for__opaque_gif_to_png_first_frame(self) -> None:
         data, mime = images.convert_for(
             make_animated("GIF"), "image/gif", frozenset({"image/jpeg", "image/png"})
         )
-        assert mime == "image/jpeg"
-        assert images.sniff(data) == "image/jpeg"
+        assert mime == "image/png"
+        with Image.open(io.BytesIO(data)) as img:
+            r, _, b = img.convert("RGB").getpixel((0, 0))  # type: ignore[misc]
+        assert r > b
+
+
+class TestDownscale__Metadata:
+    def test_downscale__applies_exif_orientation(self) -> None:
+        src = Image.new("RGB", (40, 20), (200, 10, 10))
+        exif = Image.Exif()
+        exif[0x0112] = 6  # rotate 90 degrees clockwise on display
+        out = io.BytesIO()
+        src.save(out, "JPEG", exif=exif)
+        result = images.downscale(out.getvalue(), "image/jpeg", 10)
+        with Image.open(io.BytesIO(result)) as img:
+            assert img.size == (5, 10)
+            assert img.getexif().get(0x0112, 1) == 1
+
+    def test_downscale__keeps_icc_profile(self) -> None:
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        data = make_image("JPEG", (40, 20), icc_profile=profile)
+        result = images.downscale(data, "image/jpeg", 10)
+        with Image.open(io.BytesIO(result)) as img:
+            assert img.info.get("icc_profile") == profile
+
+    def test_downscale__keeps_lossless_webp_lossless(self) -> None:
+        data = make_image("WEBP", (40, 20), lossless=True)
+        assert b"VP8L" in data[:32]
+        result = images.downscale(data, "image/webp", 10)
+        assert b"VP8L" in result[:32]
+
+    def test_downscale__keeps_lossy_webp_lossy(self) -> None:
+        result = images.downscale(make_image("WEBP", (40, 20)), "image/webp", 10)
+        assert b"VP8 " in result[:32]
+
+
+class TestConfigurePixelLimit__Idempotent:
+    def test_configure_pixel_limit__sets_pillow_limit_and_is_idempotent(self) -> None:
+        images.configure_pixel_limit(1234)
+        images.configure_pixel_limit(1234)
+        assert Image.MAX_IMAGE_PIXELS == 1234

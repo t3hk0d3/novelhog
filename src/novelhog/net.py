@@ -28,6 +28,9 @@ _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
 _SIXTOFOUR = ipaddress.ip_network("2002::/16")
 _TEREDO = ipaddress.ip_network("2001::/32")
+_SIIT = ipaddress.ip_network("::ffff:0:0:0/96")
+_V4_COMPATIBLE = ipaddress.ip_network("::/96")
+_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
 
 
 class Refused(Exception):  # noqa: N818 - name fixed by the task contract
@@ -43,6 +46,8 @@ def _embedded_v4(address: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
         found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address.sixtofour is not None:
         found.append(address.sixtofour)
+    if address in _SIIT:
+        found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address in _TEREDO:
         found.append(ipaddress.IPv4Address((int(address) & 0xFFFFFFFF) ^ 0xFFFFFFFF))
     return found
@@ -55,7 +60,7 @@ def is_public(address: str) -> bool:
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv6Address):
-        if ip in _NAT64_LOCAL:
+        if ip in _NAT64_LOCAL or ip in _V4_COMPATIBLE or ip in _SITE_LOCAL:
             return False
         if any(not is_public(str(v4)) for v4 in _embedded_v4(ip)):
             return False
@@ -145,6 +150,9 @@ class _GuardedAdapter(HTTPAdapter):
         manager.pool_classes_by_scheme = self._guard_classes
         self.poolmanager = manager
 
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        raise Refused("proxies are not allowed")  # noqa: TRY003
+
 
 class GuardedSession(requests.Session):
     """A ``requests`` session that refuses private targets, bad schemes and long redirect chains."""
@@ -166,6 +174,8 @@ class GuardedSession(requests.Session):
         scheme = (request.url or "").split(":", 1)[0].lower()
         if scheme not in ("http", "https"):
             raise Refused(f"scheme {scheme!r} is not allowed")  # noqa: TRY003
+        if kwargs.get("proxies"):
+            raise Refused("proxies are not allowed")  # noqa: TRY003
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = (CONNECT_TIMEOUT, READ_TIMEOUT)
         return super().send(request, **kwargs)

@@ -1,13 +1,14 @@
 """Tests for the outbound HTTP guard."""
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 import requests
 
 from novelhog import net
-from tests.fixtures.images.conftest import Server, http_server  # noqa: F401
+from tests.fixtures.images.helpers import Server
 
 
 def fixed(*addresses: str) -> Callable[[str], list[str]]:
@@ -38,6 +39,11 @@ class TestIsPublic__Addresses:
             "64:ff9b:1::1",
             "2002:7f00:1::1",
             "100.64.0.1",
+            "::7f00:1",
+            "::a00:1",
+            "::ffff:0:7f00:1",
+            "::ffff:0:a00:1",
+            "fec0::1",
             "fe80::1%eth0",
             "not-an-ip",
         ],
@@ -54,13 +60,13 @@ class TestIsPublic__Addresses:
 
 
 class TestGuardedSession__PrivateHost:
-    def test_get__raises_refused_before_connecting(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__raises_refused_before_connecting(self, http_server: Server) -> None:
         session = net.GuardedSession(allow_private=False, resolver=fixed("127.0.0.1"))
         with pytest.raises(net.Refused):
             session.get(http_server.url("/x", host="evil.test"))
         assert http_server.hits == []
 
-    def test_get__refuses_when_any_address_is_private(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__refuses_when_any_address_is_private(self, http_server: Server) -> None:
         session = net.GuardedSession(allow_private=False, resolver=fixed("8.8.8.8", "127.0.0.1"))
         with pytest.raises(net.Refused):
             session.get(http_server.url("/x", host="evil.test"))
@@ -85,13 +91,13 @@ class TestGuardedSession__PrivateHost:
 
 
 class TestGuardedSession__AllowPrivate:
-    def test_get__connects(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__connects(self, http_server: Server) -> None:
         http_server.routes["/ok"] = (200, {}, b"hi")
         session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
         response = session.get(http_server.url("/ok", host="site.test"))
         assert response.content == b"hi"
 
-    def test_get__keeps_host_header_and_resolves_once(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__keeps_host_header_and_resolves_once(self, http_server: Server) -> None:
         http_server.routes["/ok"] = (200, {}, b"hi")
         calls: list[str] = []
 
@@ -106,30 +112,21 @@ class TestGuardedSession__AllowPrivate:
 
 
 class TestGuardedSession__Redirects:
-    def test_get__redirect_to_private_raises_refused(self, http_server: Server) -> None:  # noqa: F811
-        http_server.routes["/r"] = (
-            302,
-            {"Location": http_server.url("/in", host="inner.test")},
-            b"",
-        )
-        http_server.routes["/in"] = (200, {}, b"secret")
-
-        def resolver(host: str) -> list[str]:
-            return ["8.8.8.8"] if host == "outer.test" else ["127.0.0.1"]
-
-        # outer is public but unreachable here, so pin it to the server by allowing it via a
-        # resolver that the guard sees as public only for the first hop.
-        session = net.GuardedSession(allow_private=False, resolver=resolver)
-        with pytest.raises((net.Refused, requests.ConnectionError)):
-            session.get(http_server.url("/r", host="outer.test"), timeout=1)
-        assert ("/in", f"inner.test:{http_server.port}") not in http_server.hits
-
-    def test_get__redirect_to_private_after_public_hop_is_refused(self, monkeypatch: Any) -> None:
-        # Public first hop is simulated by treating 127.0.0.1 as public for hop one only.
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize("kind", ["absolute", "scheme_relative"])
+    def test_get__redirect_to_private_after_public_hop_is_refused(
+        self, status: int, kind: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Hop one is treated as public (127.0.0.1 is the only reachable server); hop two is real.
         server = Server()
         server.start()
         try:
-            server.routes["/r"] = (302, {"Location": server.url("/in", host="inner.test")}, b"")
+            target = (
+                server.url("/in", host="inner.test")
+                if kind == "absolute"
+                else f"//inner.test:{server.port}/in"
+            )
+            server.routes["/r"] = (status, {"Location": target}, b"")
             server.routes["/in"] = (200, {}, b"secret")
             real = net.is_public
             monkeypatch.setattr(net, "is_public", lambda a: True if not server.hits else real(a))
@@ -140,14 +137,30 @@ class TestGuardedSession__Redirects:
         finally:
             server.stop()
 
-    def test_get__more_than_five_redirects_raises_too_many(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__relative_location_is_followed_and_rechecked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server = Server()
+        server.start()
+        try:
+            server.routes["/r"] = (302, {"Location": "/in"}, b"")
+            server.routes["/in"] = (200, {}, b"secret")
+            real = net.is_public
+            monkeypatch.setattr(net, "is_public", lambda a: True if not server.hits else real(a))
+            session = net.GuardedSession(allow_private=False, resolver=fixed("127.0.0.1"))
+            with pytest.raises(net.Refused):  # same host, but every hop is checked again
+                session.get(server.url("/r", host="outer.test"))
+        finally:
+            server.stop()
+
+    def test_get__more_than_five_redirects_raises_too_many(self, http_server: Server) -> None:
         for i in range(10):
             http_server.routes[f"/{i}"] = (302, {"Location": f"/{i + 1}"}, b"")
         session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
         with pytest.raises(requests.TooManyRedirects):
             session.get(http_server.url("/0", host="site.test"))
 
-    def test_get__five_redirects_are_followed(self, http_server: Server) -> None:  # noqa: F811
+    def test_get__five_redirects_are_followed(self, http_server: Server) -> None:
         for i in range(5):
             http_server.routes[f"/{i}"] = (302, {"Location": f"/{i + 1}"}, b"")
         http_server.routes["/5"] = (200, {}, b"end")
@@ -178,3 +191,50 @@ class TestGuardedSession__Timeouts:
 
     def test_session__ignores_environment_proxies(self) -> None:
         assert net.GuardedSession(allow_private=False).trust_env is False
+
+
+class TestGuardedSession__Proxies:
+    def test_get__session_proxies_raise_refused(self, http_server: Server) -> None:
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        session.proxies = {"http": http_server.url("/")}
+        with pytest.raises(net.Refused):
+            session.get("http://site.test/x")
+        assert http_server.hits == []
+
+    def test_get__proxies_argument_raises_refused(self, http_server: Server) -> None:
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        with pytest.raises(net.Refused):
+            session.get("http://site.test/x", proxies={"http": http_server.url("/")})
+        assert http_server.hits == []
+
+
+class TestGuardedSession__Tls:
+    def test_get__verifies_certificate_against_original_hostname(
+        self, tls_server: Server, tls_files: tuple[Path, Path]
+    ) -> None:
+        tls_server.routes["/ok"] = (200, {}, b"secure")
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        response = session.get(tls_server.url("/ok", host="site.test"), verify=str(tls_files[0]))
+        assert response.content == b"secure"
+
+    def test_get__sends_original_hostname_as_sni(
+        self, tls_server: Server, tls_files: tuple[Path, Path]
+    ) -> None:
+        tls_server.routes["/ok"] = (200, {}, b"secure")
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        session.get(tls_server.url("/ok", host="site.test"), verify=str(tls_files[0]))
+        assert tls_server.sni == ["site.test"]
+        assert tls_server.hits == [("/ok", f"site.test:{tls_server.port}")]
+
+    def test_get__hostname_mismatch_fails(
+        self, tls_server: Server, tls_files: tuple[Path, Path]
+    ) -> None:
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        with pytest.raises(requests.exceptions.SSLError):
+            session.get(tls_server.url("/ok", host="other.test"), verify=str(tls_files[0]))
+        assert tls_server.hits == []
+
+    def test_get__untrusted_certificate_fails(self, tls_server: Server) -> None:
+        session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+        with pytest.raises(requests.exceptions.SSLError):
+            session.get(tls_server.url("/ok", host="site.test"))
