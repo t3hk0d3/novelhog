@@ -13,6 +13,7 @@ from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import normalize_url
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.finders import find_cover_url, find_title
 from novelhog.scraper_adapter.guard import page_budget
 from novelhog.scraper_adapter.scraper import (
     Chapter,
@@ -26,7 +27,7 @@ from novelhog.scraper_adapter.scraper import (
 
 @dataclass(frozen=True)
 class TocResult:
-    """A synced table of contents. `title` and `cover_url` are filled by the finders (Task 22)."""
+    """A synced table of contents. `title` and `cover_url` are detected from the first TOC page."""
 
     title: str | None
     language: str | None
@@ -111,10 +112,11 @@ class ScraperAdapter:
         if not urls:
             msg = "The table of contents has no chapters"
             raise SiteError(msg)
+        title = find_title(first_page)
         return TocResult(
-            title=None,
+            title=title,
             language=_html_language(first_page),
-            cover_url=None,
+            cover_url=find_cover_url(first_page, toc_url, title),
             urls=urls,
             toc_html=first_page,
         )

@@ -20,6 +20,10 @@ SH_HOST = "scribblehub.com"
 SH_TOC = "https://scribblehub.com/series/1/lantern/"
 SH_TOC_2 = f"{SH_TOC}?toc=2"
 SH_CH = "https://www.scribblehub.com/read/1-lantern/chapter/{}/"
+FM_HOST = "fanmtl.com"
+FM_TOC = "https://fanmtl.com/novel/moss-lantern-atlas.html"
+FM_PAGE_2 = "https://www.fanmtl.com/e/extend/fy.php?page=1&wjm=moss-lantern-atlas"
+FM_CH = "https://fanmtl.com/novel/moss-lantern-atlas_{}.html"
 HN_HOST = "hostednovel.com"
 HN_TOC = "https://hostednovel.com/novel/glass-orchard"
 HN_CH = "https://hostednovel.com/novel/glass-orchard/chapter-{}"
@@ -37,6 +41,19 @@ def hostednovel_pages(*, loop: bool = False) -> dict[str, str]:
     return {
         HN_TOC: load_html("hostednovel_toc_1.html"),
         f"{HN_TOC}?page=2": load_html(second),
+    }
+
+
+@pytest.fixture
+def fanmtl_via_flaresolverr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scraper's host config does not route fanmtl through FlareSolverr; its env switch does."""
+    monkeypatch.setenv("SCRAPER_FORCE_FLARESOLVER", "true")
+
+
+def fanmtl_pages() -> dict[str, str]:
+    return {
+        FM_TOC: load_html("fanmtl_toc_1.html"),
+        FM_PAGE_2: load_html("fanmtl_toc_2.html"),
     }
 
 
@@ -146,7 +163,35 @@ class TestScraperAdapter__SyncToc:
         )
         assert result.language == "en-US"
         assert result.toc_html == load_html("scribblehub_toc_1.html")
-        assert (result.title, result.cover_url) == (None, None)
+
+    def test_sync_toc__returns_detected_title_and_cover_url(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, fanmtl_via_flaresolverr: None
+    ) -> None:
+        flaresolverr.pages.update(fanmtl_pages())
+        result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+            "NV000000000001", FM_HOST, FM_TOC
+        )
+        assert result.title == "Moss Lantern Atlas"
+        assert result.cover_url == "https://fanmtl.com/files/covers/moss-lantern.jpg"
+
+    def test_sync_toc__title_without_cover_gives_no_cover_url(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        flaresolverr.pages.update(scribblehub_pages())
+        result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+            "NV000000000001", SH_HOST, SH_TOC
+        )
+        assert (result.title, result.cover_url) == ("Lantern of the Ash Road", None)
+
+    def test_sync_toc__follows_fanmtl_gt_entity_pagination(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, fanmtl_via_flaresolverr: None
+    ) -> None:
+        flaresolverr.pages.update(fanmtl_pages())
+        result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+            "NV000000000001", FM_HOST, FM_TOC
+        )
+        assert flaresolverr.requested_urls == [FM_TOC, FM_PAGE_2]
+        assert result.urls == [FM_CH.format(n) for n in (1, 2, 3)]
 
     def test_sync_toc__applies_host_request_config_with_settings_flaresolverr_url(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr
