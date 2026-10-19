@@ -1,6 +1,7 @@
 """Tests for static storage."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,12 +10,25 @@ from novelhog.domain.urls import static_url
 from novelhog.storage import InvalidKey, LocalStaticStorage, cover_key
 
 BASE = "http://example.test/static"
-BAD_KEYS = ["../x", "a/../b", "/abs/x", "a\\b", ""]
+BAD_KEYS = ["../x", "a/../b", "/abs/x", "a\\b", "", "a\0b", "a/./b", "a//b", "a/b/"]
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> LocalStaticStorage:
     return LocalStaticStorage(tmp_path / "static", BASE)
+
+
+@pytest.fixture
+def fail_replace(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
+    """Return a function that makes ``os.replace`` fail from then on."""
+
+    def boom(src: str, dst: Path) -> None:
+        raise OSError
+
+    def activate() -> None:
+        monkeypatch.setattr("novelhog.storage.os.replace", boom)
+
+    return activate
 
 
 def _files(root: Path) -> list[Path]:
@@ -47,17 +61,48 @@ class TestPut__OnSuccess:
         assert [p.name for p in _files(tmp_path / "static")] == ["b.bin"]
 
 
+class TestPut__Durability:
+    def test_put__stored_file_is_world_readable(
+        self, store: LocalStaticStorage, tmp_path: Path
+    ) -> None:
+        store.put("a/b.bin", b"x", "application/octet-stream")
+        assert (tmp_path / "static/a/b.bin").stat().st_mode & 0o777 == 0o644
+
+    def test_put_file__stored_file_is_world_readable(
+        self, store: LocalStaticStorage, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "src.bin"
+        source.write_bytes(b"x")
+        store.put_file("a/b.bin", source, "application/octet-stream")
+        assert (tmp_path / "static/a/b.bin").stat().st_mode & 0o777 == 0o644
+
+    def test_put__syncs_temporary_file_before_rename(
+        self, store: LocalStaticStorage, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        real_replace = os.replace
+
+        def fake_fsync(fd: int) -> None:
+            calls.append("fsync")
+
+        def fake_replace(src: str, dst: Path) -> None:
+            calls.append("replace")
+            real_replace(src, dst)
+
+        monkeypatch.setattr("novelhog.storage.os.fsync", fake_fsync)
+        monkeypatch.setattr("novelhog.storage.os.replace", fake_replace)
+        store.put("a/b.bin", b"x", "application/octet-stream")
+        assert calls == ["fsync", "replace"]
+
+
 class TestPut__OnWriteFailure:
     def test_put__leaves_no_temporary_and_no_target(
         self,
         store: LocalStaticStorage,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        fail_replace: Callable[[], None],
     ) -> None:
-        def boom(src: str, dst: Path) -> None:
-            raise OSError
-
-        monkeypatch.setattr(os, "replace", boom)
+        fail_replace()
         with pytest.raises(OSError):
             store.put("a/b.bin", b"x", "application/octet-stream")
         assert _files(tmp_path / "static") == []
@@ -70,14 +115,10 @@ class TestPut__OnWriteFailure:
         assert _files(tmp_path / "static") == []
 
     def test_put__keeps_existing_target_intact(
-        self, store: LocalStaticStorage, monkeypatch: pytest.MonkeyPatch
+        self, store: LocalStaticStorage, fail_replace: Callable[[], None]
     ) -> None:
         store.put("a/b.bin", b"old", "application/octet-stream")
-
-        def boom(src: str, dst: Path) -> None:
-            raise OSError
-
-        monkeypatch.setattr(os, "replace", boom)
+        fail_replace()
         with pytest.raises(OSError):
             store.put("a/b.bin", b"new", "application/octet-stream")
         assert store.get("a/b.bin") == b"old"
@@ -93,6 +134,14 @@ class TestGet:
 
 
 class TestDelete:
+    def test_delete__ignores_key_below_a_file(self, store: LocalStaticStorage) -> None:
+        store.put("a/b.bin", b"x", "application/octet-stream")
+        store.delete("a/b.bin/c")
+
+    def test_delete__ignores_key_naming_a_directory(self, store: LocalStaticStorage) -> None:
+        store.put("a/b.bin", b"x", "application/octet-stream")
+        store.delete("a")
+
     def test_delete__removes_file(self, store: LocalStaticStorage) -> None:
         store.put("a/b.bin", b"x", "application/octet-stream")
         store.delete("a/b.bin")
@@ -130,6 +179,11 @@ class TestInvalidKey:
     def test_delete__raises(self, store: LocalStaticStorage, key: str) -> None:
         with pytest.raises(InvalidKey):
             store.delete(key)
+
+    @pytest.mark.parametrize("key", BAD_KEYS)
+    def test_url__raises(self, store: LocalStaticStorage, key: str) -> None:
+        with pytest.raises(InvalidKey):
+            store.url(key)
 
     def test_invalid_key__is_value_error(self) -> None:
         assert issubclass(InvalidKey, ValueError)
