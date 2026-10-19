@@ -6,6 +6,13 @@ import { App } from './App';
 beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal(
+    'EventSource',
+    class {
+      addEventListener = vi.fn();
+      close = vi.fn();
+    },
+  );
+  vi.stubGlobal(
     'matchMedia',
     vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })),
   );

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Route, Routes, useParams } from 'react-router';
 import { Header } from './components/Header';
 import { ToastProvider } from './components/Toast';
+import { useLiveEvents } from './hooks/useLiveEvents';
 
 const defaultQueryClient = new QueryClient();
 
@@ -16,6 +17,7 @@ function NovelPlaceholder() {
 
 /** App shell; main.tsx supplies the router. */
 export function App({ queryClient = defaultQueryClient }: { queryClient?: QueryClient }) {
+  useLiveEvents(queryClient);
   return (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
