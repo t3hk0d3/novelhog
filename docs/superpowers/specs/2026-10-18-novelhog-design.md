@@ -245,6 +245,15 @@ CREATE TABLE hosts (                             -- published by the worker from
     updated_at     TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE host_slots (                        -- download concurrency per site
+    host             TEXT NOT NULL REFERENCES hosts (host) ON DELETE CASCADE,
+    slot             INTEGER NOT NULL CHECK (slot >= 1), -- 1..HOST_CONCURRENCY
+    claimed_by       TEXT,                       -- worker downloading from this host
+    claim_expires_at TEXT,
+    PRIMARY KEY (host, slot),
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL))
+) STRICT;
+
 CREATE TABLE settings (                          -- small key/value store
     key        TEXT PRIMARY KEY,                 -- e.g. 'vapid'
     value      TEXT NOT NULL CHECK (json_valid(value)),
@@ -302,8 +311,8 @@ CREATE TABLE consumers (                         -- durable readers of the event
 **Claims** use optimistic compare-and-set updates, identical on both
 databases; there is no `SELECT … FOR UPDATE`.
 
-Every claimable table (`novels`, `chapters`, `exports`, `consumers`) has the
-same two columns, set and cleared together:
+Every claimable table (`novels`, `chapters`, `exports`, `consumers`,
+`host_slots`) has the same two columns, set and cleared together:
 
 | Column | Meaning |
 |---|---|
@@ -330,8 +339,8 @@ Renewal and release are equally uniform: renewing sets
 `claim_expires_at = :now + :ttl` where `claimed_by = :me`; releasing sets both
 columns to `NULL` where `claimed_by = :me`. Recovery finds rows with
 `claimed_by IS NOT NULL AND claim_expires_at < :now` and applies the
-table-specific reset (chapter → `pending`, export → `waiting`, novel and
-consumer → just freed).
+table-specific reset (chapter → `pending`, export → `waiting`, novel,
+consumer and host slot → just freed).
 
 - The outer `WHERE` repeats the "free or expired" condition. SQLite executes
   write statements one at a time; Postgres (`READ COMMITTED`) re-evaluates the
@@ -682,15 +691,15 @@ loop:
     if export = claim_ready_export():                # waiting, range fully downloaded,
         build(export)                                # oldest created_at first (§6.5)
         continue
-    if novel = claim_next_download():                # oldest queued_at, novel available
-        batch = claim_batch(novel, BATCH_SIZE)       # lowest numbers → downloading
-        for chapter in batch:
+    if slot = claim_host_slot():                     # host of the oldest queued chapter
+        batch = claim_batch(slot.host, BATCH_SIZE)   # that host's pending chapters → downloading
+        for chapter in batch:                        # (no novel claim involved)
             if shutting_down: requeue(rest); break
             if state(chapter) != downloading: continue   # dequeued meanwhile
-            try: fetch → convert → store → downloaded
+            try: fetch(host, url) → convert → store → downloaded (if url unchanged)
             except: state = error; event payload carries the message
-            renew(novel and its batch); sleep(REQUEST_DELAY)
-        release(novel)
+            renew(slot and the rest of the batch); sleep(REQUEST_DELAY)
+        release(slot)
         continue
     prune()                                          # event log, at most hourly
     sleep(IDLE_SLEEP)
@@ -746,22 +755,38 @@ refresh(novel):
 - A failed sync backs off the same way, so a dead site settles at monthly; a
   manual sync forces an immediate retry.
 
-### 6.3 Novel claim
+### 6.3 Novel claims and host slots
 
-- One writer of a novel's scraper working files at a time: a worker claims the
-  novel (`claimed_by`, `claim_expires_at = now + CLAIM_TTL`) for a sync or a
-  download batch, and renews it, together with the batch's chapter claims,
-  after each chapter.
+- **Novel claim: syncs only.** A TOC sync is the only operation that uses the
+  scraper's per-novel working files, so a worker claims the novel
+  (`claimed_by`, `claim_expires_at = now + CLAIM_TTL`) for the sync and
+  releases it afterwards. Chapter downloads never claim the novel; a sync and
+  downloads of the same novel can run at the same time.
+- **Host slots: download politeness.** `publish_hosts()` keeps exactly
+  `HOST_CONCURRENCY` rows per host in `host_slots` (adding missing slots,
+  deleting free surplus ones). To download, a worker claims a free slot of the
+  host whose pending chapter has the oldest `queued_at` (compare-and-set like
+  every other claim; a lost race moves on to the next host), then claims a batch
+  of that host's pending chapters, oldest `queued_at` first, then by number,
+  across all novels of the host. At most `HOST_CONCURRENCY` workers download
+  from one site at any time; different sites download in parallel.
+- The slot and the batch's chapter claims share one expiry and are renewed
+  together after each chapter; the slot is released after the batch. Expired
+  slots are freed and their chapters return to `pending` (§4 recovery).
 - The API never touches scraper working files and never claims anything.
 
 ### 6.4 Per-chapter pipeline
 
-1. `scraper_adapter.fetch_chapter(novel_id, number)` → `{title, body_html, http_session}`.
-   The body is selected with the scraper decoder's content selector for the host;
-   the scraper's own cleaner is not used.
+1. `scraper_adapter.fetch_chapter(host, url)` → `{title, body_html, http_session}`.
+   Stateless: it requests the URL through FlareSolverr with the scraper's request
+   helper and selects the body with the scraper decoder's content selector for
+   the host. It does not create a scraper `Novel` object, does not use the
+   scraper's cleaner and writes no files.
 2. `html_to_markdown.convert(body_html, fetch_image)` → `{markdown, has_images, warnings}`.
 3. `chapter_store.put(chapter_id, markdown)`; the chapter row gets `title`,
-   `has_images`, `state = downloaded`.
+   `has_images`, `state = downloaded`. If a sync changed the chapter's URL
+   while it was downloading, the result is discarded and the chapter goes back
+   to `pending`.
 
 ### 6.5 Export builds
 
@@ -867,7 +892,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
 | `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `claims.py` (compare-and-set claim, renew, release, recover), Alembic migrations, work claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
-| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
+| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use; the only call that uses scraper working files), `fetch_chapter(host, url)` (stateless), `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Plain HTTP image download reusing FlareSolverr cookies and user agent; validation (§8.2) |
@@ -1002,6 +1027,7 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 | `NOVELHOG_REFRESH_MIN_INTERVAL` | `21600` (6 h) | |
 | `NOVELHOG_REFRESH_MAX_INTERVAL` | `2592000` (30 d) | |
 | `NOVELHOG_BATCH_SIZE` | `10` | Chapters claimed per batch |
+| `NOVELHOG_HOST_CONCURRENCY` | `1` | Workers allowed to download from one site at the same time (`host_slots` per host) |
 | `NOVELHOG_CLAIM_TTL` | `300` s | Lifetime of every claim (novels, chapters, exports, consumers) before renewal |
 | `NOVELHOG_IDLE_SLEEP` | `30` s | Worker sleep when no work |
 | `NOVELHOG_REQUEST_DELAY` | `1` s | Pause between chapter fetches |
@@ -1360,8 +1386,15 @@ desktop chapters, export dialog, phone normal and select mode).
   scraper, network or worker; every route,
   success and each error code, including `503 channel_disabled`.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
-  chapter files located without relying on `main.json`; no scripts and no empty
-  paragraphs in output.
+  `fetch_chapter` writes no scraper files and needs no scraper `Novel`; no
+  scripts and no empty paragraphs in output.
+- **Host slots (real database, both engines):** `publish_hosts` keeps exactly
+  `HOST_CONCURRENCY` slots per host without deleting claimed ones; with
+  `HOST_CONCURRENCY = 1` and three workers, never more than one downloads from a
+  host at a time while other hosts proceed; with `2`, at most two; a lost slot
+  race moves to the next host; expired slots are freed and their chapters
+  requeued; a sync and a download batch of the same novel run concurrently; a
+  chapter whose URL changed during download returns to `pending`.
 - **Frontend:** Vitest + Testing Library for normal mode (row click/tap opens
   details; Select, long-press and Shift/Ctrl-click enter select mode with the
   right selection), select mode (tap toggles, long-press and Shift-click select
