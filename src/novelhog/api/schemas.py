@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from novelhog.domain.chapters import ChapterState
+
 
 class ErrorDetail(BaseModel):
     """The `error` object of every error response."""
@@ -99,3 +101,61 @@ class NovelPatch(BaseModel):
     followed: bool | None = None
     seen: Literal[True] | None = None
     title: str | None = None
+
+
+class Chapter(BaseModel):
+    """The `Chapter` object (spec section 4); timestamps are RFC 3339 strings."""
+
+    id: str
+    position: int
+    url: str
+    title: str | None
+    state: ChapterState
+    error: str | None
+    error_at: str | None
+    has_images: bool
+    released_at: str | None
+    queued_at: str | None
+    updated_at: str
+
+
+class ChapterPage(BaseModel):
+    """`GET /api/v1/novels/{id}/chapters`: one page and the total matching the filter."""
+
+    items: list[Chapter]
+    total: int
+
+
+class ChapterRange(BaseModel):
+    """An inclusive range of chapter positions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: int
+    end: int
+
+
+type ChapterSelector = list[int] | ChapterRange
+
+
+class ChapterPatch(BaseModel):
+    """`PATCH /api/v1/novels/{id}/chapters` request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: ChapterState
+    chapters: ChapterSelector
+
+
+class ChapterSkipped(BaseModel):
+    """A chapter a patch left alone, with its current state."""
+
+    position: int
+    state: ChapterState
+
+
+class ChapterPatchResult(BaseModel):
+    """`PATCH /api/v1/novels/{id}/chapters` response."""
+
+    updated: list[int]
+    skipped: list[ChapterSkipped]
