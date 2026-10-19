@@ -1,0 +1,121 @@
+[project]
+name = "novelhog"
+version = "0.1.0"
+description = "Self-hosted web UI and worker around web-novel-scraper"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy>=2,<3",
+    "alembic",
+    "psycopg[binary]",
+    "web-novel-scraper==2.13.1",
+    "pillow",
+    "markdown-it-py",
+    "ebooklib",
+    "pywebpush",
+    "py-vapid",
+    "structlog",
+    "import-linter",
+]
+
+[project.scripts]
+novelhog = "novelhog.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "mypy",
+    "ruff",
+    "import-linter",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/novelhog"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "BLE", "TRY"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "N801"]
+
+[tool.mypy]
+strict = true
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.importlinter]
+root_package = "novelhog"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "api-is-pure"
+type = "forbidden"
+source_modules = ["novelhog.api"]
+forbidden_modules = [
+    "novelhog.scraper_adapter",
+    "novelhog.exporter",
+    "novelhog.images",
+    "novelhog.image_fetcher",
+    "novelhog.html_to_markdown",
+    "novelhog.notifications.channels",
+]
+
+[[tool.importlinter.contracts]]
+name = "repo-is-standalone"
+type = "forbidden"
+source_modules = ["novelhog.repo"]
+forbidden_modules = [
+    "novelhog.api",
+    "novelhog.worker",
+    "novelhog.config",
+    "novelhog.storage",
+    "novelhog.scraper_adapter",
+    "novelhog.exporter",
+    "novelhog.images",
+    "novelhog.image_fetcher",
+    "novelhog.html_to_markdown",
+    "novelhog.chapter_store",
+    "novelhog.notifications",
+    "novelhog.vapid",
+    "novelhog.cli",
+    "web_novel_scraper",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "httpx",
+    "requests",
+    "PIL",
+    "markdown_it",
+    "ebooklib",
+    "pywebpush",
+    "py_vapid",
+    "structlog",
+]
+
+[[tool.importlinter.contracts]]
+name = "scraper-is-isolated"
+type = "forbidden"
+source_modules = ["novelhog"]
+forbidden_modules = ["web_novel_scraper"]
+allow_indirect_imports = true
+unmatched_ignore_imports_alerting = "none"
+ignore_imports = [
+    "novelhog.scraper_adapter -> web_novel_scraper",
+    "novelhog.scraper_adapter.** -> web_novel_scraper",
+]
