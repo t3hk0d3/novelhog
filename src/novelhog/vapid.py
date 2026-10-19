@@ -1,7 +1,7 @@
 """The VAPID key pair stored in the `settings` table (spec section 4)."""
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -17,7 +17,7 @@ class VapidKeys:
     """URL-safe base64 (no padding) of the 65-byte public point and the 32-byte private scalar."""
 
     public_key: str
-    private_key: str
+    private_key: str = field(repr=False)
 
 
 def _b64(raw: bytes) -> str:

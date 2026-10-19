@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -141,3 +141,42 @@ class TestPathId:
 
     def test_path_id__valid_id_passes(self, errors_client: TestClient) -> None:
         assert errors_client.get("/t/novels/NVabcdefghij12").json() == "NVabcdefghij12"
+
+
+class TestErrors__OnRoutingFailures:
+    def test_error__unknown_path_returns_404_not_found_in_error_shape(
+        self, client: TestClient
+    ) -> None:
+        response = client.get("/api/v1/nope")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
+
+    def test_error__wrong_method_returns_405_with_allow_header(self, client: TestClient) -> None:
+        response = client.post("/api/v1/settings")
+        assert response.status_code == 405
+        assert response.json()["error"]["code"] == "method_not_allowed"
+        assert "GET" in response.headers["Allow"]
+
+    def test_error__other_statuses_get_a_snake_case_code(
+        self, make_client: Callable[..., TestClient]
+    ) -> None:
+        def hook(app: FastAPI) -> None:
+            @app.get("/t/teapot")
+            def teapot() -> None:
+                raise HTTPException(status_code=418, detail="short and stout")
+
+        response = make_client(app_hook=hook).get("/t/teapot")
+        assert response.status_code == 418
+        assert response.json()["error"] == {"code": "im_a_teapot", "message": "short and stout"}
+
+
+class TestOpenApi__OnValidationErrors:
+    def test_openapi__documents_422_as_error_body(
+        self, make_client: Callable[..., TestClient]
+    ) -> None:
+        document = make_client(app_hook=_routes).get("/api/v1/openapi.json").json()
+        schema = document["paths"]["/t/body"]["post"]["responses"]["422"]["content"][
+            "application/json"
+        ]["schema"]
+        assert schema == {"$ref": "#/components/schemas/ErrorBody"}
+        assert "HTTPValidationError" not in document["components"]["schemas"]

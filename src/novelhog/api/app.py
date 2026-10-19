@@ -2,12 +2,14 @@
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from http import HTTPStatus
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from novelhog import log, vapid
 from novelhog.api import routes_settings
@@ -23,6 +25,31 @@ from novelhog.domain.errors import (
 from novelhog.repo import Busy, Repo
 
 API_PREFIX = "/api/v1"
+
+
+def _snake(phrase: str) -> str:
+    return phrase.lower().replace(" ", "_").replace("-", "_").replace("'", "")
+
+
+def _document_validation_errors(app: FastAPI) -> None:
+    """Make the OpenAPI 422 responses describe `ErrorBody`, the shape actually returned."""
+    generate = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            document = generate()
+            ref = {"$ref": "#/components/schemas/ErrorBody"}
+            for path in document["paths"].values():
+                for operation in path.values():
+                    content = operation.get("responses", {}).get("422", {}).get("content")
+                    if content:
+                        content["application/json"]["schema"] = ref
+            schemas = document["components"]["schemas"]
+            schemas.pop("HTTPValidationError", None)
+            schemas.pop("ValidationError", None)
+        return app.openapi_schema or {}
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 def _error(
@@ -66,6 +93,14 @@ def _register_error_handlers(app: FastAPI) -> None:
         ]
         return _error(422, "validation_error", "The request is not valid", {"errors": errors})
 
+    async def http_error(_request: Request, exc: Exception) -> JSONResponse:
+        failure = cast("StarletteHTTPException", exc)
+        status = failure.status_code
+        phrase = HTTPStatus(status).phrase if status in HTTPStatus else "Error"
+        code = "not_found" if status == 404 else _snake(phrase)
+        message = phrase if not isinstance(failure.detail, str) else failure.detail
+        return _error(status, code, message, headers=dict(failure.headers or {}))
+
     async def unexpected(request: Request, exc: Exception) -> JSONResponse:
         log.get().error(
             "unhandled_exception",
@@ -75,6 +110,7 @@ def _register_error_handlers(app: FastAPI) -> None:
         )
         return _error(500, "internal_error", "Internal server error")
 
+    app.add_exception_handler(StarletteHTTPException, http_error)
     app.add_exception_handler(Busy, busy)
     app.add_exception_handler(RequestValidationError, invalid_request)
     app.add_exception_handler(Exception, unexpected)
@@ -130,5 +166,6 @@ def create_app(
     public_host = urlsplit(settings.public_url).hostname if settings.public_url else None
     app.add_middleware(OriginChecks, public_host=public_host, allowed_hosts=settings.allowed_hosts)
     _register_error_handlers(app)
+    _document_validation_errors(app)
     app.include_router(routes_settings.router, prefix=API_PREFIX)
     return app

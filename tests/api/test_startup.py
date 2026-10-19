@@ -5,6 +5,7 @@ import subprocess
 import sys
 from dataclasses import replace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,3 +56,10 @@ class TestStartup__WithoutDatabase:
     def test_create_app__builds_with_check_schema_off(self, settings: Settings) -> None:
         app = create_app(settings, check_schema=False)
         assert app.openapi()["info"]["title"] == "novelhog"
+
+
+class TestStartup__WithoutRepo:
+    def test_create_app__builds_and_disposes_its_own_repo(self, settings: Settings) -> None:
+        with TestClient(create_app(settings)) as client:
+            client.base_url = httpx.URL("http://localhost")
+            assert client.get("/api/v1/settings").status_code == 200
