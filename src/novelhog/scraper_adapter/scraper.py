@@ -45,6 +45,10 @@ take_over_scraper_logging()
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", SyntaxWarning)
     from web_novel_scraper.config_manager import ScraperConfig
+    from web_novel_scraper.custom_processor.custom_processor import (
+        CustomProcessor,
+        ProcessorRegistry,
+    )
     from web_novel_scraper.exceptions import FlaresolverrConnectionError, ScraperError
     from web_novel_scraper.models import Chapter
     from web_novel_scraper.novel_scraper import Novel
@@ -54,8 +58,10 @@ take_over_scraper_logging()
 
 __all__ = [
     "Chapter",
+    "CustomProcessor",
     "FlaresolverrConnectionError",
     "Novel",
+    "ProcessorRegistry",
     "RequestHelper",
     "ScraperConfig",
     "ScraperError",
