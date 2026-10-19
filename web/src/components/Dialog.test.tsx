@@ -74,4 +74,13 @@ describe('Dialog', () => {
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: 'Open' })).toHaveFocus();
   });
+
+  it('anchors to the bottom edge as a sheet', () => {
+    render(
+      <Dialog title="Sheet" sheet onClose={() => undefined}>
+        body
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog', { name: 'Sheet' }).className).toContain('mt-auto');
+  });
 });

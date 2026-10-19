@@ -8,8 +8,11 @@ import { ChapterFilters } from '../components/ChapterFilters';
 import { NovelHeader } from '../components/NovelHeader';
 import { OverviewBar } from '../components/OverviewBar';
 import { RangeChips } from '../components/RangeChips';
+import { SelectionBar } from '../components/SelectionBar';
+import { SelectToolbar } from '../components/SelectToolbar';
 import { useChapters } from '../hooks/useChapters';
 import { useChapterView, type ChapterView } from '../hooks/useChapterView';
+import { useSelection, type Selection } from '../hooks/useSelection';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { errorMessage } from '../lib/errors';
 import type { Chapter } from '../api/client';
@@ -18,9 +21,11 @@ import type { Chapter } from '../api/client';
 function Results({
   view,
   onOpenDetails,
+  selection,
 }: {
   view: ChapterView;
   onOpenDetails: (chapter: Chapter) => void;
+  selection: Selection;
 }) {
   return (
     <section aria-label="Chapters">
@@ -35,6 +40,7 @@ function Results({
                 chapters={group.chapters}
                 isNew={view.isNew}
                 onOpenDetails={onOpenDetails}
+                selection={selection}
               />
             </div>
           ))
@@ -44,6 +50,7 @@ function Results({
           chapters={view.rangeChapters}
           isNew={view.isNew}
           onOpenDetails={onOpenDetails}
+          selection={selection}
         />
       )}
     </section>
@@ -64,6 +71,9 @@ function NovelPage({ novel }: { novel: NovelData }) {
   const seenSent = useRef(false);
   // The chapter whose details are open; Task 37's dialog reads it (null = closed).
   const [, setDetailsChapter] = useState<Chapter | null>(null);
+  // The first and last position Export EPUB… asked for; Task 38's export dialog reads it
+  // (null = closed).
+  const [, setExportRange] = useState<{ from: number; to: number } | null>(null);
 
   useEffect(() => {
     if (seenSent.current) return;
@@ -74,8 +84,10 @@ function NovelPage({ novel }: { novel: NovelData }) {
   }, [novel.id]);
 
   const all = chapters.data ?? [];
+  // The rows on screen: every match under a filter, else the chosen range.
+  const selection = useSelection(all, view.filterActive ? view.matches : view.rangeChapters);
   return (
-    <div className="flex flex-col gap-4">
+    <div className={`flex flex-col gap-4 ${selection.active ? 'pb-32' : ''}`}>
       <NovelHeader novel={novel} />
       {chapters.isError && (
         <p role="alert" className="text-danger">
@@ -97,6 +109,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
         </p>
       ) : (
         <>
+          <SelectToolbar selection={selection} />
           <ChapterFilters
             query={view.query}
             onQuery={view.setQuery}
@@ -113,7 +126,17 @@ function NovelPage({ novel }: { novel: NovelData }) {
             hidden={view.filterActive}
             onSelectRange={view.setRange}
           />
-          <Results view={view} onOpenDetails={setDetailsChapter} />
+          <Results view={view} onOpenDetails={setDetailsChapter} selection={selection} />
+          {selection.active && (
+            <SelectionBar
+              novelId={novel.id}
+              selected={selection.selected}
+              onDone={selection.exit}
+              onExport={(from, to) => {
+                setExportRange({ from, to });
+              }}
+            />
+          )}
         </>
       )}
     </div>
