@@ -12,16 +12,14 @@ from novelhog.domain.errors import Conflict, NotFound, ServiceUnavailable, Valid
 from novelhog.domain.payloads import NovelView
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.domain.urls import host_of, normalize_toc_url, static_url
-from novelhog.repo import db, events, hosts
+from novelhog.repo import db, events, hosts, trash
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import (
     chapter_contents,
     chapters,
     exports,
-    storage_trash,
 )
 from novelhog.repo.schema import novels as novels_table
-from novelhog.repo.sql import dialect_insert
 
 _counters = (
     select(
@@ -272,13 +270,7 @@ class Novels:
                 raise NotFound("novel", novel_id)
             ready_keys = [row.storage_key for row in export_rows if row.state == "ready"]
             keys = [k for k in dict.fromkeys([novel_row.cover_key, *ready_keys]) if k is not None]
-            if keys:
-                conn.execute(
-                    dialect_insert(self._engine, storage_trash).on_conflict_do_nothing(
-                        index_elements=["key"]
-                    ),
-                    [{"key": k, "at": now} for k in keys],
-                )
+            trash.add(conn, keys, now)
             events.append(conn, novel_id, novel_id, payloads.deleted_novel(novel_id), now=now)
 
     def list(self) -> list[NovelView]:

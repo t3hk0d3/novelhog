@@ -13,10 +13,13 @@ from datetime import datetime, timedelta
 from sqlalchemy import Connection, and_, case, select, update
 
 from novelhog.domain.chapters import ChapterState
+from novelhog.domain.exports import ExportState
 from novelhog.repo import claims, contents, db, events
+from novelhog.repo import exports as export_repo
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel, snapshot
 from novelhog.repo.schema import chapters, novels
+from novelhog.repo.schema import exports as exports_table
 
 _PENDING = ChapterState.PENDING.value
 _DOWNLOADING = ChapterState.DOWNLOADING.value
@@ -268,9 +271,42 @@ class Work:
         now = self._clock()
         requeued, freed = self._recover_chapters(now)
         novels_freed = self._recover_novels(now)
+        exports_reset = self._recover_exports(now)
         return RecoveryReport(
-            chapters_requeued=requeued, chapters_freed=freed, novels_freed=novels_freed
+            chapters_requeued=requeued,
+            chapters_freed=freed,
+            novels_freed=novels_freed,
+            exports_reset=exports_reset,
         )
+
+    def _recover_exports(self, now: datetime) -> int:
+        """Return expired `building` exports to `waiting` and append an `EX` event for each."""
+        with db.read(self._engine) as conn:
+            lapsed = [
+                (row.id, row.novel_id)
+                for row in claims.expired(conn, exports_table, now)
+                if row.state == ExportState.BUILDING.value
+            ]
+        reset = 0
+        for export_id, novel_id in lapsed:
+            with db.write(self._engine) as conn:
+                if not lock_novel(conn, novel_id):
+                    continue
+                released = conn.execute(
+                    update(exports_table)
+                    .where(
+                        exports_table.c.id == export_id,
+                        exports_table.c.state == ExportState.BUILDING.value,
+                        exports_table.c.claimed_until < now,
+                    )
+                    .values(state=ExportState.WAITING.value, claimed_by=None, claimed_until=None)
+                ).rowcount
+                if released:
+                    events.append(
+                        conn, novel_id, export_id, self._export_payload(conn, export_id), now=now
+                    )
+                    reset += 1
+        return reset
 
     def _recover_chapters(self, now: datetime) -> tuple[int, int]:
         """Requeue expired `downloading` chapters (with events); free expired `pending` ones."""
@@ -326,6 +362,12 @@ class Work:
                     )
                     freed += 1
         return freed
+
+    def _export_payload(self, conn: Connection, export_id: str) -> events.Payload:
+        """A lazy `EX` payload: the export's snapshot, built after the event clock is taken."""
+        return lambda: export_repo.snapshot(
+            conn, export_id, static_base_url=self._static_base_url
+        ).to_json()
 
     def _novel_payload(self, conn: Connection, novel_id: str, now: datetime) -> events.Payload:
         """A lazy `NV` payload: the novel's snapshot, built after the event clock is taken."""

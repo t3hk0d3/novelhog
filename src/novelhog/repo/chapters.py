@@ -159,7 +159,7 @@ def event_payload(
     return view.to_event(novel_id, error, error_at)
 
 
-def _positioned(novel_id: str) -> Any:
+def positioned(novel_id: str) -> Any:
     return (chapters.c.novel_id == novel_id) & chapters.c.position.is_not(None)
 
 
@@ -185,7 +185,7 @@ def _transition(
 ) -> QueuedChapters:
     found = conn.execute(
         select(chapters.c.id, chapters.c.position, chapters.c.state)
-        .where(_positioned(novel_id), chapters.c.position.in_(positions))
+        .where(positioned(novel_id), chapters.c.position.in_(positions))
         .order_by(chapters.c.position)
     ).all()
     movable = [r for r in found if transition_allowed(ChapterState(r.state), target)]
@@ -332,7 +332,7 @@ class Chapters:
         """
         if not ids.is_valid(novel_id, "NV"):
             raise NotFound("novel", novel_id)
-        where = _positioned(novel_id)
+        where = positioned(novel_id)
         if state is not None:
             where = where & (chapters.c.state == state.value)
         with db.read(self._engine) as conn:
@@ -373,7 +373,7 @@ class Chapters:
             if not ids.is_valid(novel_id, "NV") or not lock_novel(conn, novel_id):
                 raise NotFound("novel", novel_id)
             total = conn.execute(
-                select(func.count()).select_from(chapters).where(_positioned(novel_id))
+                select(func.count()).select_from(chapters).where(positioned(novel_id))
             ).scalar_one()
             positions = resolve_selector(selector, total)
             result = _transition(conn, novel_id, positions, target, now=now)
