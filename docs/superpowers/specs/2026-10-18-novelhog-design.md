@@ -495,6 +495,14 @@ RETURNING <columns>
   or as a lost claim. This single order (novel row, then child rows, then
   clock) keeps Postgres free of deadlocks and foreign-key races between event
   writers, including `DELETE /novels/{id}` against a running sync or download.
+  `lock_novel` only proves the novel still exists; it is not a fence, and a
+  worker's writes still check their claim. Statements that touch rows of many
+  novels at once (claiming a download batch, heartbeat renewals, `recover()`,
+  claiming exports) are exempt; the per-row follow-up writes (starting a
+  chapter, storing a download, finishing or failing an export, a sync result)
+  are not. On Postgres, `db.write` reports a deadlock or lock timeout as
+  `repo.Busy` (`503 database_busy`), so a rare row-order conflict between an
+  exempt statement and a delete is retryable instead of a `500`.
 - Readers: the SSE stream (stateless, per connection, from `Last-Event-ID`) and
   durable consumers with a row in `consumers`. The latest seq is
   `events.latest_seq()` (the clock value).
