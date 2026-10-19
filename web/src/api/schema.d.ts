@@ -140,7 +140,10 @@ export interface operations {
   };
   get_novel: {
     parameters: NovelIdParam;
-    responses: { 200: Json<components['schemas']['Novel']>; 404: Json<components['schemas']['ErrorBody']> };
+    responses: {
+      200: Json<components['schemas']['Novel']>;
+      404: Json<components['schemas']['ErrorBody']>;
+    };
   };
   patch_novel: {
     parameters: NovelIdParam;
@@ -157,14 +160,20 @@ export interface operations {
   };
   sync_novel: {
     parameters: NovelIdParam;
-    responses: { 202: Json<components['schemas']['Novel']>; 404: Json<components['schemas']['ErrorBody']> };
+    responses: {
+      202: Json<components['schemas']['Novel']>;
+      404: Json<components['schemas']['ErrorBody']>;
+    };
   };
   list_chapters: {
     parameters: {
       path: { novel_id: string };
       query?: { offset?: number; limit?: number; state?: components['schemas']['ChapterState'] };
     };
-    responses: { 200: Json<components['schemas']['ChapterPage']>; 404: Json<components['schemas']['ErrorBody']> };
+    responses: {
+      200: Json<components['schemas']['ChapterPage']>;
+      404: Json<components['schemas']['ErrorBody']>;
+    };
   };
   patch_chapters: {
     parameters: NovelIdParam;
@@ -177,7 +186,10 @@ export interface operations {
   };
   list_exports: {
     parameters: NovelIdParam;
-    responses: { 200: Json<components['schemas']['Export'][]>; 404: Json<components['schemas']['ErrorBody']> };
+    responses: {
+      200: Json<components['schemas']['Export'][]>;
+      404: Json<components['schemas']['ErrorBody']>;
+    };
   };
   create_export: {
     parameters: NovelIdParam;
