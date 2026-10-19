@@ -53,7 +53,7 @@ docs/superpowers/specs/
 ## Import boundaries
 
 Enforced by import-linter (`lint-imports`, contracts in `pyproject.toml`):
-`api-is-pure`, `repo-is-standalone`, `scraper-is-isolated`. The custom `allowed_imports`
+`api-is-pure`, `repo-is-standalone`, `domain-is-pure`, `scraper-is-isolated`. The custom `allowed_imports`
 contract (`tools/importlinter_contracts.py`) checks direct imports only.
 
 ## Quality gates

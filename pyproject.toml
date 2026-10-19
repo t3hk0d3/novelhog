@@ -97,6 +97,13 @@ allowed_modules = ["sqlalchemy", "alembic", "novelhog.ids", "novelhog.domain"]
 allow_stdlib = true
 
 [[tool.importlinter.contracts]]
+name = "domain-is-pure"
+type = "allowed_imports"
+source_module = "novelhog.domain"
+allowed_modules = ["novelhog.ids"]
+allow_stdlib = true
+
+[[tool.importlinter.contracts]]
 name = "scraper-is-isolated"
 type = "forbidden"
 source_modules = ["novelhog"]

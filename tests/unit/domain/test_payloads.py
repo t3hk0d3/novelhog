@@ -1,11 +1,12 @@
 """Tests for API and SSE payload models."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from novelhog.domain.chapters import ChapterState
-from novelhog.domain.exports import ExportState, Format
+from novelhog.domain.exports import ExportState
 from novelhog.domain.payloads import (
     ChapterView,
     ExportBlocked,
@@ -70,7 +71,6 @@ def export(state: ExportState) -> ExportView:
         chapter_from=None,
         chapter_to=None,
         skip_missing=False,
-        format=Format.EPUB,
         mime="application/epub+zip",
         state=state,
         progress=ExportProgress(1, 2),
@@ -139,7 +139,29 @@ class TestChapterView__ToEvent:
         assert (data["error"], data["error_at"]) == (None, None)
 
 
+EXPORT_FIELDS = {
+    "id", "novel_id", "filename", "chapter_from", "chapter_to", "skip_missing", "format", "mime",
+    "state", "progress", "blocked", "error", "waited", "size_bytes", "url", "created_at",
+    "ready_at",
+}  # fmt: skip
+
+
 class TestExportView__ToJson:
+    def test_to_json__has_exactly_the_spec_fields(self) -> None:
+        assert set(export(ExportState.READY).to_json()) == EXPORT_FIELDS
+
+    def test_to_json__derives_format_from_mime(self) -> None:
+        assert export(ExportState.READY).to_json()["format"] == "epub"
+
+    def test_to_json__blocked_only_when_waiting_without_skip_missing(self) -> None:
+        empty: dict[str, list[int]] = {"errors": [], "not_queued": []}
+        assert export(ExportState.WAITING).to_json()["blocked"] == {
+            "errors": [1],
+            "not_queued": [2],
+        }
+        assert export(ExportState.BUILDING).to_json()["blocked"] == empty
+        assert replace(export(ExportState.WAITING), skip_missing=True).to_json()["blocked"] == empty
+
     def test_to_json__url_and_size_only_when_ready(self) -> None:
         ready = export(ExportState.READY).to_json()
         assert (ready["url"], ready["size_bytes"]) == ("/static/x", 10)

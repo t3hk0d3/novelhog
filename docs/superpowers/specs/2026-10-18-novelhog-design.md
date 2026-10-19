@@ -1292,6 +1292,10 @@ Package `novelhog`, under `src/novelhog/`.
     characters replaced by `_`, runs of whitespace collapsed to one space,
     leading dots and surrounding spaces stripped, and cut to at most 150 UTF-8
     bytes without splitting a character. An empty result becomes `Untitled`.
+  - Character classes are defined by Unicode general category so the Python
+    and TypeScript implementations agree: *whitespace* is tab, LF, CR and
+    category `Zs`; *control characters* are the rest of categories `Cc` and `Cf`
+    (this includes U+0085, U+FEFF and bidi controls such as U+202E).
   - The suffix is always complete, so the whole name stays below 255 bytes.
   - Emoji and non-Latin letters are kept.
 - URLs: `domain.urls.static_url(base, key)` joins `STATIC_BASE_URL` and the key

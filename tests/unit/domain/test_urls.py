@@ -5,7 +5,7 @@ from urllib.parse import unquote
 import pytest
 
 from novelhog.domain.errors import ValidationFailed
-from novelhog.domain.urls import host_of, normalize_url, static_url
+from novelhog.domain.urls import host_of, normalize_toc_url, normalize_url, static_url
 
 
 class TestNormalizeUrl__OnValidUrl:
@@ -32,6 +32,13 @@ class TestNormalizeUrl__OnValidUrl:
             "HTTPS://WWW.Example.COM:443/a/b/?q=1#frag",
             "http://u@example.com/x//",
             "https://example.com",
+            "http://www.www.example.com/a",
+            "http://www.example.com./a",
+            "http://www.www.example.com.:8080/a",
+            "http://EXAMPLE.com:80",
+            "http://[::1]:8080/x/",
+            "http://b\u00fccher.example/a",
+            "http://192.168.0.1/a/",
         ],
     )
     def test_normalize_url__is_idempotent(self, url: str) -> None:
@@ -45,8 +52,12 @@ class TestNormalizeUrl__OnInvalidUrl:
         [
             "ftp://example.com/a",
             "example.com/a",
-            "https://example.com:8080/a",
-            "http://example.com:443/a",
+            "https://exa mple.com/a",
+            "https://-bad.example/a",
+            "https://bad_.example/a",
+            "https://a..b/a",
+            "https://www../a",
+            "https://" + "a" * 64 + ".com/",
             "https:///a",
             "https://example.com:notaport/a",
             "",
@@ -55,6 +66,33 @@ class TestNormalizeUrl__OnInvalidUrl:
     def test_normalize_url__raises_invalid_url(self, url: str) -> None:
         with pytest.raises(ValidationFailed) as info:
             normalize_url(url)
+        assert info.value.code == "invalid_url"
+
+
+class TestNormalizeUrl__OnHost:
+    def test_normalize_url__keeps_non_default_port(self) -> None:
+        assert normalize_url("https://example.com:8080/a") == "https://example.com:8080/a"
+        assert normalize_url("http://example.com:443/a") == "http://example.com:443/a"
+
+    def test_normalize_url__strips_trailing_dot(self) -> None:
+        assert normalize_url("https://Example.com./a") == "https://example.com/a"
+
+    def test_normalize_url__strips_repeated_www(self) -> None:
+        assert normalize_url("http://www.www.example.com/a") == "http://example.com/a"
+
+    def test_normalize_url__accepts_ip_literals(self) -> None:
+        assert normalize_url("http://127.0.0.1/a") == "http://127.0.0.1/a"
+        assert normalize_url("http://[::1]/a") == "http://[::1]/a"
+
+
+class TestNormalizeTocUrl:
+    def test_normalize_toc_url__normalises(self) -> None:
+        assert normalize_toc_url("HTTP://www.Example.com:80/n/") == "http://example.com/n"
+
+    @pytest.mark.parametrize("url", ["https://example.com:8080/a", "http://example.com:443/a"])
+    def test_normalize_toc_url__rejects_non_default_port(self, url: str) -> None:
+        with pytest.raises(ValidationFailed) as info:
+            normalize_toc_url(url)
         assert info.value.code == "invalid_url"
 
 

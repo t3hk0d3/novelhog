@@ -118,6 +118,24 @@ class TestRepoIsStandalone__WhenRepoImportsOutsideItsAllowance:
         assert _run_lint_imports(project).returncode == 0
 
 
+class TestDomainIsPure__WhenDomainImportsOutsideItsAllowance:
+    @pytest.mark.parametrize(
+        "forbidden",
+        ["novelhog.repo", "novelhog.config", "sqlalchemy", "pydantic", "fastapi"],
+    )
+    def test_lint_imports__fails(self, project: Path, forbidden: str) -> None:
+        _add_module(project, "novelhog.domain.offender", f"import {forbidden}\n")
+        result = _run_lint_imports(project)
+        assert result.returncode != 0
+        assert "domain-is-pure BROKEN" in result.stdout
+        assert f"novelhog.domain.offender -> {forbidden}" in result.stdout
+
+    @pytest.mark.parametrize("allowed", ["novelhog.ids", "json"])
+    def test_lint_imports__passes_for_allowed_imports(self, project: Path, allowed: str) -> None:
+        _add_module(project, "novelhog.domain.fine", f"import {allowed}\n")
+        assert _run_lint_imports(project).returncode == 0
+
+
 class TestScraperIsIsolated__WhenAnotherModuleImportsWebNovelScraper:
     @pytest.mark.parametrize("module", ["novelhog.worker.offender", "novelhog.repo.offender"])
     def test_lint_imports__fails(self, project: Path, module: str) -> None:

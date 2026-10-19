@@ -1,6 +1,7 @@
 """Tests for export formats, file names and keys."""
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +62,6 @@ class TestExportFilename__OnLongEmojiTitle:
 
 class TestExportFilename__OnDecomposedAccent:
     def test_export_filename__returns_nfc(self) -> None:
-        import unicodedata
-
         name = export_filename("Café", 1, 2, "epub")
         assert unicodedata.is_normalized("NFC", name)
 

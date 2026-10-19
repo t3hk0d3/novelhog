@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from novelhog.domain.chapters import ChapterState
-from novelhog.domain.exports import ExportState, Format
+from novelhog.domain.exports import ExportState, Format, format_for_mime
 
 
 def format_time(value: datetime) -> str:
@@ -144,7 +144,6 @@ class ExportView:
     chapter_from: int | None
     chapter_to: int | None
     skip_missing: bool
-    format: Format
     mime: str
     state: ExportState
     progress: ExportProgress
@@ -156,9 +155,18 @@ class ExportView:
     size_bytes: int | None = None
     url: str | None = None
 
+    @property
+    def format(self) -> Format:
+        """The export format, derived from the stored mime type."""
+        return format_for_mime(self.mime)
+
     def to_json(self) -> dict[str, object]:
-        """Return the wire form; `url`/`size_bytes` only when ready, `error` only when failed."""
+        """Return the wire form; `url`/`size_bytes` only when ready, `error` only when failed.
+
+        `blocked` is empty unless the export is waiting and `skip_missing` is false.
+        """
         ready = self.state is ExportState.READY
+        blocked = self.state is ExportState.WAITING and not self.skip_missing
         return {
             "id": self.id,
             "novel_id": self.novel_id,
@@ -171,8 +179,8 @@ class ExportView:
             "state": self.state.value,
             "progress": {"downloaded": self.progress.downloaded, "total": self.progress.total},
             "blocked": {
-                "errors": list(self.blocked.errors),
-                "not_queued": list(self.blocked.not_queued),
+                "errors": list(self.blocked.errors) if blocked else [],
+                "not_queued": list(self.blocked.not_queued) if blocked else [],
             },
             "error": self.error if self.state is ExportState.FAILED else None,
             "waited": self.waited,

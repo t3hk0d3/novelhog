@@ -6,6 +6,7 @@ from novelhog.domain.chapters import (
     CLIENT_TARGETS,
     ChapterRange,
     ChapterState,
+    Selector,
     resolve_selector,
     transition_allowed,
 )
@@ -68,15 +69,24 @@ class TestResolveSelector__OnEmptyList:
 
 
 class TestResolveSelector__OnOutOfBounds:
-    @pytest.mark.parametrize("selector", [[0, 3], [3, 11], ChapterRange(0, 3), ChapterRange(3, 11)])
-    def test_resolve_selector__raises_with_out_of_range_details(self, selector: object) -> None:
-        assert isinstance(selector, list | ChapterRange)
+    @pytest.mark.parametrize(
+        ("selector", "expected"),
+        [
+            ([0, 3], [0]),
+            ([3, 11], [11]),
+            ([11, 0, 11, -2], [-2, 0, 11]),
+            (ChapterRange(0, 3), [0]),
+            (ChapterRange(3, 11), [11]),
+            (ChapterRange(0, 11), [0, 11]),
+        ],
+    )
+    def test_resolve_selector__raises_with_out_of_range_details(
+        self, selector: Selector, expected: list[int]
+    ) -> None:
         with pytest.raises(ValidationFailed) as info:
             resolve_selector(selector, 10)
         assert info.value.code == "invalid_selector"
-        assert info.value.details is not None
-        out = info.value.details["out_of_range"]
-        assert out in ([0], [11])
+        assert info.value.details == {"out_of_range": expected}
 
 
 class TestResolveSelector__OnReversedRange:

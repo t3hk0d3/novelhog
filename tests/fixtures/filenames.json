@@ -110,5 +110,45 @@
     "end": 2,
     "ext": "epub",
     "expected": "Caf\u00e9 Chapters 1-2.epub"
+  },
+  {
+    "name": "byte order mark",
+    "title": "a\ufeffb",
+    "start": 1,
+    "end": 2,
+    "ext": "epub",
+    "expected": "a_b Chapters 1-2.epub"
+  },
+  {
+    "name": "next line U+0085",
+    "title": "a\u0085b",
+    "start": 1,
+    "end": 2,
+    "ext": "epub",
+    "expected": "a_b Chapters 1-2.epub"
+  },
+  {
+    "name": "bidi override U+202E",
+    "title": "a\u202eb",
+    "start": 1,
+    "end": 2,
+    "ext": "epub",
+    "expected": "a_b Chapters 1-2.epub"
+  },
+  {
+    "name": "space separators Zs",
+    "title": "a\u00a0\u3000b",
+    "start": 1,
+    "end": 2,
+    "ext": "epub",
+    "expected": "a b Chapters 1-2.epub"
+  },
+  {
+    "name": "tab and newline",
+    "title": "a\tb\nc",
+    "start": 1,
+    "end": 2,
+    "ext": "epub",
+    "expected": "a b c Chapters 1-2.epub"
   }
 ]

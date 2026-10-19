@@ -51,16 +51,25 @@ def format_for_mime(mime: str) -> Format:
 
 
 _UNSAFE = re.compile(r'[/\\:*?"<>|]')
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-_WHITESPACE = re.compile(r"\s+")
+_WHITESPACE_CONTROLS = "\t\n\r"
 _MAX_TITLE_BYTES = 150
+
+
+def _classify(char: str) -> str:
+    """Map whitespace (tab, LF, CR, Zs) to a space and other Cc/Cf controls to `_`."""
+    category = unicodedata.category(char)
+    if char in _WHITESPACE_CONTROLS or category == "Zs":
+        return " "
+    if category in {"Cc", "Cf"}:
+        return "_"
+    return char
 
 
 def export_filename(title: str | None, start: int, end: int, ext: str) -> str:
     """Build `<title> Chapters <start>-<end>.<ext>` that is safe on common file systems."""
     cleaned = strip_xml_invalid(unicodedata.normalize("NFC", title or ""))
-    cleaned = _CONTROL.sub("_", _UNSAFE.sub("_", cleaned))
-    cleaned = _WHITESPACE.sub(" ", cleaned).strip(" ").lstrip(". ")
+    cleaned = "".join(_classify(c) for c in _UNSAFE.sub("_", cleaned))
+    cleaned = re.sub(" +", " ", cleaned).strip(" ").lstrip(". ")
     cut = cleaned.encode("utf-8")[:_MAX_TITLE_BYTES].decode("utf-8", errors="ignore")
     part = cut.rstrip(" ") or "Untitled"
     return f"{part} Chapters {start}-{end}.{ext}"
