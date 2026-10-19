@@ -52,7 +52,7 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "UP", "N", "S", "BLE", "TRY"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "N801"]
+"tests/**" = ["S101", "S603", "N801", "S314"]
 
 [tool.mypy]
 strict = true
@@ -60,7 +60,7 @@ mypy_path = "src:."
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["web_novel_scraper.*", "pywebpush.*", "py_vapid.*"]
+module = ["web_novel_scraper.*", "ebooklib.*", "pywebpush.*", "py_vapid.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
