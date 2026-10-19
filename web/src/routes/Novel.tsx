@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, type Novel as NovelData } from '../api/client';
 import { isDeletedNovel, type DeletedNovel } from '../api/events';
+import { ChapterDetails } from '../components/ChapterDetails';
 import { ChapterTable } from '../components/ChapterTable';
 import { ChapterFilters } from '../components/ChapterFilters';
 import { NovelHeader } from '../components/NovelHeader';
@@ -69,8 +70,30 @@ function NovelPage({ novel }: { novel: NovelData }) {
   const [newBeforeVisit] = useState(novel.new_pages);
   const view = useChapterView(chapters.data, newBeforeVisit);
   const seenSent = useRef(false);
-  // The chapter whose details are open; Task 37's dialog reads it (null = closed).
-  const [, setDetailsChapter] = useState<Chapter | null>(null);
+  // The chapter whose details are open lives in the URL (`?chapter=<id>`): rows link to it, a
+  // deep link or new tab opens it, and the back gesture closes it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const detailsId = searchParams.get('chapter');
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Set on the history entry that opening details pushed, so closing can pop it instead of
+  // leaving a dead entry; a deep link has no such entry and closes by replacing.
+  const pushedByUs = (location.state as { details?: boolean } | null)?.details === true;
+  const setDetailsId = (chapterId: string | null, replace: boolean) => {
+    if (chapterId === null && pushedByUs) {
+      void navigate(-1);
+      return;
+    }
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (chapterId === null) next.delete('chapter');
+        else next.set('chapter', chapterId);
+        return next;
+      },
+      { replace, state: chapterId === null ? null : { details: pushedByUs || !replace } },
+    );
+  };
   // The first and last position Export EPUB… asked for; Task 38's export dialog reads it
   // (null = closed).
   const [, setExportRange] = useState<{ from: number; to: number } | null>(null);
@@ -85,7 +108,15 @@ function NovelPage({ novel }: { novel: NovelData }) {
 
   const all = chapters.data ?? [];
   // The rows on screen: every match under a filter, else the chosen range.
-  const selection = useSelection(all, view.filterActive ? view.matches : view.rangeChapters);
+  const rows = view.filterActive ? view.matches : view.rangeChapters;
+  const selection = useSelection(all, rows);
+  const detailsMissing =
+    detailsId !== null && chapters.data !== undefined && !all.some((c) => c.id === detailsId);
+  // A link to a chapter that no longer exists (or never did) just drops the parameter.
+  useEffect(() => {
+    if (detailsMissing) setDetailsId(null, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setDetailsId is recreated each render
+  }, [detailsMissing]);
   return (
     <div className={`flex flex-col gap-4 ${selection.active ? 'pb-32' : ''}`}>
       <NovelHeader novel={novel} />
@@ -126,7 +157,27 @@ function NovelPage({ novel }: { novel: NovelData }) {
             hidden={view.filterActive}
             onSelectRange={view.setRange}
           />
-          <Results view={view} onOpenDetails={setDetailsChapter} selection={selection} />
+          <Results
+            view={view}
+            onOpenDetails={(chapter) => {
+              setDetailsId(chapter.id, false);
+            }}
+            selection={selection}
+          />
+          {detailsId !== null && !selection.active && (
+            <ChapterDetails
+              novelId={novel.id}
+              chapterId={detailsId}
+              chapters={all}
+              rows={rows}
+              onStep={(chapterId) => {
+                setDetailsId(chapterId, true);
+              }}
+              onClose={() => {
+                setDetailsId(null, true);
+              }}
+            />
+          )}
           {selection.active && (
             <SelectionBar
               novelId={novel.id}
