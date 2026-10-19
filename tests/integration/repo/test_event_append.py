@@ -54,71 +54,83 @@ class TestAppend:
         assert row.payload == {"clock": 1}
 
 
-def _commit_two_writers(repo: Repo) -> None:
-    """Run two writers: the first takes the clock and holds it, the second must wait."""
-    proceed = threading.Event()
-    first_has_clock = threading.Event()
-    order: list[str] = []
+def _seqs_after(repo: Repo, cursor: int) -> list[int]:
+    with db.read(repo.engine) as conn:
+        statement = (
+            select(events_table.c.seq)
+            .where(events_table.c.seq > cursor)
+            .order_by(events_table.c.seq)
+        )
+        return [row.seq for row in conn.execute(statement).all()]
 
-    def first() -> None:
-        with db.write(repo.engine) as conn:
-            event_log.append(conn, NOVEL, NOVEL, {"w": 1}, now=repo.clock())
-            first_has_clock.set()
-            proceed.wait(timeout=30)
-            order.append("first-commit")
 
-    def second() -> None:
-        first_has_clock.wait(timeout=30)
-        with db.write(repo.engine) as conn:
-            event_log.append(conn, NOVEL, NOVEL, {"w": 2}, now=repo.clock())
-            order.append("second-has-clock")
+class _TwoWriters:
+    """The first writer takes the clock and holds it; the second starts while it is held."""
 
-    t1 = threading.Thread(target=first)
-    t2 = threading.Thread(target=second)
-    t1.start()
-    t2.start()
-    first_has_clock.wait(timeout=30)
-    t2.join(timeout=0.5)
-    waited = t2.is_alive()
-    proceed.set()
-    t1.join(timeout=30)
-    t2.join(timeout=30)
-    assert waited, "the second writer should wait for the first"
-    assert order == ["first-commit", "second-has-clock"]
+    def __init__(self, repo: Repo) -> None:
+        self.repo = repo
+        self.release_first = threading.Event()
+        self.release_second = threading.Event()
+        self.first_has_clock = threading.Event()
+        self.second_has_clock = threading.Event()
+        self.threads = [
+            threading.Thread(target=self._first, daemon=True),
+            threading.Thread(target=self._second, daemon=True),
+        ]
+
+    def _first(self) -> None:
+        with db.write(self.repo.engine) as conn:
+            event_log.append(conn, NOVEL, NOVEL, {"w": 1}, now=self.repo.clock())
+            self.first_has_clock.set()
+            self.release_first.wait(timeout=30)
+
+    def _second(self) -> None:
+        self.first_has_clock.wait(timeout=30)
+        with db.write(self.repo.engine) as conn:
+            event_log.append(conn, NOVEL, NOVEL, {"w": 2}, now=self.repo.clock())
+            self.second_has_clock.set()
+            self.release_second.wait(timeout=30)
+
+    def start(self) -> None:
+        for thread in self.threads:
+            thread.start()
+        assert self.first_has_clock.wait(timeout=30)
+
+    def finish(self) -> None:
+        self.release_first.set()
+        self.release_second.set()
+        for thread in self.threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
 
 
 class TestAppend__TwoTransactionsCommittingInOppositeOrder:
     def test_append__second_waits_for_first(self, repo: Repo) -> None:
-        _commit_two_writers(repo)
-        assert [row.seq for row in _rows(repo)] == [1, 2]
+        writers = _TwoWriters(repo)
+        writers.start()
+        try:
+            assert not writers.second_has_clock.wait(timeout=0.5)
+            writers.release_first.set()
+            assert writers.second_has_clock.wait(timeout=30)
+        finally:
+            writers.finish()
+        assert _seqs_after(repo, 0) == [1, 2]
 
     def test_append__poller_never_skips_an_event(self, repo: Repo) -> None:
-        cursor = 0
-        seen: list[int] = []
-        stop = threading.Event()
-
-        def poll() -> None:
-            nonlocal cursor
-            while True:
-                done = stop.is_set()
-                with db.read(repo.engine) as conn:
-                    rows = conn.execute(
-                        select(events_table.c.seq)
-                        .where(events_table.c.seq > cursor)
-                        .order_by(events_table.c.seq)
-                    ).all()
-                for row in rows:
-                    seen.append(row.seq)
-                    cursor = row.seq
-                if done:
-                    return
-
-        poller = threading.Thread(target=poll)
-        poller.start()
-        _commit_two_writers(repo)
-        stop.set()
-        poller.join(timeout=30)
-        assert seen == [1, 2]
+        writers = _TwoWriters(repo)
+        writers.start()
+        try:
+            assert _seqs_after(repo, 0) == []
+            writers.release_first.set()
+            assert writers.second_has_clock.wait(timeout=30)
+            cursor = 0
+            first_poll = _seqs_after(repo, cursor)
+            assert first_poll == [1]
+            cursor = first_poll[-1]
+            writers.release_second.set()
+        finally:
+            writers.finish()
+        assert _seqs_after(repo, cursor) == [2]
 
 
 class TestLatestSeq:

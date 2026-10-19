@@ -1,10 +1,9 @@
 """Novels: create, read, update, sync requests and delete (spec sections 4 and 5.3)."""
 
-from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Connection, Engine, and_, delete, func, insert, or_, select, update
+from sqlalchemy import Connection, and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from novelhog import ids
@@ -14,6 +13,7 @@ from novelhog.domain.payloads import NovelView
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.domain.urls import host_of, normalize_toc_url, static_url
 from novelhog.repo import db, events, hosts
+from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import (
     chapter_contents,
     chapters,
@@ -21,8 +21,8 @@ from novelhog.repo.schema import (
     storage_trash,
 )
 from novelhog.repo.schema import novels as novels_table
+from novelhog.repo.sql import dialect_insert
 
-_counted = and_(chapters.c.position.is_not(None))
 _counters = (
     select(
         chapters.c.novel_id.label("novel_id"),
@@ -43,7 +43,7 @@ _counters = (
         .label("new"),
     )
     .join(novels_table, novels_table.c.id == chapters.c.novel_id)
-    .where(_counted)
+    .where(chapters.c.position.is_not(None))
     .group_by(chapters.c.novel_id)
     .subquery("counters")
 )
@@ -104,18 +104,11 @@ def snapshot(conn: Connection, novel_id: str, *, now: datetime, static_base_url:
 class Novels:
     """Reads and writes novels; every write appends its `NV` event in the same transaction."""
 
-    def __init__(
-        self,
-        engine: Engine,
-        clock: Callable[[], datetime],
-        *,
-        static_base_url: str,
-        refresh_min_interval: int,
-    ) -> None:
-        self._engine = engine
-        self._clock = clock
-        self._static_base_url = static_base_url
-        self._refresh_min_interval = refresh_min_interval
+    def __init__(self, context: RepoContext) -> None:
+        self._engine = context.engine
+        self._clock = context.clock
+        self._static_base_url = context.static_base_url
+        self._refresh_min_interval = context.refresh_min_interval
 
     def _snapshot(self, conn: Connection, novel_id: str, now: datetime) -> NovelView:
         return snapshot(conn, novel_id, now=now, static_base_url=self._static_base_url)
@@ -204,14 +197,14 @@ class Novels:
         title: str | None = None,
     ) -> NovelView:
         """Change the given fields (`seen=True` stamps `seen_at`) and append one `NV` event."""
-        cleaned: str | None = None
-        if title is not None:
-            cleaned = strip_xml_invalid(title).strip()
-            if not cleaned:
-                raise ValidationFailed("invalid_title", "The title must not be empty")  # noqa: TRY003
         now = self._clock()
         with db.write(self._engine) as conn:
             self._require(conn, novel_id)
+            cleaned: str | None = None
+            if title is not None:
+                cleaned = strip_xml_invalid(title).strip()
+                if not cleaned:
+                    raise ValidationFailed("invalid_title", "The title must not be empty")  # noqa: TRY003
             values: dict[str, object] = {}
             if followed is not None:
                 values["followed"] = followed
@@ -241,38 +234,42 @@ class Novels:
             return self._emit(conn, novel_id, now)
 
     def delete(self, novel_id: str) -> None:
-        """Delete the novel with its chapters, contents and exports; trash its static files."""
+        """Delete the novel with its chapters, contents and exports; trash its static files.
+
+        Rows are deleted first (the keys come back from `DELETE ... RETURNING`) and the event is
+        appended last, as the lock order in `events.append` requires.
+        """
         now = self._clock()
+        if not ids.is_valid(novel_id, "NV"):
+            raise NotFound("novel", novel_id)
         with db.write(self._engine) as conn:
-            self._require(conn, novel_id)
-            cover = conn.execute(
-                select(novels_table.c.cover_key).where(novels_table.c.id == novel_id)
-            ).scalar_one()
-            export_keys = list(
-                conn.execute(
-                    select(exports.c.storage_key).where(
-                        exports.c.novel_id == novel_id, exports.c.state == "ready"
-                    )
-                ).scalars()
-            )
-            keys = [k for k in dict.fromkeys([cover, *export_keys]) if k is not None]
-            events.append(conn, novel_id, novel_id, payloads.deleted_novel(novel_id), now=now)
-            if keys:
-                trashed = set(
-                    conn.execute(
-                        select(storage_trash.c.key).where(storage_trash.c.key.in_(keys))
-                    ).scalars()
-                )
-                fresh = [{"key": k, "at": now} for k in keys if k not in trashed]
-                if fresh:
-                    conn.execute(insert(storage_trash), fresh)
             chapter_ids = select(chapters.c.id).where(chapters.c.novel_id == novel_id)
             conn.execute(
                 delete(chapter_contents).where(chapter_contents.c.chapter_id.in_(chapter_ids))
             )
-            conn.execute(delete(exports).where(exports.c.novel_id == novel_id))
+            export_rows = conn.execute(
+                delete(exports)
+                .where(exports.c.novel_id == novel_id)
+                .returning(exports.c.storage_key, exports.c.state)
+            ).all()
             conn.execute(delete(chapters).where(chapters.c.novel_id == novel_id))
-            conn.execute(delete(novels_table).where(novels_table.c.id == novel_id))
+            novel_row = conn.execute(
+                delete(novels_table)
+                .where(novels_table.c.id == novel_id)
+                .returning(novels_table.c.cover_key)
+            ).first()
+            if novel_row is None:
+                raise NotFound("novel", novel_id)
+            ready_keys = [row.storage_key for row in export_rows if row.state == "ready"]
+            keys = [k for k in dict.fromkeys([novel_row.cover_key, *ready_keys]) if k is not None]
+            if keys:
+                conn.execute(
+                    dialect_insert(self._engine, storage_trash).on_conflict_do_nothing(
+                        index_elements=["key"]
+                    ),
+                    [{"key": k, "at": now} for k in keys],
+                )
+            events.append(conn, novel_id, novel_id, payloads.deleted_novel(novel_id), now=now)
 
     def list(self) -> list[NovelView]:
         """Return all novels, newest first."""

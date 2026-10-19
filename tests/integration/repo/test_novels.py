@@ -1,5 +1,6 @@
 """The novels repository (spec sections 4, 5.2 and 5.3)."""
 
+import threading
 from datetime import timedelta
 from typing import Any
 
@@ -8,6 +9,7 @@ from sqlalchemy import insert, select, update
 
 from novelhog.domain.errors import Conflict, NotFound, ServiceUnavailable, ValidationFailed
 from novelhog.repo import Repo, db
+from novelhog.repo import events as event_log
 from novelhog.repo.schema import (
     chapter_contents,
     chapters,
@@ -268,6 +270,15 @@ class TestUpdate:
         with pytest.raises(NotFound):
             published.novels.update("NV000000000099", followed=False)
 
+    @pytest.mark.parametrize("novel_id", ["garbage", "NV\x00"])
+    def test_update__malformed_id_raises_not_found(self, published: Repo, novel_id: str) -> None:
+        with pytest.raises(NotFound):
+            published.novels.update(novel_id, followed=False)
+
+    def test_update__unknown_id_wins_over_an_invalid_title(self, published: Repo) -> None:
+        with pytest.raises(NotFound):
+            published.novels.update("NV000000000099", title=" ")
+
 
 class TestRequestSync:
     def test_request_sync__sets_next_refresh_and_flag_and_appends_an_event(
@@ -283,9 +294,12 @@ class TestRequestSync:
         assert view.next_refresh_at == clock.current
         assert len(_events(published)) == 2
 
-    def test_request_sync__unknown_id_raises_not_found(self, published: Repo) -> None:
+    @pytest.mark.parametrize("novel_id", ["NV000000000099", "garbage", "NV\x00"])
+    def test_request_sync__unknown_or_malformed_id_raises_not_found(
+        self, published: Repo, novel_id: str
+    ) -> None:
         with pytest.raises(NotFound):
-            published.novels.request_sync("NV000000000099")
+            published.novels.request_sync(novel_id)
 
 
 class TestDelete:
@@ -352,6 +366,79 @@ class TestDelete:
         assert events_[-1].payload == {"id": populated, "deleted": True}
         assert events_[-1].entity_id == populated
 
-    def test_delete__unknown_id_raises_not_found(self, published: Repo) -> None:
+    @pytest.mark.parametrize("novel_id", ["NV000000000099", "garbage", "NV\x00"])
+    def test_delete__unknown_or_malformed_id_raises_not_found(
+        self, published: Repo, novel_id: str
+    ) -> None:
         with pytest.raises(NotFound):
-            published.novels.delete("NV000000000099")
+            published.novels.delete(novel_id)
+
+    def test_delete__tolerates_a_key_already_in_the_trash(
+        self, published: Repo, populated: str, clock: FakeClock
+    ) -> None:
+        with db.write(published.engine) as conn:
+            conn.execute(insert(storage_trash).values(key="covers/a.jpg", at=clock.current))
+        published.novels.delete(populated)
+        with db.read(published.engine) as conn:
+            keys = {r.key for r in conn.execute(select(storage_trash)).all()}
+        assert keys == {"covers/a.jpg", "exports/one.epub"}
+
+    def test_delete__concurrent_deletes_succeed_once_and_raise_not_found_once(
+        self, published: Repo, populated: str
+    ) -> None:
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+
+        def racer() -> None:
+            barrier.wait(timeout=30)
+            try:
+                published.novels.delete(populated)
+                outcomes.append("deleted")
+            except NotFound:
+                outcomes.append("not_found")
+
+        threads = [threading.Thread(target=racer, daemon=True) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive()
+        assert sorted(outcomes) == ["deleted", "not_found"]
+        deleted = [e for e in _events(published) if e.payload.get("deleted")]
+        assert len(deleted) == 1
+
+    def test_delete__does_not_deadlock_with_a_concurrent_event_writer(
+        self, published: Repo, populated: str, clock: FakeClock
+    ) -> None:
+        """An event writer that locked the novel row first must not deadlock with `delete`."""
+        has_row = threading.Event()
+        errors: list[BaseException] = []
+
+        def writer() -> None:
+            try:
+                with db.write(published.engine) as conn:
+                    conn.execute(
+                        update(novels).where(novels.c.id == populated).values(title="renamed")
+                    )
+                    has_row.set()
+                    threading.Event().wait(1.0)  # let delete run into the held row lock
+                    event_log.append(conn, populated, populated, {"id": populated}, now=clock())
+            except BaseException as error:  # noqa: BLE001  (checked in the main thread)
+                errors.append(error)
+
+        def deleter() -> None:
+            try:
+                has_row.wait(timeout=30)
+                published.novels.delete(populated)
+            except BaseException as error:  # noqa: BLE001  (checked in the main thread)
+                errors.append(error)
+
+        threads = [threading.Thread(target=f, daemon=True) for f in (writer, deleter)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive()
+        assert errors == []
+        with db.read(published.engine) as conn:
+            assert conn.execute(select(novels)).all() == []

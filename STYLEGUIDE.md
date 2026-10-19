@@ -17,6 +17,12 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - `repo` never logs: it returns reports and raises domain errors.
 - No public `repo` method takes a `Connection`; transactions are composed inside `repo`.
 - Line length 100.
+- Sub-repositories (`Repo.events`, `.hosts`, `.novels`, ...) take one frozen `RepoContext`
+  (engine, clock, config); new shared settings are added there.
+- Lock order in event-writing transactions: all row writes (and locking reads such as
+  `DELETE ... RETURNING`) first, `events.append` last, no new row lock after the first
+  `append`. Snapshots are built lazily inside `append` (callable payload), after the clock is
+  taken (spec section 4, "Lock order").
 
 ## TypeScript
 

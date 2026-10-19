@@ -484,6 +484,12 @@ RETURNING <columns>
   progress) only after taking the clock, so they include every earlier
   committed change. Transactions that append events keep all network work
   outside, so the serialisation costs milliseconds.
+- **Lock order.** In every event-writing transaction all row writes (and row
+  reads that need a lock, e.g. `DELETE … RETURNING`) come first and
+  `events.append` comes last; no new row lock is taken after the first
+  `append`. Snapshots are built lazily inside `append`, after the clock is
+  taken. This single order (rows, then clock) keeps Postgres free of deadlocks
+  between event writers.
 - Readers: the SSE stream (stateless, per connection, from `Last-Event-ID`) and
   durable consumers with a row in `consumers`. The latest seq is
   `events.latest_seq()` (the clock value).

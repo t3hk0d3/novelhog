@@ -1,5 +1,7 @@
 """The hosts repository (spec sections 4 and 5.3)."""
 
+import threading
+
 from sqlalchemy import insert, select
 
 from novelhog.repo import Repo, db
@@ -44,6 +46,28 @@ class TestPublish:
         report = repo.hosts.publish(["a.com"])
         assert _stored(repo) == {"a.com": True, "b.com": False}
         assert report.added == ["a.com"]
+
+    def test_publish__concurrent_publishers_do_not_fail_and_store_each_host_once(
+        self, repo: Repo
+    ) -> None:
+        barrier = threading.Barrier(4)
+        errors: list[BaseException] = []
+
+        def publisher() -> None:
+            try:
+                barrier.wait(timeout=30)
+                repo.hosts.publish(["a.com", "b.com"])
+            except BaseException as error:  # noqa: BLE001  (checked in the main thread)
+                errors.append(error)
+
+        threads = [threading.Thread(target=publisher, daemon=True) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive()
+        assert errors == []
+        assert _stored(repo) == {"a.com": True, "b.com": True}
 
 
 class TestQueries:

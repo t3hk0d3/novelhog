@@ -44,7 +44,11 @@ def database_url(tmp_path_factory: pytest.TempPathFactory) -> str:
     """The test database URL: `NOVELHOG_TEST_DATABASE_URL`, else a temporary SQLite file."""
     configured = os.environ.get("NOVELHOG_TEST_DATABASE_URL")
     if configured:
-        return configured
+        # A leaked lock fails a test after 10 s instead of hanging the suite.
+        url = make_url(configured)
+        if url.get_backend_name() in ("postgresql", "postgres"):
+            url = url.update_query_dict({"options": "-c lock_timeout=10000"})
+        return url.render_as_string(hide_password=False)
     return f"sqlite:///{tmp_path_factory.mktemp('db') / 'test.db'}"
 
 

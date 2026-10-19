@@ -6,9 +6,10 @@
 from collections.abc import Callable
 from datetime import datetime
 
-from sqlalchemy import Connection, Engine, insert, select, update
+from sqlalchemy import Connection, insert, select, update
 
 from novelhog.repo import db
+from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import event_clock
 from novelhog.repo.schema import events as events_table
 
@@ -22,7 +23,13 @@ def append(
 
     The clock update holds the row lock until the transaction ends, so event writers commit in
     `seq` order. A callable `payload` is evaluated after the clock was taken, so snapshots built
-    by it include every earlier committed change.
+    by it include every earlier committed change; later appends in the same transaction (the
+    clock is already held) may pass plain dicts.
+
+    Lock order (spec section 4): in an event-writing transaction every row write, and every
+    locking read such as `DELETE ... RETURNING`, comes first and `append` comes last; no new row
+    lock may be taken after the first `append`. Taking the clock first in one transaction and
+    last in another deadlocks on Postgres.
     """
     statement = update(event_clock).values(seq=event_clock.c.seq + 1).returning(event_clock.c.seq)
     seq = conn.execute(statement.where(event_clock.c.id == 1)).scalar_one()
@@ -38,8 +45,8 @@ def append(
 class Events:
     """Read access to the event log."""
 
-    def __init__(self, engine: Engine) -> None:
-        self._engine = engine
+    def __init__(self, context: RepoContext) -> None:
+        self._engine = context.engine
 
     def latest_seq(self) -> int:
         """Return the clock value: the last `seq` handed out (0 on an empty log)."""

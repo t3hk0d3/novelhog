@@ -1,13 +1,13 @@
 """Hosts the installed scraper supports (spec sections 4 and 5.2)."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 
-from sqlalchemy import Connection, Engine, exists, insert, select, update
+from sqlalchemy import Connection, exists, select, update
 
 from novelhog.repo import db
+from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import hosts as hosts_table
+from novelhog.repo.sql import dialect_insert
 
 
 @dataclass(frozen=True)
@@ -35,15 +35,15 @@ def supported_hosts(conn: Connection) -> list[str]:
 
 def any_published(conn: Connection) -> bool:
     """Report whether the table holds any row."""
-    return bool(conn.execute(select(exists().where(hosts_table.c.host.is_not(None)))).scalar_one())
+    return bool(conn.execute(select(exists(select(hosts_table.c.host)))).scalar_one())
 
 
 class Hosts:
     """Publishes and reads the supported hosts."""
 
-    def __init__(self, engine: Engine, clock: Callable[[], datetime]) -> None:
-        self._engine = engine
-        self._clock = clock
+    def __init__(self, context: RepoContext) -> None:
+        self._engine = context.engine
+        self._clock = context.clock
 
     def publish(self, hosts: list[str]) -> PublishReport:
         """Upsert `hosts` as supported and mark every other host unsupported; never delete."""
@@ -53,17 +53,17 @@ class Hosts:
             known = {row.host: row.supported for row in conn.execute(select(hosts_table)).all()}
             added = [h for h in wanted if not known.get(h, False)]
             dropped = sorted(h for h, supported in known.items() if supported and h not in wanted)
-            for host in wanted:
-                if host not in known:
-                    conn.execute(
-                        insert(hosts_table).values(host=host, supported=True, updated_at=now)
+            if wanted:
+                upsert = dialect_insert(self._engine, hosts_table)
+                conn.execute(
+                    upsert.values(
+                        [{"host": h, "supported": True, "updated_at": now} for h in wanted]
+                    ).on_conflict_do_update(
+                        index_elements=["host"],
+                        set_={"supported": True, "updated_at": now},
+                        where=hosts_table.c.supported.is_(False),
                     )
-                elif not known[host]:
-                    conn.execute(
-                        update(hosts_table)
-                        .where(hosts_table.c.host == host)
-                        .values(supported=True, updated_at=now)
-                    )
+                )
             if dropped:
                 conn.execute(
                     update(hosts_table)

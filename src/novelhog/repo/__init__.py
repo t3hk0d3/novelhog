@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from novelhog.repo import db
+from novelhog.repo.context import RepoContext
 from novelhog.repo.db import Busy, Revisions, SchemaOutdated
 from novelhog.repo.events import Events
 from novelhog.repo.hosts import Hosts
@@ -28,15 +29,16 @@ class Repo:
         self.engine = db.create_engine(url)
         self.clock = clock
         self.static_base_url = static_base_url
-        self.events = Events(self.engine)
-        self.hosts = Hosts(self.engine, clock)
-        self.novels = Novels(
-            self.engine,
-            clock,
+        self.context = RepoContext(
+            engine=self.engine,
+            clock=clock,
             static_base_url=static_base_url,
             refresh_min_interval=refresh_min_interval,
         )
-        self.settings = Settings(self.engine, clock)
+        self.events = Events(self.context)
+        self.hosts = Hosts(self.context)
+        self.novels = Novels(self.context)
+        self.settings = Settings(self.context)
 
     def migrate(self) -> str:
         """Apply pending migrations and return the head revision."""
