@@ -169,7 +169,8 @@ def _run_check_sh(
     fake_uv.chmod(0o755)
     result = subprocess.run(  # noqa: S603
         ["bash", str(REPO_ROOT / "scripts" / "check.sh")],  # noqa: S607
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        # Skip the web gate: it would run the real web suite inside pytest.
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "NOVELHOG_SKIP_WEB": "1"},
         capture_output=True,
         text=True,
         check=False,
