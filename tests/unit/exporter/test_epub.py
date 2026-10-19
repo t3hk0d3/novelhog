@@ -75,12 +75,47 @@ class TestEpubExporter:
         assert opf.get("version") == "3.0"
         assert any(n.endswith("nav.xhtml") for n in z.namelist())
 
-    def test_build__one_document_per_chapter_in_order_with_title(self, tmp_path: Path) -> None:
+    def test_build__spine_and_nav_follow_position_order(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book([BookChapter(3, "Third", "c"), *CH]))
+        opf = _opf(z)
+        hrefs = {i.get("id"): i.get("href") for i in opf.findall(".//o:manifest/o:item", NS)}
+        spine = [hrefs[r.get("idref")] for r in opf.findall(".//o:spine/o:itemref", NS)]
+        chapters = [h for h in spine if h and h.startswith("chapter_")]
+        assert chapters == ["chapter_00001.xhtml", "chapter_00002.xhtml", "chapter_00003.xhtml"]
+        nav = ET.fromstring(z.read("EPUB/nav.xhtml"))
+        assert [a.text for a in nav.findall(".//x:nav//x:a", NS)] == ["First", "Second", "Third"]
+
+    def test_build__one_document_per_chapter_with_title_heading(self, tmp_path: Path) -> None:
         z = _build(tmp_path, _book(CH))
         docs = _chapter_docs(z)
         assert len(docs) == 2
         heads = [ET.fromstring(z.read(d)).find(".//x:h1", NS).text for d in docs]  # type: ignore[union-attr]
         assert heads == ["First", "Second"]
+
+    def test_build__empty_title_falls_back_to_chapter_position(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book([BookChapter(7, "\x00", "x")]))
+        doc = ET.fromstring(z.read(_chapter_docs(z)[0]))
+        assert doc.find(".//x:h1", NS).text == "Chapter 7"  # type: ignore[union-attr]
+
+    def test_build__mislabelled_webp_leaves_no_webp(self, tmp_path: Path) -> None:
+        webp = _img("WEBP")
+        md = _data_md(webp, "image/png")
+        z = _build(tmp_path, _book([BookChapter(1, "A", md)], cover=(webp, "image/png")))
+        for name in z.namelist():
+            assert not name.endswith(".webp")
+            if "images/" in name or "cover." in name:
+                assert not z.read(name).startswith(b"RIFF")
+
+    def test_build__truncated_image_dropped_and_book_builds(self, tmp_path: Path) -> None:
+        md = "x " + _data_md(b"GIF89a", "image/gif")
+        z = _build(tmp_path, _book([BookChapter(1, "A", md)], cover=(b"GIF89a", "image/gif")))
+        assert not [n for n in z.namelist() if "img_" in n or "cover." in n]
+        assert "<img" not in z.read(_chapter_docs(z)[0]).decode()
+
+    def test_build__invalid_base64_image_becomes_alt_text(self, tmp_path: Path) -> None:
+        md = "![the alt](data:image/png;base64,!!!)"
+        z = _build(tmp_path, _book([BookChapter(1, "A", md)]))
+        assert "the alt" in z.read(_chapter_docs(z)[0]).decode()
 
     def test_build__sets_cover_converted(self, tmp_path: Path) -> None:
         z = _build(tmp_path, _book(CH, cover=(_img("WEBP"), "image/webp")))

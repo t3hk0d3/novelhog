@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import io
 import re
 from html import escape
 from pathlib import Path
@@ -9,15 +10,29 @@ from pathlib import Path
 from ebooklib import epub
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
+from PIL import Image
 
 from novelhog.domain.exports import FORMATS, Format
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.exporter.base import BookInput
-from novelhog.images import convert_for
+from novelhog.images import convert_for, sniff
 
 _DATA_URI = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
 _EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif"}
 _ACCEPTED = FORMATS[Format.EPUB].accepted_images
+
+
+def _prepare_image(raw: bytes) -> tuple[bytes, str] | None:
+    """Return the image in an EPUB-accepted type, judged by its bytes; None when undecodable."""
+    mime = sniff(raw)
+    if mime is None:
+        return None
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+        return convert_for(raw, mime, _ACCEPTED)
+    except OSError, EOFError, ValueError, SyntaxError, Image.DecompressionBombError:
+        return None
 
 
 class EpubExporter:
@@ -40,13 +55,16 @@ class EpubExporter:
         epub_book.set_title(title)
         epub_book.set_language(strip_xml_invalid(book.language))
         if book.cover is not None:
-            data, mime = convert_for(book.cover[0], book.cover[1], _ACCEPTED)
-            epub_book.set_cover(f"cover.{_EXTENSIONS[mime]}", data)
+            cover = _prepare_image(book.cover[0])
+            if cover is not None:
+                epub_book.set_cover(f"cover.{_EXTENSIONS[cover[1]]}", cover[0])
 
         images = 0
         documents: list[epub.EpubHtml] = []
         for chapter in sorted(book.chapters, key=lambda c: c.position):
-            chapter_title = strip_xml_invalid(chapter.title)
+            chapter_title = (
+                strip_xml_invalid(chapter.title).strip() or f"Chapter {chapter.position}"
+            )
             tokens = self._markdown.parse(strip_xml_invalid(chapter.markdown))
             for token in tokens:
                 for child in token.children or []:
@@ -74,17 +92,17 @@ class EpubExporter:
         Returns the updated image counter.
         """
         match = _DATA_URI.match(str(image.attrs.get("src", "")))
+        prepared = None
         if match is not None:
             try:
-                raw = base64.b64decode(match.group(2), validate=True)
-                data, mime = convert_for(raw, match.group(1).lower(), _ACCEPTED)
-            except binascii.Error, OSError, ValueError:
-                match = None
-        if match is None:
+                prepared = _prepare_image(base64.b64decode(match.group(2), validate=True))
+            except binascii.Error:
+                prepared = None
+        if prepared is None:
             image.type = "text"
-            image.content = image.content or ""
             image.children = None
             return count
+        data, mime = prepared
         count += 1
         name = f"images/img_{count:05d}.{_EXTENSIONS[mime]}"
         epub_book.add_item(
