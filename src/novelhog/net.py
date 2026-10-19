@@ -46,8 +46,6 @@ def _embedded_v4(address: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
         found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address.sixtofour is not None:
         found.append(address.sixtofour)
-    if address in _SIIT:
-        found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address in _TEREDO:
         found.append(ipaddress.IPv4Address((int(address) & 0xFFFFFFFF) ^ 0xFFFFFFFF))
     return found
@@ -60,7 +58,7 @@ def is_public(address: str) -> bool:
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv6Address):
-        if ip in _NAT64_LOCAL or ip in _V4_COMPATIBLE or ip in _SITE_LOCAL:
+        if ip in _NAT64_LOCAL or ip in _V4_COMPATIBLE or ip in _SITE_LOCAL or ip in _SIIT:
             return False
         if any(not is_public(str(v4)) for v4 in _embedded_v4(ip)):
             return False

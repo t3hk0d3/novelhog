@@ -2,6 +2,8 @@
 
 import io
 import random
+import socket
+import threading
 import time
 from pathlib import Path
 
@@ -216,3 +218,61 @@ class TestConfigurePixelLimit__Fetcher:
         images.configure_pixel_limit(777)
         fetcher(max_pixels=10_000)
         assert Image.MAX_IMAGE_PIXELS == 777
+
+
+def _serve_raw(head: bytes, body: bytes, linger: float = 0.0) -> int:
+    """Serve one raw HTTP response on a local socket; returns the port."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def run() -> None:
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.sendall(head + body)
+        time.sleep(linger)
+        conn.close()
+        listener.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    port: int = listener.getsockname()[1]
+    return port
+
+
+class TestImageFetcherFetch__TransportErrors:
+    @pytest.mark.parametrize(
+        ("head", "body", "linger"),
+        [
+            pytest.param(
+                b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 20\r\n"
+                b"Connection: close\r\n\r\n",
+                b"\x1f\x8b\x08\x00garbagegarbage!!",
+                0.0,
+                id="corrupt_gzip",
+            ),
+            pytest.param(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+                make_image("PNG"),
+                0.0,
+                id="short_body",
+            ),
+            pytest.param(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n",
+                make_image("PNG")[:10],
+                2.0,
+                id="stalled_body",
+            ),
+            pytest.param(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                b"zz\r\nabc\r\n",
+                0.0,
+                id="malformed_chunked",
+            ),
+        ],
+    )
+    def test_fetch__transport_error_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, head: bytes, body: bytes, linger: float
+    ) -> None:
+        monkeypatch.setattr(net, "READ_TIMEOUT", 0.3)
+        port = _serve_raw(head, body, linger)
+        assert fetcher().fetch(f"http://127.0.0.1:{port}/") is None

@@ -4,6 +4,7 @@ import io
 import time
 
 import requests
+from urllib3.exceptions import HTTPError
 
 from novelhog import images
 from novelhog.images import FetchedImage
@@ -39,7 +40,7 @@ class ImageFetcher:
         """Return the image, or None when it is unavailable, refused, oversized or not allowed."""
         try:
             data = self._download(url)
-        except requests.RequestException, Refused, OSError:
+        except requests.RequestException, HTTPError, Refused, OSError:
             return None
         if data is None:
             return None

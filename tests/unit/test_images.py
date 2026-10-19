@@ -1,6 +1,10 @@
 """Tests for the image helpers."""
 
 import io
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image, ImageCms
@@ -147,6 +151,50 @@ class TestDownscale__Metadata:
     def test_downscale__keeps_lossy_webp_lossy(self) -> None:
         result = images.downscale(make_image("WEBP", (40, 20)), "image/webp", 10)
         assert b"VP8 " in result[:32]
+
+
+class TestDownscale__LosslessWebpLayouts:
+    @pytest.mark.parametrize("extra", ["icc", "exif"])
+    def test_downscale__extended_lossless_webp_stays_lossless(self, extra: str) -> None:
+        options: dict[str, Any] = {}
+        if extra == "icc":
+            options["icc_profile"] = ImageCms.ImageCmsProfile(
+                ImageCms.createProfile("sRGB")
+            ).tobytes()
+        else:
+            exif = Image.Exif()
+            exif[0x010F] = "Camera"
+            options["exif"] = exif
+        data = make_image("WEBP", (40, 20), lossless=True, **options)
+        assert images._webp_chunks(data)[0] == "VP8X"  # extended layout
+        result = images.downscale(data, "image/webp", 10)
+        assert "VP8L" in images._webp_chunks(result)
+        assert "VP8 " not in images._webp_chunks(result)
+
+
+class TestDownscale__CorruptExif:
+    def test_downscale__corrupt_exif_emits_no_warning(self, tmp_path: Path) -> None:
+        # pytest resets the warning filters per test, so run a fresh interpreter instead.
+        exif = Image.Exif()
+        exif[0x0112] = 6
+        exif[0x010F] = "CameraCameraCamera"
+        out = io.BytesIO()
+        Image.new("RGB", (40, 20)).save(out, "JPEG", exif=exif)
+        data = bytearray(out.getvalue())
+        data[data.index(b"Exif\0\0") + 11] = 0xFF
+        sample = tmp_path / "corrupt_exif.jpg"
+        sample.write_bytes(bytes(data))
+        script = (
+            "import sys; from novelhog import images; "
+            "images.downscale(open(sys.argv[1], 'rb').read(), 'image/jpeg', 10)"
+        )
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-I", "-c", script, str(sample)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode, result.stderr) == (0, "")
 
 
 class TestConfigurePixelLimit__Idempotent:

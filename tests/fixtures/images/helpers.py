@@ -44,6 +44,8 @@ class Server:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # keep-alive, like real servers
+
             def do_GET(self) -> None:
                 outer.hits.append((self.path, self.headers.get("Host")))
                 status, headers, body = outer.routes.get(self.path, (404, {}, b""))

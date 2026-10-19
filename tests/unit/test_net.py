@@ -43,6 +43,7 @@ class TestIsPublic__Addresses:
             "::a00:1",
             "::ffff:0:7f00:1",
             "::ffff:0:a00:1",
+            "::ffff:0:808:808",
             "fec0::1",
             "fe80::1%eth0",
             "not-an-ip",
@@ -137,19 +138,18 @@ class TestGuardedSession__Redirects:
         finally:
             server.stop()
 
-    def test_get__relative_location_is_followed_and_rechecked(
+    def test_get__same_host_relative_redirect_reuses_the_checked_connection(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Keep-alive: the second hop goes over the connection that was already checked.
         server = Server()
         server.start()
         try:
             server.routes["/r"] = (302, {"Location": "/in"}, b"")
-            server.routes["/in"] = (200, {}, b"secret")
-            real = net.is_public
-            monkeypatch.setattr(net, "is_public", lambda a: True if not server.hits else real(a))
-            session = net.GuardedSession(allow_private=False, resolver=fixed("127.0.0.1"))
-            with pytest.raises(net.Refused):  # same host, but every hop is checked again
-                session.get(server.url("/r", host="outer.test"))
+            server.routes["/in"] = (200, {}, b"ok")
+            session = net.GuardedSession(allow_private=True, resolver=fixed("127.0.0.1"))
+            assert session.get(server.url("/r", host="outer.test")).content == b"ok"
+            assert [p for p, _ in server.hits] == ["/r", "/in"]
         finally:
             server.stop()
 

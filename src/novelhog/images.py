@@ -13,6 +13,8 @@ _FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image
 
 # Images between 1x and 2x Pillow's limit only warn; check_pixels rejects them explicitly.
 warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+# Corrupt EXIF only produces a UserWarning from Pillow's TIFF reader; keep it out of the logs.
+warnings.filterwarnings("ignore", category=UserWarning, module=r"PIL\.TiffImagePlugin")
 
 
 def configure_pixel_limit(max_pixels: int) -> None:
@@ -60,8 +62,19 @@ def _is_animated(image: Image.Image) -> bool:
     return bool(getattr(image, "is_animated", False))
 
 
+def _webp_chunks(data: bytes) -> list[str]:
+    """Four-character codes of the top-level chunks in a RIFF/WebP file."""
+    codes: list[str] = []
+    pos = 12
+    while pos + 8 <= len(data):
+        codes.append(data[pos : pos + 4].decode("latin-1"))
+        size = int.from_bytes(data[pos + 4 : pos + 8], "little")
+        pos += 8 + size + (size & 1)
+    return codes
+
+
 def _is_lossless_webp(data: bytes) -> bool:
-    return b"VP8L" in data[:32]
+    return "VP8L" in _webp_chunks(data)
 
 
 def downscale(data: bytes, mime: str, max_dimension: int) -> bytes:
@@ -98,7 +111,10 @@ def downscale(data: bytes, mime: str, max_dimension: int) -> bytes:
 
 
 def convert_for(data: bytes, mime: str, accepted: frozenset[str]) -> tuple[bytes, str]:
-    """Convert to an accepted type for export (first frame; png with alpha, else jpeg)."""
+    """Convert to an accepted type for export, using the first frame.
+
+    GIF and anything with alpha become PNG; everything else becomes JPEG (quality 90).
+    """
     if mime in accepted:
         return data, mime
     with Image.open(io.BytesIO(data)) as image:
