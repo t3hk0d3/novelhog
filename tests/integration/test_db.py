@@ -95,12 +95,36 @@ class TestCreateEngine__WithASqliteUrl:
 
 
 class TestCreateEngine__WithAPostgresUrl:
-    @pytest.mark.parametrize("url", ["postgresql://u:p@localhost/d", "postgresql+psycopg://u@h/d"])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "postgresql://u:p@localhost/d",
+            "postgres://u:p@localhost/d",
+            "postgresql+psycopg://u@h/d",
+            "postgresql+psycopg2://u@h/d",
+        ],
+    )
     def test_create_engine__uses_the_psycopg_driver(self, url: str) -> None:
         engine = db.create_engine(url)
+        try:
+            assert engine.dialect.driver == "psycopg"
+        finally:
+            engine.dispose()
 
-        assert engine.dialect.driver == "psycopg"
-        assert engine.pool._pre_ping is True  # noqa: SLF001
+    def test_create_engine__discards_a_connection_closed_by_the_server(self, repo: Repo) -> None:
+        if repo.engine.dialect.name != "postgresql":
+            pytest.skip("pre-ping is a Postgres pool setting")
+        with db.read(repo.engine) as connection:
+            pid = connection.execute(text("SELECT pg_backend_pid()")).scalar()
+        other = db.create_engine(repo.engine.url.render_as_string(hide_password=False))
+        try:
+            with db.write(other) as connection:
+                connection.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        finally:
+            other.dispose()
+
+        with db.read(repo.engine) as connection:
+            assert connection.execute(text("SELECT 1")).scalar() == 1
 
 
 class TestWrite__OnSuccess:
@@ -149,6 +173,7 @@ class TestWrite__WithAnotherWriterHoldingTheLock:
 
         started = time.monotonic()
         with db.write(engine) as connection:
+            connection.execute(select(hosts.c.host)).all()  # read first, then write
             connection.execute(
                 hosts.insert().values(host="a.com", supported=True, updated_at=INSTANT)
             )
@@ -158,6 +183,10 @@ class TestWrite__WithAnotherWriterHoldingTheLock:
         assert waited >= 0.5
         with db.read(engine) as connection:
             assert connection.execute(select(hosts.c.host)).scalars().all() == ["a.com"]
+        engine.dispose()
+        repo.engine.dispose()
+        engine.dispose()
+        repo.engine.dispose()
 
     def test_write__raises_busy_when_the_lock_outlasts_the_busy_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -173,3 +202,4 @@ class TestWrite__WithAnotherWriterHoldingTheLock:
                 pass
         finally:
             thread.join()
+            engine.dispose()

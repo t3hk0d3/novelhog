@@ -61,7 +61,7 @@ def create_engine(url: str) -> Engine:
         engine = _create_engine(parsed)
         _configure_sqlite(engine)
         return engine
-    if parsed.drivername in ("postgresql", "postgres"):
+    if parsed.get_backend_name() in ("postgresql", "postgres"):
         parsed = parsed.set(drivername="postgresql+psycopg")
     return _create_engine(parsed, pool_pre_ping=True)
 
@@ -132,6 +132,7 @@ def migrate(engine: Engine, *, script_location: Path = MIGRATIONS_DIR) -> str:
     """Apply every pending migration (`upgrade head`) and return the head revision."""
     config = alembic_config(script_location)
     with engine.connect() as connection:
+        connection.execution_options(**{_WRITE_OPTION: True})  # SQLite: BEGIN IMMEDIATE
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
     return ScriptDirectory.from_config(config).get_current_head() or ""
@@ -145,8 +146,8 @@ def revisions(engine: Engine, *, script_location: Path = MIGRATIONS_DIR) -> Revi
     return Revisions(current=current, head=head or "")
 
 
-def require_current(engine: Engine) -> None:
+def require_current(engine: Engine, *, script_location: Path = MIGRATIONS_DIR) -> None:
     """Raise `SchemaOutdated` unless the database is at this build's head revision."""
-    state = revisions(engine)
+    state = revisions(engine, script_location=script_location)
     if not state.is_current:
         raise SchemaOutdated(state.current, state.head)

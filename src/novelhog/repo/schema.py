@@ -83,7 +83,7 @@ chapters = Table(
     Column("removed_at", UTCDateTime),
     Column("title", Text),
     Column("state", Text, nullable=False, server_default="not_requested"),
-    Column("priority", Integer, nullable=False, server_default=text("0")),
+    Column("priority", Boolean, nullable=False, server_default=false()),
     Column("has_images", Boolean, nullable=False, server_default=false()),
     Column("released_at", UTCDateTime),
     Column("queued_at", UTCDateTime),
@@ -96,7 +96,6 @@ chapters = Table(
         "state IN ('not_requested', 'pending', 'downloading', 'downloaded', 'error')",
         name="ck_chapters_state",
     ),
-    CheckConstraint("priority IN (0, 1)", name="ck_chapters_priority"),
     CheckConstraint('("position" IS NULL) = (removed_at IS NOT NULL)', name="ck_chapters_removed"),
     CheckConstraint(
         "(state IN ('pending', 'downloading')) = (queued_at IS NOT NULL)",

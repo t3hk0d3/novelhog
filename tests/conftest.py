@@ -3,6 +3,7 @@
 import os
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -56,12 +57,12 @@ def migrated_database(database_url: str) -> str:
     return database_url
 
 
-@pytest.fixture
-def empty_database_url(database_url: str, tmp_path: Path) -> Iterator[str]:
-    """A fresh, unmigrated database on the same kind of server as `database_url`."""
+@contextmanager
+def _scratch_database(database_url: str, directory: Path, label: str) -> Iterator[str]:
+    """Create a fresh, unmigrated database next to `database_url` and drop it afterwards."""
     parsed = make_url(database_url)
     if parsed.get_backend_name() == "sqlite":
-        yield f"sqlite:///{tmp_path / 'empty.db'}"
+        yield f"sqlite:///{directory / (label + '.db')}"
         return
     name = f"novelhog_test_{uuid.uuid4().hex[:12]}"
     admin = sa_create_engine(
@@ -75,6 +76,20 @@ def empty_database_url(database_url: str, tmp_path: Path) -> Iterator[str]:
         with admin.connect() as connection:
             connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+@pytest.fixture
+def empty_database_url(database_url: str, tmp_path: Path) -> Iterator[str]:
+    """A fresh, unmigrated database on the same kind of server as `database_url`."""
+    with _scratch_database(database_url, tmp_path, "empty") as url:
+        yield url
+
+
+@pytest.fixture
+def reference_database_url(database_url: str, tmp_path: Path) -> Iterator[str]:
+    """A second fresh, unmigrated database, for comparisons against `empty_database_url`."""
+    with _scratch_database(database_url, tmp_path, "reference") as url:
+        yield url
 
 
 @pytest.fixture

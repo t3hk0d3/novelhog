@@ -292,7 +292,7 @@ CREATE TABLE exports (
                      CHECK (state IN ('waiting', 'building', 'ready', 'failed')),
     error            TEXT,                       -- build failure message, 'failed' only
     storage_key      TEXT UNIQUE,                -- set when ready
-    size_bytes       INTEGER CHECK (size_bytes >= 0), -- set when ready
+    size_bytes       BIGINT  CHECK (size_bytes >= 0), -- set when ready
     waited           INTEGER NOT NULL DEFAULT 0 CHECK (waited IN (0, 1)), -- range was incomplete at request time
     claimed_by       TEXT,                       -- worker id while building
     claimed_until    TEXT,
@@ -376,7 +376,7 @@ CREATE TABLE storage_trash (                     -- static files to delete (work
 | timestamp arithmetic | none in SQL: values such as `claimed_until = now + ttl` are computed in Python and bound as parameters |
 | `TEXT … CHECK (json_valid(…))` | `JSON().with_variant(JSONB, "postgresql")` |
 | `INTEGER … CHECK (x IN (0, 1))` | `Boolean` |
-| `events.seq`, `event_clock.seq`, `consumers.last_seq` | `BigInteger().with_variant(Integer, "sqlite")`; `events.seq` is **not** autoincrement (assigned from `event_clock`) |
+| `events.seq`, `event_clock.seq`, `consumers.last_seq`, `exports.size_bytes` | `BigInteger().with_variant(Integer, "sqlite")`; `events.seq` is **not** autoincrement (assigned from `event_clock`) |
 | partial indexes (`WHERE …`) | `Index(…, sqlite_where=…, postgresql_where=…)` |
 | `"end"`, `"position"` and other reserved words | `position` is quoted automatically by SQLAlchemy; no other reserved words |
 

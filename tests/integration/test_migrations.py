@@ -1,13 +1,16 @@
 """Migrations: initial schema, idempotence, working directory, SQLite batch rebuilds."""
 
+import re
 import shutil
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Engine, insert, inspect, select, text
+from sqlalchemy import Engine, event, insert, inspect, select, text
 
 from novelhog.repo import SchemaOutdated, db
 from novelhog.repo.schema import chapters, event_clock, metadata, novels
@@ -15,9 +18,11 @@ from tests.integration.helpers import chapter_row, insert_host, novel_row
 
 
 @pytest.fixture
-def empty_engine(empty_database_url: str) -> Engine:
+def empty_engine(empty_database_url: str) -> Iterator[Engine]:
     """An engine on an empty, unmigrated database."""
-    return db.create_engine(empty_database_url)
+    engine = db.create_engine(empty_database_url)
+    yield engine
+    engine.dispose()
 
 
 def _tables(engine: Engine) -> set[str]:
@@ -170,3 +175,75 @@ class TestRequireCurrent:
 
         with pytest.raises(SchemaOutdated, match="at 9999, this build needs 0001"):
             db.require_current(empty_engine)
+
+    def test_revisions__reports_an_older_database_against_a_newer_build(
+        self, empty_engine: Engine, tmp_path: Path
+    ) -> None:
+        db.migrate(empty_engine)
+
+        state = db.revisions(empty_engine, script_location=_script_location(tmp_path))
+
+        assert (state.current, state.head, state.is_current) == ("0001", "0002", False)
+
+    def test_require_current__raises_on_an_older_database(
+        self, empty_engine: Engine, tmp_path: Path
+    ) -> None:
+        db.migrate(empty_engine)
+
+        with pytest.raises(SchemaOutdated, match="at 0001, this build needs 0002"):
+            db.require_current(empty_engine, script_location=_script_location(tmp_path))
+
+
+class TestMigrate__OnSqlite:
+    def test_migrate__starts_its_transaction_with_begin_immediate(
+        self, empty_engine: Engine
+    ) -> None:
+        if empty_engine.dialect.name != "sqlite":
+            pytest.skip("SQLite transaction mode")
+        statements: list[str] = []
+
+        @event.listens_for(empty_engine, "before_cursor_execute")
+        def record(_c: Any, _cur: Any, statement: str, *_rest: Any) -> None:
+            statements.append(statement)
+
+        db.migrate(empty_engine)
+
+        assert "BEGIN IMMEDIATE" in statements
+        assert "BEGIN" not in statements
+
+
+def _definitions(engine: Engine) -> dict[str, str]:
+    """Constraint and index definitions as the database itself reports them."""
+    with db.read(engine) as connection:
+        if engine.dialect.name == "sqlite":
+            rows = connection.execute(
+                text("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE '%alembic%'")
+            ).all()
+        else:
+            rows = connection.execute(
+                text(
+                    "SELECT conrelid::regclass::text || '.' || conname, pg_get_constraintdef(oid) "
+                    "FROM pg_constraint WHERE connamespace = 'public'::regnamespace "
+                    "AND conrelid::regclass::text <> 'alembic_version' "
+                    "UNION ALL SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                )
+            ).all()
+    return {name: re.sub(r"\s+", " ", sql or "") for name, sql in rows}
+
+
+class TestMigrate__AgainstCreateAll:
+    def test_migrate__matches_create_all_checks_and_index_definitions(
+        self, empty_engine: Engine, reference_database_url: str
+    ) -> None:
+        db.migrate(empty_engine)
+        reference = db.create_engine(reference_database_url)
+        metadata.create_all(reference)
+
+        try:
+            migrated = _definitions(empty_engine)
+            assert migrated == _definitions(reference)
+            assert any("WHERE" in sql for sql in migrated.values())
+            assert any("CHECK" in sql.upper() for sql in migrated.values())
+        finally:
+            reference.dispose()

@@ -189,3 +189,17 @@ class TestSchemaConstraints:
 
         with db.read(repo.engine) as connection:
             assert connection.execute(select(settings.c.value)).scalar() == value
+
+
+class TestChapterPriority:
+    def test_schema__priority_is_a_boolean_that_round_trips(self, repo: Repo) -> None:
+        with db.write(repo.engine) as connection:
+            insert_novel_with_chapter(connection)
+            connection.execute(
+                insert(chapters).values(**chapter_row(id="CH000000000002", url="u2", priority=True))
+            )
+
+        with db.read(repo.engine) as connection:
+            rows = connection.execute(select(chapters.c.priority).order_by(chapters.c.id)).all()
+        assert [row[0] for row in rows] == [False, True]
+        assert all(isinstance(row[0], bool) for row in rows)

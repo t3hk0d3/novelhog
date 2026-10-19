@@ -84,7 +84,7 @@ def upgrade() -> None:
         sa.Column("removed_at", UTCDateTime),
         sa.Column("title", sa.Text),
         sa.Column("state", sa.Text, nullable=False, server_default="not_requested"),
-        sa.Column("priority", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("priority", sa.Boolean, nullable=False, server_default=sa.false()),
         sa.Column("has_images", sa.Boolean, nullable=False, server_default=sa.false()),
         sa.Column("released_at", UTCDateTime),
         sa.Column("queued_at", UTCDateTime),
@@ -97,7 +97,6 @@ def upgrade() -> None:
             "state IN ('not_requested', 'pending', 'downloading', 'downloaded', 'error')",
             name="ck_chapters_state",
         ),
-        sa.CheckConstraint("priority IN (0, 1)", name="ck_chapters_priority"),
         sa.CheckConstraint(
             '("position" IS NULL) = (removed_at IS NOT NULL)', name="ck_chapters_removed"
         ),
