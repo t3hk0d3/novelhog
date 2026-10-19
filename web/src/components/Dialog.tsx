@@ -60,7 +60,9 @@ export function Dialog({ title, onClose, children, sheet = false }: DialogProps)
       }}
       onKeyDown={wrapTab}
       className={`w-full bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50 ${
-        sheet ? 'mx-0 mb-0 mt-auto max-w-none rounded-t-2xl' : 'm-auto max-w-lg rounded-2xl'
+        sheet
+          ? 'mx-0 mb-0 mt-auto max-w-none rounded-t-2xl transition-transform duration-200 starting:translate-y-full motion-reduce:transition-none'
+          : 'm-auto max-w-lg rounded-2xl'
       }`}
     >
       <div className="flex items-center justify-between">

@@ -59,3 +59,36 @@ export function CheckIcon() {
     </Svg>
   );
 }
+
+export function ChevronLeftIcon() {
+  return (
+    <Svg name="chevron-left">
+      <path d="M15 5l-7 7 7 7" />
+    </Svg>
+  );
+}
+
+export function ChevronRightIcon() {
+  return (
+    <Svg name="chevron-right">
+      <path d="M9 5l7 7-7 7" />
+    </Svg>
+  );
+}
+
+export function CopyIcon() {
+  return (
+    <Svg name="copy">
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V6a2 2 0 0 1 2-2h8" />
+    </Svg>
+  );
+}
+
+export function ExternalLinkIcon() {
+  return (
+    <Svg name="external-link">
+      <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+    </Svg>
+  );
+}

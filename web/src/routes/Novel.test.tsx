@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import type { Chapter, Novel } from '../api/client';
@@ -22,7 +22,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function mount(novel: Novel, chapters: Chapter[]) {
+function Search() {
+  return <p data-testid="search">{useLocation().search}</p>;
+}
+
+function mount(novel: Novel, chapters: Chapter[], search = '') {
   const fetchMock = vi.fn((input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     if (input.includes('/chapters')) {
@@ -34,7 +38,8 @@ function mount(novel: Novel, chapters: Chapter[]) {
   });
   vi.stubGlobal('fetch', fetchMock);
   render(
-    <MemoryRouter initialEntries={[`/novels/${novel.id}`]}>
+    <MemoryRouter initialEntries={[`/novels/${novel.id}${search}`]}>
+      <Search />
       <App queryClient={testClient()} />
     </MemoryRouter>,
   );
@@ -272,6 +277,74 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
         await screen.findByText('Queued 1 · skipped 0');
         expect(screen.getByRole('button', { name: 'Select' })).toHaveFocus();
       });
+    });
+  });
+
+  describe('chapter details', () => {
+    const search = () => screen.getByTestId('search').textContent;
+
+    it('clicking a row opens details for it and puts ?chapter=<id> in the URL', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('link', { name: /^Page 2,/ }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('heading', { name: 'Chapter 2 of 3' })).toBeInTheDocument();
+      expect(search()).toBe('?chapter=CH000000000002');
+    });
+
+    it('opens details from a ?chapter=<id> deep link once the chapters load', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3), '?chapter=CH000000000003');
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('heading', { name: 'Chapter 3 of 3' })).toBeInTheDocument();
+    });
+
+    it('drops the parameter for an unknown chapter and opens nothing', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3), '?chapter=CH999999999999');
+      await screen.findByText('Page 3');
+      await waitFor(() => {
+        expect(search()).toBe('');
+      });
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('closing removes the parameter and returns focus to the row', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      const row = await screen.findByRole('link', { name: /^Page 2,/ });
+      row.focus();
+      await userEvent.click(row);
+      await userEvent.click(await screen.findByRole('button', { name: 'Close' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(search()).toBe('');
+      expect(row).toHaveFocus();
+    });
+
+    it('Next steps to the following row and updates the parameter', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('link', { name: /^Page 2,/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Next chapter' }));
+      expect(screen.getByRole('heading', { name: 'Chapter 3 of 3' })).toBeInTheDocument();
+      expect(search()).toBe('?chapter=CH000000000003');
+    });
+
+    it('shows a live update of the open chapter', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('link', { name: /^Page 2,/ }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByRole('button', { name: 'Download again' })).toBeInTheDocument();
+      act(() => {
+        FakeEventSource.instances[0]?.emit('chapter', {
+          ...makeChapter(2, { state: 'pending' }),
+          novel_id: 'NV000000000001',
+        });
+      });
+      expect(await within(dialog).findByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    });
+
+    it('does not open in select mode: a click toggles the row', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+      await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(search()).toBe('');
     });
   });
 });

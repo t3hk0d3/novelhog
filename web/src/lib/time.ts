@@ -28,3 +28,13 @@ export function dateOnly(date: Date | string): string {
   const dd = String(d.getDate()).padStart(2, '0');
   return `${String(d.getFullYear())}-${mm}-${dd}`;
 }
+
+/** "today, 09:12" for today, else "2026-10-16 09:12" (local time). */
+export function dateTime(date: Date | string, now: Date = new Date()): string {
+  const d = toDate(date);
+  if (Number.isNaN(d.getTime())) return '—';
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const day = dateOnly(d) === dateOnly(now) ? 'today,' : dateOnly(d);
+  return `${day} ${hh}:${mm}`;
+}
