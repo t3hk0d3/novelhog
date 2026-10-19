@@ -50,26 +50,40 @@ chapter ranges to EPUB for phones and e-readers.
 
 ## 2. Architecture
 
-```
- Browser (React PWA + service worker)
-      │  REST /api/v1  +  SSE /api/v1/events        static: STATIC_BASE_URL (/static)
-      ▼
- HTTPS reverse proxy (user's)
-      ▼
- novelhog-web container
- ┌──────────────────────────────────────────────┐
- │ Caddy :8080                                   │
- │   /            → SPA files (/srv/web)         │
- │   /sw.js, /manifest.webmanifest               │
- │   /static/*    → /data/static (read only)     │
- │   /api/*       → api (uvicorn :8000)          │
- │ api (FastAPI, stateless) ── novelhog.repo ────┼──►  SQLite  /data/app.db  (WAL)
- └──────────────────────────────────────────────┘          ▲
-                                                           │ novelhog.repo: syncs, downloads,
-                                                           │ export builds, outbox, changes
- /data/static ◄── covers, exports ── worker ───────────────┘
-                                      │ web_novel_scraper        notification channels
-                                      ├──► FlareSolverr ──► sites  ──► Web Push (v1), Telegram (later)
+```mermaid
+flowchart TB
+    browser["Browser<br/>React PWA + service worker"]
+    proxy["User's HTTPS reverse proxy"]
+
+    subgraph web["novelhog-web container"]
+        caddy["Caddy :8080<br/>/ → SPA · /sw.js · /static/*"]
+        api["API (FastAPI, stateless)<br/>/api/v1 · SSE"]
+    end
+
+    subgraph data["/data volume"]
+        db[("SQLite app.db (WAL)")]
+        static[["static/<br/>covers, exports"]]
+        work[["work/<br/>scraper files"]]
+    end
+
+    subgraph wk["novelhog-worker container"]
+        worker["Worker<br/>syncs · downloads · export builds<br/>notification delivery · pruning"]
+    end
+
+    flaresolverr["FlareSolverr"]
+    sites["Novel sites"]
+    channels["Notification channels<br/>Web Push (v1) · Telegram (later)"]
+
+    browser --> proxy --> caddy
+    caddy -- "/api/*" --> api
+    caddy -. "reads" .-> static
+    api -- "novelhog.repo" --> db
+    worker -- "novelhog.repo" --> db
+    worker --> static
+    worker --> work
+    worker --> flaresolverr --> sites
+    worker --> channels
+    channels -. "push" .-> browser
 ```
 
 Responsibilities are split by concern, not by load:
@@ -443,6 +457,22 @@ response: {updated: int[], skipped: [{number: int, state: <current state>}]}
 Chapters in any other state are listed in `skipped`. Requesting `downloading`,
 `downloaded` or `error` → `422`. Each updated chapter appends a `chapter` change.
 
+Chapter states (solid: API, via `PATCH` or `POST /exports`; dashed labels:
+worker):
+
+```mermaid
+stateDiagram-v2
+    [*] --> not_requested: TOC sync (initial import, unfollowed)
+    [*] --> pending: TOC sync (followed, later release)
+    not_requested --> pending: queue
+    error --> pending: retry / queue
+    pending --> not_requested: dequeue
+    pending --> downloading: worker claims batch
+    downloading --> downloaded: worker stores Markdown
+    downloading --> error: worker fetch/convert fails
+    downloading --> pending: worker recovery / shutdown requeue
+```
+
 ### 5.5 Exports
 
 | Route | Request | Response | Errors |
@@ -469,6 +499,22 @@ Chapters in any other state are listed in `skipped`. Requesting `downloading`,
   types, builder)`; `Export.format` is derived from the stored `mime` through
   that registry, so adding PDF or FB2 later needs no schema change.
 - Every state change of an export appends an `export` change (SSE).
+
+```mermaid
+stateDiagram-v2
+    [*] --> waiting: POST /exports (queues missing chapters)
+    waiting --> [*]: DELETE (cancel)
+    waiting --> building: worker - whole range downloaded
+    building --> ready: build stored (notify if it waited)
+    building --> failed: build error
+    building --> waiting: claim expired (recovery)
+    ready --> [*]
+    failed --> [*]: "Try again" creates a new export
+    note right of waiting
+        blocked = chapters in error or not queued;
+        stays waiting until they are downloaded
+    end note
+```
 
 ### 5.6 Settings and push
 
@@ -656,6 +702,32 @@ Events that should reach a person are written to the `notifications` outbox in
 the same transaction as the event itself (§6.2, §6.5). Delivery is a separate
 step, so a crash between the two loses nothing and a channel outage never rolls
 back novel work.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker (sync / export build)
+    participant DB as SQLite (novelhog.repo)
+    participant D as Dispatcher (worker)
+    participant C as Channel (WebPush, later Telegram)
+    participant T as Target (browser, chat)
+
+    W->>DB: one transaction: chapters / export + changes + notification row
+    loop every worker pass
+        D->>DB: claim pending notifications
+        D->>D: messages.render(notification)
+        loop each notification target
+            D->>C: send(target, message)
+            C->>T: deliver
+            alt endpoint gone (404/410)
+                C-->>D: Gone
+                D->>DB: delete target
+            else other failure
+                C-->>D: Failed (logged)
+            end
+        end
+        D->>DB: mark sent, release claim
+    end
+```
 
 ```
 dispatch_notifications():
