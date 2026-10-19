@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { api, type Novel as NovelData } from '../api/client';
 import { isDeletedNovel, type DeletedNovel } from '../api/events';
+import { ChapterTable } from '../components/ChapterTable';
 import { ChapterFilters } from '../components/ChapterFilters';
 import { NovelHeader } from '../components/NovelHeader';
 import { OverviewBar } from '../components/OverviewBar';
@@ -13,21 +14,14 @@ import { useLiveReady } from '../hooks/useLiveEvents';
 import { errorMessage } from '../lib/errors';
 import type { Chapter } from '../api/client';
 
-function ChapterList({ chapters }: { chapters: Chapter[] }) {
-  return (
-    <ul>
-      {chapters.map((chapter) => (
-        <li key={chapter.id} className="flex gap-3 border-b border-line py-1.5 text-sm">
-          <span className="w-12 font-semibold text-ink-muted">{chapter.position}</span>
-          <span>{chapter.title ?? `Chapter ${String(chapter.position)}`}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** Chapters of the chosen range, or every match under range headings. Task 35 swaps in the table. */
-function Results({ view }: { view: ChapterView }) {
+/** Chapters of the chosen range, or every match under range headings. */
+function Results({
+  view,
+  onOpenDetails,
+}: {
+  view: ChapterView;
+  onOpenDetails: (chapter: Chapter) => void;
+}) {
   return (
     <section aria-label="Chapters">
       {view.filterActive ? (
@@ -37,12 +31,20 @@ function Results({ view }: { view: ChapterView }) {
           view.groups.map((group) => (
             <div key={group.range.index}>
               <h2 className="mt-3 font-semibold">{`${String(group.range.from)}–${String(group.range.to)}`}</h2>
-              <ChapterList chapters={group.chapters} />
+              <ChapterTable
+                chapters={group.chapters}
+                isNew={view.isNew}
+                onOpenDetails={onOpenDetails}
+              />
             </div>
           ))
         )
       ) : (
-        <ChapterList chapters={view.rangeChapters} />
+        <ChapterTable
+          chapters={view.rangeChapters}
+          isNew={view.isNew}
+          onOpenDetails={onOpenDetails}
+        />
       )}
     </section>
   );
@@ -60,6 +62,8 @@ function NovelPage({ novel }: { novel: NovelData }) {
   const [newBeforeVisit] = useState(novel.new_pages);
   const view = useChapterView(chapters.data, newBeforeVisit);
   const seenSent = useRef(false);
+  // The chapter whose details are open; Task 37's dialog reads it (null = closed).
+  const [, setDetailsChapter] = useState<Chapter | null>(null);
 
   useEffect(() => {
     if (seenSent.current) return;
@@ -109,7 +113,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
             hidden={view.filterActive}
             onSelectRange={view.setRange}
           />
-          <Results view={view} />
+          <Results view={view} onOpenDetails={setDetailsChapter} />
         </>
       )}
     </div>
