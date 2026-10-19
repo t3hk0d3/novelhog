@@ -132,4 +132,25 @@ describe('NovelCard', () => {
       });
     });
   });
+
+  it('is an article named by its title', () => {
+    renderWithProviders(<NovelCard novel={makeNovel()} />);
+    expect(screen.getByRole('article', { name: 'The Ninth Cartographer' })).toBeInTheDocument();
+  });
+
+  it('describes its follow toggle and Retry with the title so each is unique per novel', () => {
+    renderWithProviders(<NovelCard novel={makeNovel({ import_error: 'x' })} />);
+    expect(screen.getByRole('button', { name: 'Following' })).toHaveAccessibleDescription(
+      'The Ninth Cartographer',
+    );
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAccessibleDescription(
+      'The Ninth Cartographer',
+    );
+  });
+
+  it('shows the badge in gold-ink and the import error in the danger colour', () => {
+    renderWithProviders(<NovelCard novel={makeNovel({ new_pages: 1, import_error: 'x' })} />);
+    expect(screen.getByText('1 new')).toHaveClass('text-gold-ink');
+    expect(screen.getByText('Import failed: x').parentElement).toHaveClass('text-danger');
+  });
 });

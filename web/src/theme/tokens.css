@@ -19,6 +19,8 @@
   --accent: light-dark(#1f5fae, #7fb0f0);
   --accent-ink: light-dark(#ffffff, #0f141a);
   --gold: light-dark(#b7791f, #e7b04a);
+  --gold-ink: light-dark(#6b4505, #e7b04a);
+  --danger: light-dark(#b42323, #ff8a85);
 
   --status-not-requested-tab: light-dark(#e8ebef, #232c37);
   --status-not-requested-icon: light-dark(#6b7685, #98a4b3);
@@ -41,4 +43,6 @@
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
   --color-gold: var(--gold);
+  --color-gold-ink: var(--gold-ink);
+  --color-danger: var(--danger);
 }

@@ -16,7 +16,7 @@ export function Library({ onAddNovel }: { onAddNovel: () => void }) {
     <section>
       <h1 className="mb-4 text-2xl font-bold">Library</h1>
       {novels.isError && (
-        <p role="alert" className="text-[var(--status-error-tab)]">
+        <p role="alert" className="text-danger">
           {errorMessage(novels.error)}
         </p>
       )}

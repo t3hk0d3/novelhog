@@ -25,9 +25,10 @@ async function submit(url = 'https://royalroad.com/fiction/1') {
 }
 
 describe('AddNovelDialog', () => {
-  it('is a modal dialog titled "Add novel"', () => {
+  it('is a native modal dialog titled "Add novel" with the URL field focused', () => {
     renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
-    expect(screen.getByRole('dialog', { name: 'Add novel' })).toHaveAttribute('aria-modal', 'true');
+    expect(screen.getByRole('dialog', { name: 'Add novel' }).tagName).toBe('DIALOG');
+    expect(screen.getByLabelText('Table of contents URL')).toHaveFocus();
   });
 
   it('has the follow toggle on by default', () => {
@@ -75,6 +76,29 @@ describe('AddNovelDialog', () => {
     const items = screen.getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toEqual(['royalroad.com', 'fanmtl.com']);
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('on 422 unsupported_host lists hosts given as {host} objects', async () => {
+    stubFetch(
+      422,
+      errorBody('unsupported_host', 'Host not supported', {
+        hosts: [{ host: 'royalroad.com' }, { host: 'fanmtl.com' }],
+      }),
+    );
+    renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
+    await submit('https://nope.example/x');
+    await screen.findByText('Host not supported');
+    expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'royalroad.com',
+      'fanmtl.com',
+    ]);
+  });
+
+  it('shows errors in the danger colour', async () => {
+    stubFetch(422, errorBody('invalid_url', 'That is not a URL'));
+    renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
+    await submit('nonsense');
+    expect((await screen.findByRole('alert')).parentElement).toHaveClass('text-danger');
   });
 
   it('on 409 novel_exists links to the existing novel', async () => {

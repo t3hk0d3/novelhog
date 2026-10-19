@@ -10,7 +10,8 @@ describe('FollowToggle', () => {
     expect(button).toHaveAttribute('aria-pressed', 'true');
     const star = container.querySelector('svg');
     expect(star).toHaveAttribute('fill', 'currentColor');
-    expect(button.className).toContain('text-gold');
+    expect(button.className).toContain('text-gold-ink');
+    expect(star).toHaveClass('text-gold');
   });
 
   it('when not followed shows a grey outline star and "Follow"', () => {
@@ -33,5 +34,15 @@ describe('FollowToggle', () => {
     render(<FollowToggle followed={false} disabled onChange={onChange} />);
     await userEvent.click(screen.getByRole('button'));
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('is described by the element it points at', () => {
+    render(
+      <>
+        <p id="who">Some Novel</p>
+        <FollowToggle followed describedBy="who" onChange={vi.fn()} />
+      </>,
+    );
+    expect(screen.getByRole('button')).toHaveAccessibleDescription('Some Novel');
   });
 });

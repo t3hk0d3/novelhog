@@ -3,18 +3,26 @@ interface FollowToggleProps {
   /** Called with the new value when the user toggles. */
   onChange: (followed: boolean) => void;
   disabled?: boolean;
+  /** Id of an element that names what is followed, so each toggle is unique on a page. */
+  describedBy?: string;
 }
 
 /** Pill button with a star (spec section 10): gold and filled when following, grey outline if not. */
-export function FollowToggle({ followed, onChange, disabled = false }: FollowToggleProps) {
+export function FollowToggle({
+  followed,
+  onChange,
+  disabled = false,
+  describedBy,
+}: FollowToggleProps) {
   const tone = followed
-    ? 'border-gold/50 bg-gold/15 text-gold'
+    ? 'border-gold/50 bg-gold/15 text-gold-ink'
     : 'border-line bg-surface text-ink-muted';
   return (
     <button
       type="button"
       aria-pressed={followed}
       disabled={disabled}
+      aria-describedby={describedBy}
       onClick={() => {
         onChange(!followed);
       }}
@@ -29,6 +37,7 @@ export function FollowToggle({ followed, onChange, disabled = false }: FollowTog
         strokeWidth="2"
         strokeLinejoin="round"
         aria-hidden="true"
+        className={followed ? 'text-gold' : undefined}
       >
         <path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z" />
       </svg>

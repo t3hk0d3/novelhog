@@ -1,5 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { useId, useState, type SubmitEvent } from 'react';
+import { Dialog } from './Dialog';
 import { Link } from 'react-router';
 import { api, ApiError } from '../api/client';
 import { errorMessage } from '../lib/errors';
@@ -50,7 +51,6 @@ function ErrorNotice({ error, onClose }: { error: unknown; onClose: () => void }
 
 /** One-step dialog: table-of-contents URL, follow toggle, Add (spec section 10, screen 2). */
 export function AddNovelDialog({ onClose }: { onClose: () => void }) {
-  const titleId = useId();
   const inputId = useId();
   const [url, setUrl] = useState('');
   const [followed, setFollowed] = useState(true);
@@ -65,67 +65,49 @@ export function AddNovelDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') onClose();
-        }}
-        className="w-full max-w-lg rounded-2xl bg-surface p-6 text-ink shadow-xl"
-      >
-        <div className="flex items-center justify-between">
-          <h2 id={titleId} className="text-xl font-bold">
-            Add novel
-          </h2>
-          <button type="button" aria-label="Close" onClick={onClose} className="px-2 text-xl">
-            ×
+    <Dialog title="Add novel" onClose={onClose}>
+      <form noValidate onSubmit={submit} className="mt-4 flex flex-col gap-4">
+        <div className="flex flex-col gap-1">
+          <label htmlFor={inputId} className="text-sm font-semibold">
+            Table of contents URL
+          </label>
+          <input
+            id={inputId}
+            type="url"
+            data-autofocus
+            value={url}
+            onChange={(event) => {
+              setUrl(event.target.value);
+            }}
+            className="rounded-lg border border-line bg-page px-3 py-2 font-mono text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-3 text-sm text-ink-muted">
+          <FollowToggle followed={followed} onChange={setFollowed} />
+          <span>New chapters download automatically and you get a notification.</span>
+        </div>
+        {create.isError && (
+          <div className="text-sm text-danger">
+            <ErrorNotice error={create.error} onClose={onClose} />
+          </div>
+        )}
+        <div className="flex justify-end gap-2 border-t border-line pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 font-semibold">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={url.trim() === '' || create.isPending}
+            className="rounded-lg bg-accent px-4 py-2 font-semibold text-accent-ink disabled:opacity-60"
+          >
+            Add
           </button>
         </div>
-        <form noValidate onSubmit={submit} className="mt-4 flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <label htmlFor={inputId} className="text-sm font-semibold">
-              Table of contents URL
-            </label>
-            <input
-              id={inputId}
-              type="url"
-              autoFocus
-              value={url}
-              onChange={(event) => {
-                setUrl(event.target.value);
-              }}
-              className="rounded-lg border border-line bg-page px-3 py-2 font-mono text-sm"
-            />
-          </div>
-          <div className="flex items-center gap-3 text-sm text-ink-muted">
-            <FollowToggle followed={followed} onChange={setFollowed} />
-            <span>New chapters download automatically and you get a notification.</span>
-          </div>
-          {create.isError && (
-            <div className="text-sm text-[var(--status-error-tab)]">
-              <ErrorNotice error={create.error} onClose={onClose} />
-            </div>
-          )}
-          <div className="flex justify-end gap-2 border-t border-line pt-4">
-            <button type="button" onClick={onClose} className="px-4 py-2 font-semibold">
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={url.trim() === '' || create.isPending}
-              className="rounded-lg bg-accent px-4 py-2 font-semibold text-accent-ink disabled:opacity-60"
-            >
-              Add
-            </button>
-          </div>
-          <p className="text-xs text-ink-muted">
-            Title, cover and chapters are imported in the background. The novel shows up in your
-            library right away, and you can rename it later.
-          </p>
-        </form>
-      </div>
-    </div>
+        <p className="text-xs text-ink-muted">
+          Title, cover and chapters are imported in the background. The novel shows up in your
+          library right away, and you can rename it later.
+        </p>
+      </form>
+    </Dialog>
   );
 }

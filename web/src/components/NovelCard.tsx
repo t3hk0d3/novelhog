@@ -1,4 +1,5 @@
 import { useMutation } from '@tanstack/react-query';
+import { useId } from 'react';
 import { Link } from 'react-router';
 import { api, type Novel } from '../api/client';
 import { errorMessage } from '../lib/errors';
@@ -64,6 +65,7 @@ function activity(novel: Novel): string | null {
 /** A library card: cover, title, host, progress, follow toggle (spec section 10, screen 1). */
 export function NovelCard({ novel }: { novel: Novel }) {
   const toast = useToast();
+  const titleId = useId();
   const follow = useMutation({
     mutationFn: (followed: boolean) => api.patchNovel(novel.id, { followed }),
     onError: (error) => {
@@ -86,18 +88,21 @@ export function NovelCard({ novel }: { novel: Novel }) {
   const busy = activity(novel);
 
   return (
-    <article className="relative flex flex-col gap-3 rounded-xl border border-line bg-surface p-4">
+    <article
+      aria-labelledby={titleId}
+      className="relative flex flex-col gap-3 rounded-xl border border-line bg-surface p-4"
+    >
       <div className="flex gap-3">
         <Cover novel={novel} name={name} />
         <div className="min-w-0">
-          <h2 className="font-semibold text-ink">
+          <h2 id={titleId} className="font-semibold text-ink">
             <Link to={`/novels/${novel.id}`} className="after:absolute after:inset-0">
               {name}
             </Link>
           </h2>
           <p className="font-mono text-xs text-ink-muted">{novel.host}</p>
           {novel.new_pages > 0 && (
-            <span className="mt-1 inline-block rounded-full bg-gold/15 px-2 py-0.5 text-xs font-semibold text-gold">
+            <span className="mt-1 inline-block rounded-full bg-gold/15 px-2 py-0.5 text-xs font-semibold text-gold-ink">
               {String(novel.new_pages)} new
             </span>
           )}
@@ -109,11 +114,12 @@ export function NovelCard({ novel }: { novel: Novel }) {
         {busy && <span>{busy}</span>}
       </div>
       {novel.import_error !== null && (
-        <div className="flex items-center justify-between gap-2 text-sm text-[var(--status-error-tab)]">
+        <div className="flex items-center justify-between gap-2 text-sm text-danger">
           <span>Import failed: {novel.import_error}</span>
           <button
             type="button"
             disabled={retry.isPending}
+            aria-describedby={titleId}
             onClick={() => {
               retry.mutate();
             }}
@@ -127,6 +133,7 @@ export function NovelCard({ novel }: { novel: Novel }) {
         <span className="relative">
           <FollowToggle
             followed={novel.followed}
+            describedBy={titleId}
             disabled={follow.isPending}
             onChange={(followed) => {
               follow.mutate(followed);
