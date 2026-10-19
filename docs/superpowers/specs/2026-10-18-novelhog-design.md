@@ -63,7 +63,6 @@ flowchart TB
     subgraph data["/data volume"]
         db[("Database<br/>SQLite app.db (default) or Postgres")]
         static[["static/<br/>covers, exports"]]
-        work[["work/<br/>scraper files"]]
     end
 
     subgraph wk["novelhog-worker container"]
@@ -80,7 +79,6 @@ flowchart TB
     api -- "novelhog.repo" --> db
     worker -- "novelhog.repo" --> db
     worker --> static
-    worker --> work
     worker --> flaresolverr --> sites
     worker --> channels
     channels -. "push" .-> browser
@@ -93,7 +91,7 @@ Responsibilities are split by concern, not by load:
 | `novelhog-web` (container) | Everything that faces people, and nothing about novel sites. Runs two processes: **Caddy** (the only exposed port) and the **API**. |
 | Caddy (in `novelhog-web`) | Serves the built SPA at `/` (with SPA fallback to `index.html`), `sw.js` and `manifest.webmanifest` at the root, and local static files from `/data/static` at `/static`; reverse-proxies `/api/*` to the API on `127.0.0.1:8000` with response buffering off (SSE). Owns cache and download headers (§8.3). |
 | API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push subscription registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
-| `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the event log it writes. |
+| `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr; uses the scraper as a stateless library (no scraper files, no shared filesystem needed between workers). Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the event log it writes. |
 | SPA | React app + service worker, built to static files baked into the image at `/srv/web` and served by Caddy (single origin, no CORS). |
 | `novelhog.repo` | The database interface: a standalone package built on SQLAlchemy Core (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
 | Database (SQLite by default, Postgres supported) | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, subscriptions, the event log and its consumers. Accessed only through `novelhog.repo`. |
@@ -381,8 +379,10 @@ Notes:
   (`{"public_key", "private_key"}`). The API creates it on startup when it is
   missing, with an insert that is a no-op if another instance won the race, and
   never regenerates it. The worker reads it to deliver Web Push.
-- The scraper identifies a novel by its novel ID, which is also the name of its
-  working folder under `/data/work`; `title` is display only.
+- The database is the only persistence for novels and chapters. The scraper is
+  used as a stateless library: novelhog never creates scraper `Novel` objects,
+  never writes `main.json` or other scraper files, and workers need no shared
+  filesystem for scraping. `title` is display only.
 - `ON DELETE CASCADE` is declared now so that deleting a novel later needs only a
   route.
 
@@ -726,7 +726,7 @@ loop:
 refresh(novel):
     initial = novel.last_refreshed_at is null
     try:
-        toc = scraper_adapter.sync_toc(novel.id, novel.toc_url)  # {title, cover_url, chapters: [(number, url)]}
+        toc = scraper_adapter.sync_toc(novel.host, novel.toc_url)  # {title, cover_url, chapters: [(number, url)]}
     except:
         log
         if initial: import_error = '<ExceptionType>: <summary>'
@@ -757,11 +757,12 @@ refresh(novel):
 
 ### 6.3 Novel claims and host slots
 
-- **Novel claim: syncs only.** A TOC sync is the only operation that uses the
-  scraper's per-novel working files, so a worker claims the novel
-  (`claimed_by`, `claim_expires_at = now + CLAIM_TTL`) for the sync and
-  releases it afterwards. Chapter downloads never claim the novel; a sync and
-  downloads of the same novel can run at the same time.
+- **Novel claim: syncs only.** A worker claims the novel (`claimed_by`,
+  `claim_expires_at = now + CLAIM_TTL`) for a TOC sync and releases it
+  afterwards, so two workers never sync the same novel at once (which would
+  insert the same new chapters twice and notify twice). Chapter downloads never
+  claim the novel; a sync and downloads of the same novel can run at the same
+  time.
 - **Host slots: download politeness.** `publish_hosts()` keeps exactly
   `HOST_CONCURRENCY` rows per host in `host_slots` (adding missing slots,
   deleting free surplus ones). To download, a worker claims a free slot of the
@@ -773,7 +774,7 @@ refresh(novel):
 - The slot and the batch's chapter claims share one expiry and are renewed
   together after each chapter; the slot is released after the batch. Expired
   slots are freed and their chapters return to `pending` (§4 recovery).
-- The API never touches scraper working files and never claims anything.
+- The API never uses the scraper and never claims anything.
 
 ### 6.4 Per-chapter pipeline
 
@@ -892,7 +893,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
 | `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `claims.py` (compare-and-set claim, renew, release, recover), Alembic migrations, work claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
-| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use; the only call that uses scraper working files), `fetch_chapter(host, url)` (stateless), `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
+| `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(host, toc_url) -> {title, cover_url, chapters: [(number, url)]}` and `fetch_chapter(host, url)`, both stateless: pages are requested through FlareSolverr with the scraper's request helper and decoded with the host's decoder rules (title, index, next page, content) plus `overrides`; no scraper `Novel` object, no files written. `find_cover_url(toc_html, toc_url)`. Builds scraper request/decoder config from `NOVELHOG_*` (FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Plain HTTP image download reusing FlareSolverr cookies and user agent; validation (§8.2) |
@@ -1017,7 +1018,7 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NOVELHOG_DATA_DIR` | `/data` | Holds `work/`, `static/` (and `app.db` with the default database URL) |
+| `NOVELHOG_DATA_DIR` | `/data` | Holds `static/` (and `app.db` with the default database URL) |
 | `NOVELHOG_DATABASE_URL` | `sqlite:////data/app.db` | SQLAlchemy URL; `postgresql+psycopg://…` for Postgres |
 | `NOVELHOG_PUBLIC_URL` | — (required for push) | External HTTPS URL, used in push links and the VAPID claim |
 | `NOVELHOG_VAPID_SUBJECT` | — (required for push) | `mailto:` contact for the VAPID claim |
