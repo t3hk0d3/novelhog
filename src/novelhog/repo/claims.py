@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Column, ColumnElement, Connection, Row, Table, and_, exists, or_, select
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import UnaryExpression
 
 from novelhog.repo.schema import chapters, consumers, exports, novels
@@ -41,12 +42,19 @@ def _sort_column(expression: ColumnElement[Any]) -> tuple[Column[Any], bool]:
     """Return the plain column inside a priority expression and whether it sorts descending."""
     descending = False
     if isinstance(expression, UnaryExpression) and expression.modifier is not None:
-        descending = expression.modifier.__name__ == "desc_op"
+        descending = expression.modifier is operators.desc_op
         expression = expression.element
     if not isinstance(expression, Column):
         message = "claim priority must be columns, optionally wrapped in asc() or desc()"
         raise TypeError(message)
     return expression, descending
+
+
+def _reject_claim_columns(extra_set: Mapping[str, object]) -> None:
+    reserved = sorted({"claimed_by", "claimed_until"} & extra_set.keys())
+    if reserved:
+        message = f"extra_set must not set {', '.join(reserved)}"
+        raise ValueError(message)
 
 
 def claim(
@@ -70,15 +78,16 @@ def claim(
     A statement that claims fewer than `n` rows while eligible rows remain (a lost race) is
     retried up to `retries` times.
     """
+    _reject_claim_columns(extra_set)
     key = _key(table)
-    sort_keys = [_sort_column(expression) for expression in priority]
+    sort_keys = [_sort_column(expression) for expression in priority] + [(key, False)]
     columns = list(returning) + [c for c, _ in sort_keys if c not in returning]
     until = now + ttl
     free = available(table, now)
     claimed: list[Row[Any]] = []
     for _ in range(retries + 1):
         wanted = n - len(claimed)
-        candidates = select(key).where(and_(eligible, free)).order_by(*priority).limit(wanted)
+        candidates = select(key).where(and_(eligible, free)).order_by(*priority, key).limit(wanted)
         statement = (
             table.update()
             .where(key.in_(candidates), free)
@@ -125,6 +134,7 @@ def release(
     extra_set: Mapping[str, object] = {},  # noqa: B006  (read-only default)
 ) -> int:
     """Clear the claim on the rows in `keys` that `owner` still holds; apply `extra_set` to them."""
+    _reject_claim_columns(extra_set)
     if not keys:
         return 0
     statement = (

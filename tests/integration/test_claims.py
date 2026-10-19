@@ -183,6 +183,8 @@ class TestClaim__WithMoreThanOneRow:
 
 
 class TestClaim__WithConcurrentThreads:
+    """SQLite serialises writers (BEGIN IMMEDIATE), so these races only have teeth on Postgres."""
+
     @staticmethod
     def _race(engine: Engine, threads: int, batch: int) -> list[list[int]]:
         barrier = threading.Barrier(threads)
@@ -226,6 +228,44 @@ class TestClaim__WithConcurrentThreads:
         results = self._race(engine, threads=4, batch=3)
 
         assert sorted(id_ for ids in results for id_ in ids) == list(range(1, 13))
+
+
+class TestClaim__WhenAConcurrentClaimCommitsFirst:
+    def test_claim__a_blocked_claim_on_the_same_row_gets_nothing(self, engine: Engine) -> None:
+        if engine.dialect.name != "postgresql":
+            pytest.skip("SQLite serialises writers; the blocked claim only happens on Postgres")
+        _add_jobs(engine, _job(1))
+        outcome: list[list[int]] = []
+        failures: list[BaseException] = []
+
+        def second_claim() -> None:
+            try:
+                outcome.append(_ids(_claim(engine, "b")))
+            except BaseException as error:  # noqa: BLE001  (re-raised in the main thread)
+                failures.append(error)
+
+        with db.write(engine) as connection:
+            first = claim(
+                connection,
+                jobs,
+                eligible=jobs.c.kind == "work",
+                priority=[jobs.c.rank],
+                owner="a",
+                now=NOW,
+                ttl=TTL,
+                returning=[jobs.c.id],
+            )
+            thread = threading.Thread(target=second_claim)
+            thread.start()
+            thread.join(timeout=1)
+            assert thread.is_alive(), "the second claim should block on the first one's row lock"
+        thread.join(timeout=30)
+
+        if failures:
+            raise failures[0]
+        assert _ids(first) == [1]
+        assert outcome == [[]]
+        assert _state(engine, 1).claimed_by == "a"
 
 
 class _LosingFirstUpdate:
@@ -366,6 +406,23 @@ class TestClaim__OnChapters:
         assert owners["CH000000000003"] == "w1"
 
 
+class TestClaim__Validation:
+    def test_claim__rejects_extra_values_that_set_the_claim_columns(self, engine: Engine) -> None:
+        for column in ("claimed_by", "claimed_until"):
+            with pytest.raises(ValueError, match=column):
+                _claim(engine, "w1", extra_set={column: None})
+
+    def test_claim__orders_rows_tied_on_every_priority_by_key(self, engine: Engine) -> None:
+        _add_jobs(engine, _job(3, rank=1), _job(1, rank=1), _job(2, rank=1))
+
+        assert _ids(_claim(engine, "w1", n=3)) == [1, 2, 3]
+
+    def test_claim__orders_tied_rows_by_key_after_descending_priority(self, engine: Engine) -> None:
+        _add_jobs(engine, _job(1, rank=2), _job(2, rank=2), _job(3, rank=1))
+
+        assert _ids(_claim(engine, "w1", n=3, priority=[jobs.c.rank.desc()])) == [1, 2, 3]
+
+
 class TestRenew:
     def test_renew__pushes_expiry_forward_only_on_rows_owned_by_owner(self, engine: Engine) -> None:
         _add_jobs(engine, _job(1), _job(2), _job(3))
@@ -424,6 +481,13 @@ class TestRelease:
 
         assert count == 0
         assert _state(engine, 1).claimed_by == "w1"
+
+
+class TestRelease__Validation:
+    def test_release__rejects_extra_values_that_set_the_claim_columns(self, engine: Engine) -> None:
+        for column in ("claimed_by", "claimed_until"):
+            with db.write(engine) as connection, pytest.raises(ValueError, match=column):
+                release(connection, jobs, [1], owner="w1", now=NOW, extra_set={column: "x"})
 
 
 class TestFencedUpdate:
