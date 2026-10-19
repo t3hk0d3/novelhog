@@ -1167,6 +1167,7 @@ dependencies = [
     { name = "requests" },
     { name = "sqlalchemy" },
     { name = "structlog" },
+    { name = "urllib3" },
     { name = "uvicorn" },
     { name = "web-novel-scraper" },
 ]
@@ -1174,6 +1175,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "asgi-lifespan" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "import-linter" },
     { name = "mypy" },
@@ -1196,6 +1198,7 @@ requires-dist = [
     { name = "requests" },
     { name = "sqlalchemy", specifier = ">=2,<3" },
     { name = "structlog" },
+    { name = "urllib3", specifier = ">=2.6,<3" },
     { name = "uvicorn" },
     { name = "web-novel-scraper", specifier = "==2.13.1" },
 ]
@@ -1203,6 +1206,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "asgi-lifespan" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "import-linter" },
     { name = "mypy" },

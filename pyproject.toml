@@ -17,6 +17,7 @@ dependencies = [
     "py-vapid",
     "structlog",
     "requests",
+    "urllib3>=2.6,<3",
 ]
 
 [project.scripts]
@@ -32,6 +33,7 @@ dev = [
     "import-linter",
     "asgi-lifespan",
     "types-requests",
+    "cryptography",
 ]
 
 [build-system]

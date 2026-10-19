@@ -112,3 +112,13 @@ def repo(migrated_database: str, clock: FakeClock) -> Iterator[Repo]:
         connection.execute(insert(event_clock).values(id=1, seq=0))
     yield repository
     repository.engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _restore_pillow_limit() -> Iterator[None]:
+    """ImageFetcher sets Pillow's global pixel limit; undo it after every test."""
+    from PIL import Image
+
+    saved = Image.MAX_IMAGE_PIXELS
+    yield
+    Image.MAX_IMAGE_PIXELS = saved
