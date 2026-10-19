@@ -93,10 +93,10 @@ Responsibilities are split by concern, not by load:
 | `novelhog-web` (container) | Everything that faces people, and nothing about novel sites. Runs two processes: **Caddy** (the only exposed port) and the **API**. |
 | Caddy (in `novelhog-web`) | Serves the built SPA at `/` (with SPA fallback to `index.html`), `sw.js` and `manifest.webmanifest` at the root, and local static files from `/data/static` at `/static`; reverse-proxies `/api/*` to the API on `127.0.0.1:8000` with response buffering off (SSE). Owns cache and download headers (§8.3). |
 | API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push target registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
-| `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the change log it writes. |
+| `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the event log it writes. |
 | SPA | React app + service worker, built to static files baked into the image at `/srv/web` and served by Caddy (single origin, no CORS). |
 | `novelhog.repo` | The database interface: a standalone package (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
-| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, notification targets and outbox, change log. Accessed only through `novelhog.repo`. |
+| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, notification targets, the event log and its consumers. Accessed only through `novelhog.repo`. |
 | Static storage | Covers and export files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
 
 ### Deployment
@@ -115,8 +115,8 @@ Responsibilities are split by concern, not by load:
   `pywebpush` are used only by the worker. One image still serves both for
   simplicity; the import-linter contract (§13) keeps the boundary.
 - Both `NOVELHOG_PUBLIC_URL` and `NOVELHOG_VAPID_SUBJECT` are set on both
-  services: the API reports `push_enabled`, the worker builds links and VAPID
-  claims.
+  services: the API reports whether the `webpush` channel is enabled, the worker
+  builds links and VAPID claims.
 - The user's reverse proxy must terminate HTTPS (required for service workers and
   push) and must not buffer `/api/v1/events`. The README includes Caddy and
   nginx snippets. Cache headers come from the built-in Caddy.
@@ -127,8 +127,8 @@ Responsibilities are split by concern, not by load:
 
 - Format: two-letter uppercase type prefix + 12 random characters from
   `[a-z0-9]`, generated with `secrets`.
-  - `NV` novel, `CH` chapter, `EX` export, `NT` notification target,
-    `NF` notification. Example: `CHk3x9q2m7b4wz`.
+  - `NV` novel, `CH` chapter, `EX` export, `NT` notification target.
+    Example: `CHk3x9q2m7b4wz`.
 - 36¹² ≈ 4.7·10¹⁸ (~62 bits). Primary keys are unique; an insert that collides is
   retried with a fresh ID.
 - IDs carry no ordering. Every listing orders by an explicit column
@@ -251,24 +251,8 @@ CREATE TABLE notification_targets (              -- where notifications are deli
     UNIQUE (channel, address_key)
 ) STRICT;
 
-CREATE TABLE notifications (                     -- outbox, written with the event
-    id         TEXT PRIMARY KEY
-               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NF'
-                      AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
-    kind       TEXT NOT NULL CHECK (kind IN ('release', 'export_ready')),
-    novel_id   TEXT NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
-    payload    TEXT NOT NULL CHECK (json_valid(payload)), -- kind-specific facts
-    created_at TEXT NOT NULL,
-    claimed_by TEXT,
-    claimed_at TEXT,
-    sent_at    TEXT,
-    CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
-) STRICT;
-
-CREATE INDEX notifications_pending ON notifications (created_at) WHERE sent_at IS NULL;
-
-CREATE TABLE changes (
-    seq       INTEGER PRIMARY KEY AUTOINCREMENT, -- SSE event id
+CREATE TABLE events (                            -- the event log; every reader keeps a cursor
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT, -- position in the log; SSE event id
     novel_id  TEXT NOT NULL,                     -- for ?novel_id filtering
     entity_id TEXT NOT NULL                      -- NV…/CH…/EX…; prefix = event type
               CHECK (substr(entity_id, 1, 2) IN ('NV', 'CH', 'EX')),
@@ -276,22 +260,38 @@ CREATE TABLE changes (
     at        TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX changes_by_novel  ON changes (novel_id, seq);
-CREATE INDEX changes_by_entity ON changes (entity_id, seq);
-CREATE INDEX changes_by_time   ON changes (at);
+CREATE INDEX events_by_novel  ON events (novel_id, seq);
+CREATE INDEX events_by_entity ON events (entity_id, seq);
+CREATE INDEX events_by_time   ON events (at);
+
+CREATE TABLE consumers (                         -- durable readers of the event log
+    name       TEXT PRIMARY KEY,                 -- 'notifier' (v1); 'telegram', … later
+    last_seq   INTEGER NOT NULL DEFAULT 0,       -- last event fully processed
+    claimed_by TEXT,                             -- process currently reading
+    claimed_at TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
+) STRICT;
 ```
 
 Notes:
 
-- Every state-changing write appends to `changes` in the same transaction.
-- Pruning: the worker, which writes `changes`, deletes rows older than 24 h on
-  its idle passes, **except the newest row of each `entity_id`**, so every novel,
-  chapter and export always keeps its latest event. It also deletes sent
-  `notifications` older than 7 days.
+- **Event rows are state snapshots.** Every state-changing write appends one row
+  per changed entity to `events` in the same transaction; its payload is the
+  entity as it is after the change (the API object, built by typed models in
+  `domain`), plus optional facts about what just happened (e.g. a novel's
+  `released`, §6.2). Readers: the SSE stream (stateless, per connection, from
+  `Last-Event-ID`) and durable consumers with a row in `consumers`.
+- Pruning: the worker, which writes `events`, deletes rows older than 24 h on its
+  idle passes, **except the newest row of each `entity_id`** (so every novel,
+  chapter and export keeps its latest state) **and except rows after the
+  slowest consumer's `last_seq`**. A consumer more than 7 days behind is moved
+  forward to the 7-day boundary with a warning, so a dead consumer cannot grow
+  the log forever.
 - Error messages are not stored on `chapters`. A chapter that fails gets
-  `state = 'error'` and a `CH` change whose payload carries `"error": "<message>"`.
-  `Chapter.error` in the API is read from the chapter's newest change when its
-  state is `error`, and is `null` otherwise. Re-queuing writes a new change, so
+  `state = 'error'` and a `CH` event whose payload carries `"error": "<message>"`.
+  `Chapter.error` in the API is read from the chapter's newest event when its
+  state is `error`, and is `null` otherwise. Re-queuing writes a new event, so
   the old message stops being current without any clearing.
 - The VAPID key pair lives in `settings` under `vapid`
   (`{"public_key", "private_key"}`). The API creates it on startup when it is
@@ -333,8 +333,9 @@ PATCH  /api/v1/novels/{novel_id}/chapters
 GET    /api/v1/novels/{novel_id}/exports
 POST   /api/v1/novels/{novel_id}/exports
 DELETE /api/v1/novels/{novel_id}/exports/{export_id}
-POST   /api/v1/push/subscriptions
-DELETE /api/v1/push/subscriptions/{subscription_id}
+POST   /api/v1/webpush/subscriptions
+GET    /api/v1/notification-targets
+DELETE /api/v1/notification-targets/{target_id}
 GET    /api/v1/events
 ```
 
@@ -377,8 +378,8 @@ number       int
 url          string
 title        string | null
 state        "not_requested" | "pending" | "downloading" | "downloaded" | "error"
-error        string | null    from the newest change, only in "error" state
-error_at     string | null    time of that change, only in "error" state
+error        string | null    from the newest event, only in "error" state
+error_at     string | null    time of that event, only in "error" state
 has_images   bool
 released_at  string | null
 queued_at    string | null    only in "pending" state
@@ -399,6 +400,7 @@ state        "waiting" | "building" | "ready" | "failed"
 progress     {downloaded: int, total: int}      chapters of the range downloaded
 blocked      {errors: int[], not_queued: int[]} chapter numbers holding a waiting export back
 error        string | null    only in "failed"
+waited       bool             the range was incomplete when the export was requested
 size_bytes   int | null       set when ready
 url          string | null    set when ready
 created_at   string
@@ -455,7 +457,7 @@ response: {updated: int[], skipped: [{number: int, state: <current state>}]}
 | `pending` | `not_requested` | Clears `queued_at` |
 
 Chapters in any other state are listed in `skipped`. Requesting `downloading`,
-`downloaded` or `error` → `422`. Each updated chapter appends a `chapter` change.
+`downloaded` or `error` → `422`. Each updated chapter appends a `chapter` event.
 
 Chapter states (solid: API, via `PATCH` or `POST /exports`; dashed labels:
 worker):
@@ -484,7 +486,7 @@ stateDiagram-v2
 - One export is one file. Several books are several exports with their own
   ranges; there is no chapters-per-book option.
 - `POST` is asynchronous. In one transaction it moves every chapter of the range
-  that is `not_requested` or `error` to `pending` (same rules and changes as
+  that is `not_requested` or `error` to `pending` (same rules and events as
   `PATCH /chapters`) and creates the export in `waiting`, with `waited = 1` if
   any chapter of the range was not yet `downloaded`.
 - The worker builds it once every chapter of the range is `downloaded` (§6.5).
@@ -498,7 +500,7 @@ stateDiagram-v2
   registry in `exporter` mapping `format → (mime, extension, accepted image
   types, builder)`; `Export.format` is derived from the stored `mime` through
   that registry, so adding PDF or FB2 later needs no schema change.
-- Every state change of an export appends an `export` change (SSE).
+- Every state change of an export appends an `export` event.
 
 ```mermaid
 stateDiagram-v2
@@ -516,32 +518,46 @@ stateDiagram-v2
     end note
 ```
 
-### 5.6 Settings and push
+### 5.6 Settings and notification targets
 
 `GET /api/v1/settings` returns the server settings the UI needs at startup:
 
 ```
-push_enabled           bool
-vapid_key              string | null    VAPID public key (URL-safe base64); null when push is disabled
+notifications: {
+  channels: {
+    webpush: { enabled: bool, vapid_public_key: string | null }   URL-safe base64
+    // later, e.g.: telegram: { enabled: bool, bot_username: string }
+  }
+}
 static_base_url        string
 refresh_min_interval   int              seconds
 refresh_max_interval   int              seconds
 ```
 
-The UI loads it once, hides the notifications toggle when `push_enabled` is
-false, and uses `vapid_key` for `PushManager.subscribe`. `vapid_key` is read
-from the `settings` table.
+The UI loads it once, hides the notifications bell when
+`notifications.channels.webpush.enabled` is false, and uses `vapid_public_key`
+for `PushManager.subscribe`. The key is read from the `settings` table.
+
+**Notification target** (any channel):
+`{id: "NT…", channel: string, label: string | null, created_at: string}`; the
+channel-specific address (push endpoint and keys, chat ID…) is never returned.
 
 | Route | Request | Response | Errors |
 |---|---|---|---|
-| `POST /push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 {id}`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422`, `503 push_disabled` |
-| `DELETE /push/subscriptions/{id}` | — | `204` | `404`, `503 push_disabled` |
+| `POST /webpush/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 NotificationTarget`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422`, `503 channel_disabled` |
+| `GET /notification-targets` | — | `NotificationTarget[]` by `created_at` | — |
+| `DELETE /notification-targets/{id}` | — | `204` | `404` |
 
-The push routes are the Web Push front door to `notification_targets`: a
-subscription is stored as a target with `channel = 'webpush'`,
-`address = {endpoint, keys}`, `address_key = endpoint`, `label = User-Agent`,
-and `{id}` is the target's `NT…` ID. Other channels register their targets
-through their own services (e.g. a Telegram bot), not through these routes.
+- Storage is channel-neutral (`notification_targets`). Only **enrolment** is
+  channel-specific, because each channel proves ownership differently: the
+  browser creates a Web Push subscription itself, while a Telegram chat would be
+  enrolled by its bot service writing through `novelhog.repo`. There is no
+  generic "create target" route.
+- A Web Push subscription is stored with `channel = 'webpush'`,
+  `address = {endpoint, keys}`, `address_key = endpoint`, `label = User-Agent`.
+- "Turn off on this device" deletes the device's own target through the generic
+  route; the UI keeps its target ID in `localStorage` and falls back to looking
+  it up by re-subscribing (same endpoint → same ID).
 
 ### 5.7 Events (SSE)
 
@@ -549,27 +565,29 @@ through their own services (e.g. a Telegram bot), not through these routes.
 
 | Event | Source (`entity_id` prefix) | Data |
 |---|---|---|
-| `novel` | `NV` | `Novel` |
+| `novel` | `NV` | `Novel`, plus `released: int[]` on the event written by a sync |
 | `chapter` | `CH` | `Chapter` plus `novel_id` |
 | `export` | `EX` | `Export` |
 | `resync` | not stored | `{}`: client must refetch over REST |
 
-- The event name is derived from the `entity_id` prefix; `changes` stores no kind.
+- The SSE event name is derived from the `entity_id` prefix; `events` stores no kind.
 - New chapters found by a sync arrive as `chapter` events with `released_at`
   set; the UI updates "new" badges from them. There is no separate release event.
-- `id:` of every event is `changes.seq`.
-- On connect with `Last-Event-ID`, the API replays later changes. Because pruning
+- `id:` of every SSE event is `events.seq`. The browser's `EventSource` keeps
+  the last one and sends it as `Last-Event-ID` on reconnect, so the server keeps
+  no per-client state and SSE has no row in `consumers`.
+- On connect with `Last-Event-ID`, the API replays later events. Because pruning
   keeps the newest row per entity, older history has gaps: if the row with that
   seq no longer exists or is older than 24 h, the API sends one `resync` instead
   of replaying.
-- The API polls `changes` about once per second and pushes new rows.
+- The API polls `events` about once per second and pushes new rows.
 - A comment line is sent every 15 s as keepalive.
 
 ### 5.8 Status codes
 
 `404` unknown or malformed ID; `409 novel_exists`; `422` validation (including
 FastAPI's own errors, reshaped into the error body, and `unsupported_host`);
-`503 push_disabled` (push routes when push is not configured); `500`
+`503 channel_disabled` (enrolment for a channel that is not configured); `500`
 unexpected, generic message, traceback only in logs. The API never calls
 external services, so it has no `502`.
 
@@ -582,7 +600,7 @@ on start: publish_hosts(); recover()                 # hosts table from the deco
 loop:
     if shutting_down: exit
     recover()                                        # expired leases and claims only
-    dispatch_notifications()                         # outbox → channels (§6.6)
+    dispatch_notifications()                         # event log → channels (§6.6)
     if novel = lease_due_refresh():                  # next_refresh_at <= now, free lease,
         refresh(novel); release_lease(novel)         # oldest next_refresh_at first
         continue
@@ -595,11 +613,11 @@ loop:
             if shutting_down: requeue(rest); break
             if state(chapter) != downloading: continue   # dequeued meanwhile
             try: fetch → convert → store → downloaded
-            except: state = error; change payload carries the message
+            except: state = error; event payload carries the message
             renew_lease(novel); sleep(REQUEST_DELAY)
         release_lease(novel)
         continue
-    prune()                                          # changes + sent notifications, at most hourly
+    prune()                                          # event log, at most hourly
     sleep(IDLE_SLEEP)
 ```
 
@@ -609,8 +627,8 @@ loop:
   listed keep working until a sync fails.
 - `recover()` moves `downloading` chapters of novels whose lease expired back to
   `pending` and clears the lease, moves `building` exports whose `claimed_at` is
-  older than `LEASE_TTL` back to `waiting`, and releases notification claims
-  older than `LEASE_TTL`.
+  older than `LEASE_TTL` back to `waiting`, and releases consumer claims older
+  than `LEASE_TTL`.
 - SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch,
   release the lease, exit 0.
 - Errors in the loop itself (e.g. database locked) are logged, then back off 5 s,
@@ -628,7 +646,7 @@ refresh(novel):
     except:
         log
         if initial: import_error = '<ExceptionType>: <summary>'
-        interval = min(interval * 2, MAX); schedule; append novel change; return
+        interval = min(interval * 2, MAX); schedule; append novel event; return
     import_error = null
     if novel.title is null: title = toc.title          # never overwrite a user-set title
     new = upsert chapters by number (existing rows keep state; changed URL updated)
@@ -639,9 +657,9 @@ refresh(novel):
     last_refreshed_at = now
     interval = MIN if new and not initial else min(interval * 2, MAX)
     next_refresh_at = now + interval ± 10% jitter
-    append changes: one per new or changed chapter, one for the novel
-    if new and not initial and novel.followed:
-        insert notification(kind = 'release', novel_id, payload = {numbers})   # same transaction
+    append events: one per new or changed chapter, one for the novel
+    the novel event's payload also carries released = [numbers of new chapters]
+        (empty on the initial import); the notifier reads it (§6.6)
 ```
 
 - The initial import is the first sync after `POST /novels`: it fills in title,
@@ -675,18 +693,16 @@ refresh(novel):
 claim_ready_export():
     one transaction: pick the oldest export in 'waiting' whose chapters
     chapter_from..chapter_to are all 'downloaded'; set state = 'building',
-    claimed_by = me, claimed_at = now; append an export change
+    claimed_by = me, claimed_at = now; append an export event
 
 build(export):
     try:
         data = exporter.build(export.format, novel, chapters of the range, cover)
         storage.put(key, data, mime, download_name = filename)
         state = 'ready', storage_key, size_bytes, ready_at = now
-        if export.waited:                              # same transaction
-            insert notification(kind = 'export_ready', novel_id, payload = {export_id, filename})
     except:
         state = 'failed', error = '<ExceptionType>: <summary>' (traceback logged)
-    clear claimed_by / claimed_at; append an export change
+    clear claimed_by / claimed_at; append an export event
 ```
 
 - Builds read only the database, the cover and static storage; they take no
@@ -698,55 +714,72 @@ build(export):
 
 ### 6.6 Notification delivery
 
-Events that should reach a person are written to the `notifications` outbox in
-the same transaction as the event itself (§6.2, §6.5). Delivery is a separate
-step, so a crash between the two loses nothing and a channel outage never rolls
-back novel work.
+Notifications are derived from the event log; nothing extra is written when the
+event happens. The worker's `notifier` consumer reads `events` after its cursor,
+turns the relevant ones into messages and delivers them through channels. A
+crash before the cursor moves causes at most one batch to be delivered again
+(at-least-once); a channel outage never rolls back novel work.
+
+**Rules** (`notifications.rules`, pure functions `event → NotificationMessage | None`):
+
+| Rule | Matches | Message |
+|---|---|---|
+| `release` | `NV` event whose payload has a non-empty `released` and `followed = true` | "<N> new chapters (<first>–<last>)" |
+| `export_ready` | `EX` event with `state = 'ready'` and `waited = true` | "<filename> is ready" |
+
+`followed` is taken from the event payload, i.e. as it was when the sync ran.
 
 ```mermaid
 sequenceDiagram
     participant W as Worker (sync / export build)
     participant DB as SQLite (novelhog.repo)
-    participant D as Dispatcher (worker)
+    participant N as Notifier consumer (worker)
     participant C as Channel (WebPush, later Telegram)
     participant T as Target (browser, chat)
 
-    W->>DB: one transaction: chapters / export + changes + notification row
+    W->>DB: one transaction: state change + events
     loop every worker pass
-        D->>DB: claim pending notifications
-        D->>D: messages.render(notification)
-        loop each notification target
-            D->>C: send(target, message)
-            C->>T: deliver
-            alt endpoint gone (404/410)
-                C-->>D: Gone
-                D->>DB: delete target
-            else other failure
-                C-->>D: Failed (logged)
+        N->>DB: claim consumer 'notifier', read events after last_seq
+        loop each event
+            N->>N: rules → message or nothing
+            loop each notification target
+                N->>C: send(target, message)
+                C->>T: deliver
+                alt endpoint gone (404/410)
+                    C-->>N: Gone
+                    N->>DB: delete target
+                else other failure
+                    C-->>N: Failed (logged)
+                end
             end
         end
-        D->>DB: mark sent, release claim
+        N->>DB: last_seq = last event read, release claim
     end
 ```
 
 ```
 dispatch_notifications():
-    claim up to 20 notifications with sent_at null and no live claim
-      (one transaction: claimed_by = me, claimed_at = now)
-    for each notification:
-        message = messages.render(notification)          # channel-neutral text
-        for each target in notification_targets:
-            channel = channels[target.channel]           # unknown channel: skip, log
-            result = channel.send(target, message)
-            Gone   → delete the target
-            Failed → log (no retry)
-        sent_at = now, clear the claim
+    claim consumers['notifier'] if unclaimed or its claim is older than LEASE_TTL
+      (one transaction: claimed_by = me, claimed_at = now); otherwise return
+    events = events with seq > last_seq, ordered, at most 100
+    for each event:
+        message = rules.match(event)                     # None for most events
+        if message:
+            for each target in notification_targets:
+                channel = channels[target.channel]       # unknown channel: skip, log
+                result = channel.send(target, message)
+                Gone   → delete the target
+                Failed → log (no retry)
+    last_seq = seq of the last event read; release the claim   (one transaction)
 ```
 
+- Only one process advances a consumer at a time; other workers skip the step.
 - Every target receives every notification in v1 (one person, no per-target
   filters).
 - If push is not configured (no `NOVELHOG_PUBLIC_URL` / `VAPID_SUBJECT`), the
-  `webpush` channel is not registered; notifications are still marked sent.
+  `webpush` channel is not registered; the cursor still advances.
+- Future services (e.g. a Telegram bot) add their own row to `consumers` and
+  read the same log at their own pace.
 
 ## 7. Modules
 
@@ -757,7 +790,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
-| `repo` | The database interface: all SQL, migrations, leases, claiming, change log, outbox, targets, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `repo` | The database interface: all SQL, migrations, leases, claiming, event log, consumers, targets, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
@@ -766,9 +799,9 @@ Package `novelhog`, under `src/novelhog/`.
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
 | `exporter` | Format registry (`format → mime, extension, accepted image types, builder`). EPUB: Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → `ebooklib`; cover; inline images extracted to EPUB items and converted per §8.4 |
 | `images` | Pillow helpers: `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)` |
-| `notifications.messages` | `render(notification) -> NotificationMessage(title, body, url, icon)`: channel-neutral wording per `kind` (§8.6) |
+| `notifications.rules` | `match(event) -> NotificationMessage(title, body, url, icon) \| None`: which events notify and their channel-neutral wording (§6.6, §8.6) |
 | `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(target, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
-| `notifications.dispatcher` | `dispatch()`: claims outbox rows and delivers them through the registry (§6.6) |
+| `notifications.dispatcher` | `dispatch()`: the `notifier` consumer; claims its cursor, reads new events, applies the rules, delivers through the registry, advances the cursor (§6.6) |
 | `vapid` | `ensure_keys(repo)`: creates the VAPID key pair in `settings` if missing (API startup) |
 | `api` | FastAPI app under `/api/v1`: routers, SSE, error handlers. Serves no files. Uses only `repo`, `domain`, `ids`, `vapid`, `storage.url` |
 | `worker` | Loop, host publishing, refresh, downloads, export builds, notification dispatch, pruning, signal handling, recovery |
@@ -868,7 +901,7 @@ The cover goes through the same conversion.
 
 ### 8.6 Notification messages
 
-`messages.render` turns an outbox row into a channel-neutral
+`rules.match` turns a matching event into a channel-neutral
 `NotificationMessage`; each channel decides how to present it.
 
 | Kind | title | body | url |
@@ -900,9 +933,10 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 | `NOVELHOG_WORKER_ID` | `<hostname>:<pid>` | |
 | `NOVELHOG_HTTP_PORT` | `8080` | API listen port |
 
-If push variables are missing, `GET /settings` reports `push_enabled: false` and
-`vapid_key: null`, the subscription routes return `503 push_disabled`, and the UI
-hides the notification toggle; everything else works.
+If push variables are missing, `GET /settings` reports
+`notifications.channels.webpush = {enabled: false, vapid_public_key: null}`,
+`POST /webpush/subscriptions` returns `503 channel_disabled`, and the UI hides the
+notifications bell; everything else works.
 
 ## 10. UI
 
@@ -1004,7 +1038,7 @@ manifest makes the app installable.
      - Heading: "Chapter N of M" and the chapter title; previous/next buttons to
        step through chapters without closing; close (also Escape / swipe down).
      - Error box (only in `error` state): when it failed (relative, from the
-       newest change) and the full error message in monospace with a copy
+       newest event) and the full error message in monospace with a copy
        button.
      - Fields: status (icon + name), source URL (link), added (date only, from
        `released_at`, or "—"), queued (`queued_at`, when pending), last change
@@ -1041,7 +1075,8 @@ manifest makes the app installable.
 - **Follow toggle**: a pill button with a star icon (`aria-pressed`). Following:
   solid gold star, label "Following". Not following: grey outline star, label
   "Follow". Used on library cards, the novel header and the add dialog.
-- **Device notifications** (only when `/settings` reports `push_enabled`):
+- **Device notifications** (only when `/settings` reports
+  `notifications.channels.webpush.enabled`):
   - Header: a small icon-only bell button (`aria-label` "Notifications on this
     device: on/off"); outline when this device is not subscribed, filled when it
     is. Clicking it subscribes or unsubscribes this device.
@@ -1059,8 +1094,9 @@ manifest makes the app installable.
     later block shows it again. The header bell is shown struck through and
     disabled with the tooltip "Blocked in browser settings".
   - Subscribing requests permission, calls `PushManager.subscribe` with
-    `vapid_key`, then `POST /push/subscriptions`; unsubscribing calls
-    `unsubscribe()` and `DELETE`. Over plain HTTP the bell is disabled with a
+    `vapid_public_key`, then `POST /webpush/subscriptions` and keeps the returned
+    target ID; unsubscribing calls `unsubscribe()` and
+    `DELETE /notification-targets/{id}`. Over plain HTTP the bell is disabled with a
     tooltip that HTTPS is required and the banner is not shown; on iOS outside an
     installed PWA the banner explains "Add to Home Screen" instead of Turn on.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
@@ -1168,8 +1204,9 @@ desktop chapters, export dialog, phone normal and select mode).
 - **Telegram notifications.** A `TelegramChannel` registered in the worker's
   channel registry (`address = {chat_id}`), plus a separate `novelhog-telegram`
   bot service that uses `novelhog.repo` to register targets on `/start`, remove
-  them on `/stop`, and answer simple commands (library, new chapters). No change
-  to the outbox or the worker loop.
+  them on `/stop`, and answer simple commands (library, new chapters). It may
+  also read the event log with its own `consumers` row. No change to the event
+  log or the worker loop.
 - **Delete novel** (`DELETE /novels/{id}`); the schema already cascades.
 - In-browser reader, FTS5 search, manual cover upload, offline PWA caching,
   splitting pages into real chapters.
@@ -1192,16 +1229,26 @@ desktop chapters, export dialog, phone normal and select mode).
   batch; refresh scheduling and priority over downloads; initial import vs later
   release (`released_at`, auto-queue for followed only); `new_pages` vs
   `seen_at`; SSE replay from `Last-Event-ID` and `resync`; pruning keeps the
-  newest change per entity; `Chapter.error` comes from the newest change only
+  newest event per entity; `Chapter.error` comes from the newest event only
   while the state is `error` and survives pruning.
-- **Notifications (fake channel):** exactly one `release` outbox row per sync
-  with new chapters of a followed novel, written in the same transaction; none
-  for no new chapters, initial import or unfollowed novels; one `export_ready`
-  row for an export with `waited = 1`, none with `waited = 0`; the dispatcher
-  delivers each row to every target once, marks it sent, skips unknown channels,
-  deletes targets on `Gone`, logs `Failed`; two dispatchers never deliver the
-  same row; stale claims are released; `messages.render` wording per kind;
-  `WebPushChannel` maps `404`/`410` to `Gone`.
+- **Notifications (fake channel):** a sync with new chapters of a followed novel
+  writes exactly one novel event with non-empty `released`; the initial import
+  writes `released = []`; `rules.match` returns a `release` message only for
+  non-empty `released` with `followed = true`, an `export_ready` message only for
+  a ready export with `waited = true`, and nothing for every other event; the
+  dispatcher delivers each matching event to every target once, skips unknown
+  channels, deletes targets on `Gone`, logs `Failed`, and advances `last_seq`
+  only after the batch; only one process holds the `notifier` claim at a time
+  and a stale claim is taken over; a crash before advancing re-delivers at most
+  one batch; `WebPushChannel` maps `404`/`410` to `Gone`.
+- **Event log:** every state-changing write appends its events in the same
+  transaction; pruning keeps the newest event per entity, never deletes events
+  after the slowest consumer's `last_seq`, and moves a consumer more than 7 days
+  behind forward with a warning.
+- **Targets API:** `POST /webpush/subscriptions` creates a `webpush` target and
+  returns the same ID for the same endpoint; `GET /notification-targets` lists
+  all channels without addresses; `DELETE /notification-targets/{id}` removes
+  any channel's target.
 - **VAPID:** `ensure_keys` creates the pair once, is a no-op when it exists, and
   two concurrent callers end with one pair; `/settings` exposes only the public
   key.
@@ -1221,10 +1268,10 @@ desktop chapters, export dialog, phone normal and select mode).
   continues after they are re-queued and downloaded; `DELETE` removes a waiting
   export, leaves its chapters queued and answers `409` once building; expired
   `building` claims return to `waiting`; every state change emits an `export`
-  change.
+  event.
 - **API:** `httpx` against the app with a real temporary database and no
   scraper, network or worker; every route,
-  success and each error code, including `503 push_disabled`.
+  success and each error code, including `503 channel_disabled`.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
   chapter files located without relying on `main.json`; no scripts and no empty
   paragraphs in output.
