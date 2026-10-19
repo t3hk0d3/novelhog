@@ -39,6 +39,10 @@ class TestNormalizeUrl__OnValidUrl:
             "http://[::1]:8080/x/",
             "http://b\u00fccher.example/a",
             "http://192.168.0.1/a/",
+            "http://\uff57\uff57\uff57.example.com/a",
+            "http://www\u3002example\u3002com/a",
+            "http://www.\uff57\uff57\uff57.example.com/a",
+            "http://example.com\u3002/a",
         ],
     )
     def test_normalize_url__is_idempotent(self, url: str) -> None:
@@ -53,6 +57,7 @@ class TestNormalizeUrl__OnInvalidUrl:
             "ftp://example.com/a",
             "example.com/a",
             "https://exa mple.com/a",
+            "http://[fe80::1%25eth0]/a",
             "https://-bad.example/a",
             "https://bad_.example/a",
             "https://a..b/a",
@@ -77,6 +82,10 @@ class TestNormalizeUrl__OnHost:
     def test_normalize_url__strips_trailing_dot(self) -> None:
         assert normalize_url("https://Example.com./a") == "https://example.com/a"
 
+    def test_normalize_url__strips_www_hidden_by_unicode_folding(self) -> None:
+        assert normalize_url("http://\uff57\uff57\uff57.example.com/a") == "http://example.com/a"
+        assert normalize_url("http://www\u3002example\u3002com/a") == "http://example.com/a"
+
     def test_normalize_url__strips_repeated_www(self) -> None:
         assert normalize_url("http://www.www.example.com/a") == "http://example.com/a"
 
@@ -99,6 +108,14 @@ class TestNormalizeTocUrl:
 class TestHostOf:
     def test_host_of__returns_host(self) -> None:
         assert host_of(normalize_url("https://www.Example.com/a/b?x=1")) == "example.com"
+
+
+class TestHostOf__OnPortAndIpv6:
+    def test_host_of__excludes_port(self) -> None:
+        assert host_of(normalize_url("http://example.com:8080/x")) == "example.com"
+
+    def test_host_of__keeps_ipv6_brackets(self) -> None:
+        assert host_of(normalize_url("http://[::1]:8080/x")) == "[::1]"
 
 
 class TestStaticUrl__OnRelativeBase:

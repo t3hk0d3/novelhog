@@ -20,17 +20,19 @@ _MAX_HOST_LENGTH = 253
 def _clean_host(host: str) -> str:
     """Return the canonical host (lower case, punycode, no `www.`, no trailing dot) or raise."""
     if ":" in host:
+        if "%" in host:
+            raise _invalid("The URL host is not valid")  # noqa: TRY003
         try:
             return f"[{ipaddress.IPv6Address(host)}]"
         except ValueError as exc:
             raise _invalid("The URL host is not valid") from exc  # noqa: TRY003
-    host = host.removesuffix(".")
-    while host.startswith("www."):
-        host = host.removeprefix("www.")
     try:
         host = host.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise _invalid("The URL host is not valid") from exc  # noqa: TRY003
+    host = host.removesuffix(".")
+    while host.startswith("www."):
+        host = host.removeprefix("www.")
     if host.replace(".", "").isdigit():
         try:
             return str(ipaddress.IPv4Address(host))
@@ -76,7 +78,8 @@ def normalize_toc_url(url: str) -> str:
 
 def host_of(normalized_url: str) -> str:
     """Return the host of a normalised URL (the key into `hosts`)."""
-    return urlsplit(normalized_url).netloc
+    host = urlsplit(normalized_url).hostname or ""
+    return f"[{host}]" if ":" in host else host
 
 
 def static_url(base: str, key: str) -> str:
