@@ -9,6 +9,12 @@ import { FakeEventSource } from '../test/FakeEventSource';
 import { makeChapter, makeChapters, makeNovel } from '../test/fixtures';
 import { testClient } from '../test/render';
 
+// These tests count and script REST calls; the push state (and its /settings request) is not
+// under test here.
+vi.mock('../hooks/usePush', () => ({
+  usePush: () => ({ status: 'hidden', busy: false, subscribe: vi.fn(), unsubscribe: vi.fn() }),
+}));
+
 beforeEach(() => {
   localStorage.clear();
   FakeEventSource.instances = [];

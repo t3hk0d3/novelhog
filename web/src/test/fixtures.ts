@@ -1,4 +1,4 @@
-import type { Chapter, ChapterState, Novel } from '../api/client';
+import type { Chapter, ChapterState, Novel, Settings } from '../api/client';
 
 /** A fully populated novel; override only what a test cares about. */
 export function makeNovel(overrides: Partial<Novel> = {}): Novel {
@@ -49,4 +49,18 @@ export function makeChapters(count: number, states: Record<number, ChapterState>
   return Array.from({ length: count }, (_, i) =>
     makeChapter(i + 1, { state: states[i + 1] ?? 'downloaded' }),
   );
+}
+
+/** A /settings body; `webpush` overrides the Web Push channel. */
+export function makeSettings(
+  webpush: Partial<Settings['notifications']['channels']['webpush']> = {},
+): Settings {
+  return {
+    notifications: {
+      channels: { webpush: { enabled: true, vapid_public_key: 'BAUD', ...webpush } },
+    },
+    static_base_url: '/static',
+    refresh_min_interval: 900,
+    refresh_max_interval: 86400,
+  };
 }
