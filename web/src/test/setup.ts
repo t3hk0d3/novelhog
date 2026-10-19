@@ -26,3 +26,14 @@ document.addEventListener('keydown', (event) => {
   dialog.dispatchEvent(cancel);
   if (!cancel.defaultPrevented) (dialog as HTMLDialogElement).close();
 });
+
+// jsdom has no matchMedia; default to "no query matches" (phone layout). Tests override it.
+if (typeof window.matchMedia !== 'function') {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }) as unknown as MediaQueryList;
+}

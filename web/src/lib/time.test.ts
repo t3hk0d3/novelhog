@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateOnly, relative } from './time';
+import { dateOnly, dateTime, relative } from './time';
 
 const now = new Date('2026-10-19T12:00:00.000Z');
 const ago = (ms: number) => new Date(now.getTime() - ms);
@@ -38,5 +38,18 @@ describe('dateOnly', () => {
 
   it('gives a dash for an invalid date', () => {
     expect(dateOnly('not a date')).toBe('—');
+  });
+});
+
+describe('dateTime', () => {
+  const now = new Date(2026, 9, 19, 12, 0);
+  it('says "today" with the time for today', () => {
+    expect(dateTime(new Date(2026, 9, 19, 9, 5), now)).toBe('today, 09:05');
+  });
+  it('gives the date and time otherwise', () => {
+    expect(dateTime(new Date(2026, 9, 16, 9, 12), now)).toBe('2026-10-16 09:12');
+  });
+  it('returns a dash for an invalid date', () => {
+    expect(dateTime('nope', now)).toBe('—');
   });
 });

@@ -483,6 +483,35 @@ class TestRelease:
         assert _state(engine, 1).claimed_by == "w1"
 
 
+class TestRelease__WithWhere:
+    def test_release__where_narrows_the_rows_so_an_owned_row_failing_it_keeps_its_claim(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1, kind="work"), _job(2, kind="other"))
+        _claim(engine, "w1", n=2, eligible=jobs.c.id > 0)
+
+        with db.write(engine) as connection:
+            count = release(
+                connection, jobs, [1, 2], owner="w1", now=NOW, where=jobs.c.kind == "work"
+            )
+
+        assert count == 1
+        assert _state(engine, 1).claimed_by is None
+        assert _state(engine, 2).claimed_by == "w1"
+
+    def test_release__where_cannot_widen_the_fence_to_rows_owned_by_others(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1))
+        _claim(engine, "w2")
+
+        with db.write(engine) as connection:
+            count = release(connection, jobs, [1], owner="w1", now=NOW, where=jobs.c.kind == "work")
+
+        assert count == 0
+        assert _state(engine, 1).claimed_by == "w2"
+
+
 class TestRelease__Validation:
     def test_release__rejects_extra_values_that_set_the_claim_columns(self, engine: Engine) -> None:
         for column in ("claimed_by", "claimed_until"):
@@ -500,6 +529,47 @@ class TestFencedUpdate:
 
         assert applied is True
         assert _state(engine, 1).note == "n"
+
+    def test_fenced_update__where_failing_on_an_owned_row_changes_nothing(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1))
+        _claim(engine, "w1")
+
+        with db.write(engine) as connection:
+            applied = fenced_update(
+                connection,
+                jobs,
+                1,
+                owner="w1",
+                now=NOW,
+                values={"note": "n"},
+                where=jobs.c.kind == "other",
+            )
+
+        assert applied is False
+        row = _state(engine, 1)
+        assert (row.note, row.claimed_by) == (None, "w1")
+
+    def test_fenced_update__where_matching_a_row_owned_by_someone_else_changes_nothing(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1))
+        _claim(engine, "w2")
+
+        with db.write(engine) as connection:
+            applied = fenced_update(
+                connection,
+                jobs,
+                1,
+                owner="w1",
+                now=NOW,
+                values={"note": "n"},
+                where=jobs.c.kind == "work",
+            )
+
+        assert applied is False
+        assert _state(engine, 1).note is None
 
     @pytest.mark.parametrize("situation", ["other owner", "unclaimed", "expired", "deleted"])
     def test_fenced_update__changes_nothing_when_the_claim_is_not_mine(

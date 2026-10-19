@@ -30,13 +30,13 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Theme: System' })).toBeInTheDocument();
   });
 
-  it('renders a placeholder per route', () => {
+  it('renders the novel page route', () => {
     render(
       <MemoryRouter initialEntries={['/novels/NV123']}>
         <App />
       </MemoryRouter>,
     );
-    expect(screen.getByRole('main')).toHaveTextContent('NV123');
+    expect(screen.getByRole('main')).toHaveTextContent('Loading…');
   });
 });
 

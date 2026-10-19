@@ -1,4 +1,4 @@
-import type { Novel } from '../api/client';
+import type { Chapter, ChapterState, Novel } from '../api/client';
 
 /** A fully populated novel; override only what a test cares about. */
 export function makeNovel(overrides: Partial<Novel> = {}): Novel {
@@ -24,4 +24,29 @@ export function makeNovel(overrides: Partial<Novel> = {}): Novel {
     updated_at: '2026-10-19T10:00:00.000Z',
     ...overrides,
   };
+}
+
+/** A downloaded chapter at `position`; override only what a test cares about. */
+export function makeChapter(position: number, overrides: Partial<Chapter> = {}): Chapter {
+  return {
+    id: `CH${String(position).padStart(12, '0')}`,
+    position,
+    url: `https://royalroad.com/fiction/1/chapter/${String(position)}`,
+    title: `Page ${String(position)}`,
+    state: 'downloaded',
+    error: null,
+    error_at: null,
+    has_images: false,
+    released_at: '2026-10-01T10:00:00.000Z',
+    queued_at: null,
+    updated_at: '2026-10-01T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** Chapters 1..count; `states` maps a position to its state, everything else is downloaded. */
+export function makeChapters(count: number, states: Record<number, ChapterState> = {}): Chapter[] {
+  return Array.from({ length: count }, (_, i) =>
+    makeChapter(i + 1, { state: states[i + 1] ?? 'downloaded' }),
+  );
 }

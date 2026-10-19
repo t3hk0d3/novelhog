@@ -132,14 +132,19 @@ def release(
     owner: str,
     now: datetime,
     extra_set: Mapping[str, object] = {},  # noqa: B006  (read-only default)
+    where: ColumnElement[bool] | None = None,
 ) -> int:
-    """Clear the claim on the rows in `keys` that `owner` still holds; apply `extra_set` to them."""
+    """Clear the claim on the rows in `keys` that `owner` still holds; apply `extra_set` to them.
+
+    `where` narrows the rows further (for example to one state); other held rows keep their claim.
+    """
     _reject_claim_columns(extra_set)
     if not keys:
         return 0
+    condition = owned(table, owner, now) if where is None else and_(owned(table, owner, now), where)
     statement = (
         table.update()
-        .where(_key(table).in_(keys), owned(table, owner, now))
+        .where(_key(table).in_(keys), condition)
         .values({"claimed_by": None, "claimed_until": None, **extra_set})
     )
     return conn.execute(statement).rowcount
@@ -153,11 +158,14 @@ def fenced_update(
     owner: str,
     now: datetime,
     values: Mapping[str, object],
+    where: ColumnElement[bool] | None = None,
 ) -> bool:
-    """Apply `values` to the row `key` only if `owner` still holds it; report whether it applied."""
-    statement = (
-        table.update().where(_key(table) == key, owned(table, owner, now)).values(dict(values))
-    )
+    """Apply `values` to the row `key` only if `owner` still holds it; report whether it applied.
+
+    `where` adds a further condition (for example the expected state) to the fence.
+    """
+    condition = owned(table, owner, now) if where is None else and_(owned(table, owner, now), where)
+    statement = table.update().where(_key(table) == key, condition).values(dict(values))
     return conn.execute(statement).rowcount == 1
 
 

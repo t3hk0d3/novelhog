@@ -1,18 +1,14 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Route, Routes, useParams } from 'react-router';
+import { Route, Routes } from 'react-router';
 import { AddNovelDialog } from './components/AddNovelDialog';
 import { Header } from './components/Header';
 import { ToastProvider } from './components/Toast';
 import { useLiveEvents } from './hooks/useLiveEvents';
 import { Library } from './routes/Library';
+import { Novel } from './routes/Novel';
 
 const defaultQueryClient = new QueryClient();
-
-function NovelPlaceholder() {
-  const { id } = useParams();
-  return <p className="text-ink-muted">Novel {id} (Task 34)</p>;
-}
 
 /** App shell; main.tsx supplies the router. */
 export function App({ queryClient = defaultQueryClient }: { queryClient?: QueryClient }) {
@@ -38,7 +34,7 @@ export function App({ queryClient = defaultQueryClient }: { queryClient?: QueryC
         <main className="mx-auto max-w-5xl p-4">
           <Routes>
             <Route path="/" element={<Library onAddNovel={openAdd} />} />
-            <Route path="/novels/:id" element={<NovelPlaceholder />} />
+            <Route path="/novels/:id" element={<Novel />} />
           </Routes>
         </main>
         {adding && (

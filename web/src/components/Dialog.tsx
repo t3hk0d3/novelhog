@@ -7,6 +7,8 @@ interface DialogProps {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  /** Anchor to the bottom edge as a sheet (phone layouts) instead of centring. */
+  sheet?: boolean;
 }
 
 /**
@@ -15,7 +17,7 @@ interface DialogProps {
  * before. Escape (the native `cancel` event) and the Close button call `onClose`; the owner
  * unmounts it. Mark the element that should start focused with `data-autofocus`.
  */
-export function Dialog({ title, onClose, children }: DialogProps) {
+export function Dialog({ title, onClose, children, sheet = false }: DialogProps) {
   const titleId = useId();
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -57,7 +59,11 @@ export function Dialog({ title, onClose, children }: DialogProps) {
         onClose();
       }}
       onKeyDown={wrapTab}
-      className="m-auto w-full max-w-lg rounded-2xl bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50"
+      className={`w-full bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50 ${
+        sheet
+          ? 'mx-0 mb-0 mt-auto max-w-none rounded-t-2xl transition-transform duration-200 starting:translate-y-full motion-reduce:transition-none'
+          : 'm-auto max-w-lg rounded-2xl'
+      }`}
     >
       <div className="flex items-center justify-between">
         <h2 id={titleId} className="text-xl font-bold">
