@@ -167,11 +167,11 @@ CREATE TABLE novels (
     next_refresh_at   TEXT NOT NULL,
     last_refreshed_at TEXT,                      -- NULL = initial import not done yet
     seen_at           TEXT,                      -- last time the novel page was opened
-    lease_owner       TEXT,                      -- worker id
-    lease_expires_at  TEXT,
+    claimed_by        TEXT,                      -- worker id holding the novel claim
+    claim_expires_at  TEXT,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
-    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL))
 ) STRICT;
 
 CREATE INDEX novels_due_refresh ON novels (next_refresh_at);
@@ -190,10 +190,12 @@ CREATE TABLE chapters (
     has_images   INTEGER NOT NULL DEFAULT 0 CHECK (has_images IN (0, 1)),
     released_at  TEXT,                                   -- NULL = part of initial import
     queued_at    TEXT,
-    claimed_by   TEXT,
+    claimed_by   TEXT,                                   -- worker id while downloading
+    claim_expires_at TEXT,
     updated_at   TEXT NOT NULL,
     UNIQUE (novel_id, number),
     CHECK ((state = 'pending') = (queued_at IS NOT NULL)),
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL)),
     CHECK ((state = 'downloading') = (claimed_by IS NOT NULL))
 ) STRICT;
 
@@ -224,13 +226,14 @@ CREATE TABLE exports (
     size_bytes   INTEGER CHECK (size_bytes >= 0),-- set when ready
     waited       INTEGER NOT NULL DEFAULT 0 CHECK (waited IN (0, 1)), -- range was incomplete at request time
     claimed_by   TEXT,                           -- worker id while building
-    claimed_at   TEXT,                           -- build start, for recovery
+    claim_expires_at TEXT,
     created_at   TEXT NOT NULL,
     ready_at     TEXT,
     CHECK (chapter_to >= chapter_from),
     CHECK ((state = 'ready') = (storage_key IS NOT NULL AND size_bytes IS NOT NULL)),
     CHECK ((state = 'failed') = (error IS NOT NULL)),
-    CHECK ((state = 'building') = (claimed_by IS NOT NULL AND claimed_at IS NOT NULL))
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL)),
+    CHECK ((state = 'building') = (claimed_by IS NOT NULL))
 ) STRICT;
 
 CREATE INDEX exports_by_novel ON exports (novel_id, created_at);
@@ -277,9 +280,9 @@ CREATE TABLE consumers (                         -- durable readers of the event
     name       TEXT PRIMARY KEY,                 -- 'notifier' (v1); 'telegram', … later
     last_seq   INTEGER NOT NULL DEFAULT 0,       -- last event fully processed
     claimed_by TEXT,                             -- process currently reading
-    claimed_at TEXT,
+    claim_expires_at TEXT,
     updated_at TEXT NOT NULL,
-    CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL))
 ) STRICT;
 ```
 
@@ -297,18 +300,38 @@ CREATE TABLE consumers (                         -- durable readers of the event
 | `"end"` and other reserved words | avoided (already `chapter_from`/`chapter_to`) |
 
 **Claims** use optimistic compare-and-set updates, identical on both
-databases; there is no `SELECT … FOR UPDATE`. Every lease, claim and consumer
-step goes through `repo/claims.py`, which issues one statement of this shape:
+databases; there is no `SELECT … FOR UPDATE`.
+
+Every claimable table (`novels`, `chapters`, `exports`, `consumers`) has the
+same two columns, set and cleared together:
+
+| Column | Meaning |
+|---|---|
+| `claimed_by` | worker or process ID owning the row; `NULL` = free |
+| `claim_expires_at` | when the claim lapses; renewing pushes it forward |
+
+A row is **available** when `claimed_by IS NULL OR claim_expires_at < :now`.
+Eligibility (what kind of row may be claimed: due novels, pending chapters,
+complete waiting exports, a named consumer) is a separate, table-specific
+condition. Every claim goes through `repo/claims.py`, which issues one
+statement of this shape:
 
 ```
 UPDATE <table>
-SET <owner> = :me, <claimed or expiry column> = :now [, state = …]
-WHERE id IN (SELECT id FROM <table>
-             WHERE <eligible> AND (<owner> IS NULL OR <expired>)
-             ORDER BY <priority> LIMIT :n)
-  AND (<owner> IS NULL OR <expired>)
+SET claimed_by = :me, claim_expires_at = :now + :ttl [, state = …]
+WHERE <key> IN (SELECT <key> FROM <table>
+                WHERE <eligible> AND (claimed_by IS NULL OR claim_expires_at < :now)
+                ORDER BY <priority> LIMIT :n)
+  AND (claimed_by IS NULL OR claim_expires_at < :now)
 RETURNING <columns>
 ```
+
+Renewal and release are equally uniform: renewing sets
+`claim_expires_at = :now + :ttl` where `claimed_by = :me`; releasing sets both
+columns to `NULL` where `claimed_by = :me`. Recovery finds rows with
+`claimed_by IS NOT NULL AND claim_expires_at < :now` and applies the
+table-specific reset (chapter → `pending`, export → `waiting`, novel and
+consumer → just freed).
 
 - The outer `WHERE` repeats the "free or expired" condition. SQLite executes
   write statements one at a time; Postgres (`READ COMMITTED`) re-evaluates the
@@ -319,7 +342,7 @@ RETURNING <columns>
 - A single-row claim that returns nothing while eligible rows remain is retried
   up to 3 times, picking the next candidate.
 - Expiry compares against the claiming process's clock; hosts are assumed to be
-  NTP-synchronised, which is safe with `LEASE_TTL` measured in minutes.
+  NTP-synchronised, which is safe with `CLAIM_TTL` measured in minutes.
 - Ownership lives only in these columns; no database lock is held while work is
   done, so a slow download never blocks another worker.
 - On SQLite, write transactions start with `BEGIN IMMEDIATE` so a transaction
@@ -363,7 +386,7 @@ Notes:
 | `pending_pages` | count with `state IN ('pending', 'downloading')` |
 | `error_pages` | count with `state = 'error'` |
 | `new_pages` | count with `released_at IS NOT NULL AND (seen_at IS NULL OR released_at > seen_at)` |
-| `syncing` | `next_refresh_at <= now` or the novel is leased by a worker running a sync |
+| `syncing` | `next_refresh_at <= now` or the novel is claimed by a worker running a sync |
 | `cover_url`, `Export.url` | `STATIC_BASE_URL` + storage key |
 
 ## 5. API
@@ -651,38 +674,38 @@ external services, so it has no `502`.
 on start: publish_hosts(); recover()                 # hosts table from the decode guide
 loop:
     if shutting_down: exit
-    recover()                                        # expired leases and claims only
+    recover()                                        # expired claims only
     dispatch_notifications()                         # event log → channels (§6.6)
-    if novel = lease_due_refresh():                  # next_refresh_at <= now, free lease,
-        refresh(novel); release_lease(novel)         # oldest next_refresh_at first
+    if novel = claim_due_refresh():                  # next_refresh_at <= now, available,
+        refresh(novel); release(novel)               # oldest next_refresh_at first
         continue
     if export = claim_ready_export():                # waiting, range fully downloaded,
         build(export)                                # oldest created_at first (§6.5)
         continue
-    if novel = lease_next_download():                # oldest queued_at with free lease
-        batch = claim(novel, BATCH_SIZE)             # lowest numbers → downloading
+    if novel = claim_next_download():                # oldest queued_at, novel available
+        batch = claim_batch(novel, BATCH_SIZE)       # lowest numbers → downloading
         for chapter in batch:
             if shutting_down: requeue(rest); break
             if state(chapter) != downloading: continue   # dequeued meanwhile
             try: fetch → convert → store → downloaded
             except: state = error; event payload carries the message
-            renew_lease(novel); sleep(REQUEST_DELAY)
-        release_lease(novel)
+            renew(novel and its batch); sleep(REQUEST_DELAY)
+        release(novel)
         continue
     prune()                                          # event log, at most hourly
     sleep(IDLE_SLEEP)
 ```
 
-- Each lease/claim step is one compare-and-set `UPDATE … RETURNING` through `repo/claims.py` (§4), in its own transaction.
+- Each claim step is one compare-and-set `UPDATE … RETURNING` through `repo/claims.py` (§4), in its own transaction.
 - `publish_hosts()` replaces the `hosts` table with the hosts in the installed
   scraper's decode guide (one transaction). Novels whose host is no longer
   listed keep working until a sync fails.
-- `recover()` moves `downloading` chapters of novels whose lease expired back to
-  `pending` and clears the lease, moves `building` exports whose `claimed_at` is
-  older than `LEASE_TTL` back to `waiting`, and releases consumer claims older
-  than `LEASE_TTL`.
+- `recover()` applies the uniform rule from §4 to every claimable table:
+  rows whose `claim_expires_at` has passed are freed; expired `downloading`
+  chapters go back to `pending` and expired `building` exports back to
+  `waiting`.
 - SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch,
-  release the lease, exit 0.
+  release the novel claim, exit 0.
 - Errors in the loop itself (e.g. database locked) are logged, then back off 5 s,
   10 s, 20 s, … capped at `IDLE_SLEEP`.
 - Priority: refreshes, then export builds, then downloads. Refreshes and builds
@@ -723,12 +746,13 @@ refresh(novel):
 - A failed sync backs off the same way, so a dead site settles at monthly; a
   manual sync forces an immediate retry.
 
-### 6.3 Novel lease
+### 6.3 Novel claim
 
-- One writer of a novel's scraper working files at a time. Only the worker takes
-  leases (`lease_owner = worker id`, `lease_expires_at = now + LEASE_TTL`),
-  renewed after each chapter.
-- The API never touches scraper working files and never takes a lease.
+- One writer of a novel's scraper working files at a time: a worker claims the
+  novel (`claimed_by`, `claim_expires_at = now + CLAIM_TTL`) for a sync or a
+  download batch, and renews it, together with the batch's chapter claims,
+  after each chapter.
+- The API never touches scraper working files and never claims anything.
 
 ### 6.4 Per-chapter pipeline
 
@@ -745,7 +769,7 @@ refresh(novel):
 claim_ready_export():
     one transaction: pick the oldest export in 'waiting' whose chapters
     chapter_from..chapter_to are all 'downloaded'; set state = 'building',
-    claimed_by = me, claimed_at = now; append an export event
+    claimed_by = me, claim_expires_at = now + CLAIM_TTL; append an export event
 
 build(export):
     try:
@@ -754,11 +778,11 @@ build(export):
         state = 'ready', storage_key, size_bytes, ready_at = now
     except:
         state = 'failed', error = '<ExceptionType>: <summary>' (traceback logged)
-    clear claimed_by / claimed_at; append an export event
+    clear claimed_by / claim_expires_at; append an export event
 ```
 
 - Builds read only the database, the cover and static storage; they take no
-  novel lease and can run while chapters of the same novel download.
+  novel claim and can run while chapters of the same novel download.
 - A `failed` export is final; the UI offers "Try again", which creates a new
   export for the same range.
 - Exports whose range was already complete at request time (`waited = 0`) do
@@ -811,8 +835,8 @@ sequenceDiagram
 
 ```
 dispatch_notifications():
-    claim consumers['notifier'] if unclaimed or its claim is older than LEASE_TTL
-      (one transaction: claimed_by = me, claimed_at = now); otherwise return
+    claim consumers['notifier'] if available
+      (claimed_by = me, claim_expires_at = now + CLAIM_TTL); otherwise return
     events = events with seq > last_seq, ordered, at most 100
     for each event:
         message = rules.match(event)                     # None for most events
@@ -842,7 +866,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
-| `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `claims.py` (compare-and-set claiming), Alembic migrations, leases, claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `claims.py` (compare-and-set claim, renew, release, recover), Alembic migrations, work claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
@@ -978,7 +1002,7 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 | `NOVELHOG_REFRESH_MIN_INTERVAL` | `21600` (6 h) | |
 | `NOVELHOG_REFRESH_MAX_INTERVAL` | `2592000` (30 d) | |
 | `NOVELHOG_BATCH_SIZE` | `10` | Chapters claimed per batch |
-| `NOVELHOG_LEASE_TTL` | `300` s | |
+| `NOVELHOG_CLAIM_TTL` | `300` s | Lifetime of every claim (novels, chapters, exports, consumers) before renewal |
 | `NOVELHOG_IDLE_SLEEP` | `30` s | Worker sleep when no work |
 | `NOVELHOG_REQUEST_DELAY` | `1` s | Pause between chapter fetches |
 | `NOVELHOG_MAX_IMAGE_BYTES` | `2097152` | Download size cap per image |
@@ -1277,8 +1301,8 @@ desktop chapters, export dialog, phone normal and select mode).
   relative URLs); `exporter` (order, cover, image extraction, no WebP in EPUB
   output, stored originals unchanged); chapter state rules; selector validation; refresh interval
   rule (reset, doubling, cap, jitter bounds).
-- **Integration (real temporary database; SQLite by default, Postgres in CI, see below):** lease and claim with two competing
-  workers; recovery of expired leases; SIGTERM requeue; dequeue during a claimed
+- **Integration (real temporary database; SQLite by default, Postgres in CI, see below):** claims with two competing
+  workers; recovery of expired claims on every table; SIGTERM requeue; dequeue during a claimed
   batch; refresh scheduling and priority over downloads; initial import vs later
   release (`released_at`, auto-queue for followed only); `new_pages` vs
   `seen_at`; SSE replay from `Last-Event-ID` and `resync`; pruning keeps the
@@ -1369,7 +1393,7 @@ desktop chapters, export dialog, phone normal and select mode).
 
 - **Python:** 3.14, `uv`; `ruff format` + `ruff check`; `mypy --strict`;
   `pytest`. `snake_case`; tests named `test_<unit>__<behaviour>`, e.g.
-  `test_claim_batch__skips_leased_novel`. No bare `except:`.
+  `test_claim_batch__skips_claimed_novel`. No bare `except:`.
 - **TypeScript:** strict mode; `eslint` + `prettier`; components
   `PascalCase.tsx`, hooks `useX.ts`, tests colocated as `*.test.tsx`.
 - **Layout:**
