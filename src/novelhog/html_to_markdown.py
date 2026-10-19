@@ -7,8 +7,9 @@ are meaningful; every other tag is dropped and its text kept.
 
 import base64
 import re
+import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from typing import NamedTuple
 
@@ -19,7 +20,50 @@ _DROPPED = frozenset({"script", "style", "noscript", "iframe"})
 _VOID = frozenset(
     {"br", "img", "hr", "wbr", "input", "meta", "link", "source", "col", "area", "embed", "base"}
 )
-_BLOCKISH = frozenset({"p", "ul", "ol", "dl", "li", "dt", "dd"})
+# Tags that end the current paragraph: the allowed block tags plus dropped block-level HTML.
+_BLOCK_TAGS = frozenset(
+    {
+        "p",
+        "dd",
+        "dl",
+        "li",
+        "div",
+        "blockquote",
+        "section",
+        "article",
+        "aside",
+        "header",
+        "footer",
+        "nav",
+        "main",
+        "pre",
+        "center",
+        "figure",
+        "figcaption",
+        "address",
+        "form",
+        "fieldset",
+        "details",
+        "summary",
+        "body",
+        "html",
+        "hr",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "td",
+        "th",
+        "caption",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+)
 _MAX_DEPTH = 200
 _BREAK = "\0"  # in-flight hard line break; NUL never survives strip_xml_invalid
 _IMAGE_UNAVAILABLE = "[image unavailable]"
@@ -118,6 +162,15 @@ class _Block(NamedTuple):
     can_interrupt_paragraph: bool = False
 
 
+@dataclass(frozen=True)
+class _Seg:
+    """A run of inline content: raw text (``_BREAK`` is a hard break) or rendered Markdown."""
+
+    text: str
+    styles: frozenset[str] = frozenset()
+    rendered: bool = False
+
+
 def _escape(text: str) -> str:
     text = _METACHARS.sub(r"\\\g<0>", text)
     text = _TAG_START.sub(r"\\<", text)
@@ -133,12 +186,122 @@ def _escape_line_start(line: str) -> str:
     return _LINE_START.sub(repl, line)
 
 
-def _text(node: str) -> str:
-    return _escape(_HTML_SPACE.sub(" ", node))
+def _is_blank_char(char: str) -> bool:
+    return char.isspace() or char == _BREAK or unicodedata.category(char) == "Cf"
 
 
-def _paragraph(raw: str) -> str | None:
-    text = re.sub(r" {2,}", " ", raw)
+def _is_outside_char(char: str) -> bool:
+    """Characters that must not sit just inside an emphasis marker."""
+    return char == _BREAK or unicodedata.category(char)[0] in "PSZC" or char.isspace()
+
+
+def _peel(run: list[_Seg]) -> tuple[list[_Seg], list[_Seg], list[_Seg]]:
+    """Split a run into (leading, core, trailing), the outer parts being whitespace/punctuation."""
+    core = list(run)
+    lead: list[_Seg] = []
+    while core and not core[0].rendered:
+        text = core[0].text
+        size = 0
+        while size < len(text) and _is_outside_char(text[size]):
+            size += 1
+        if size == 0:
+            break
+        lead.append(replace(core[0], text=text[:size]))
+        if size == len(text):
+            core.pop(0)
+            continue
+        core[0] = replace(core[0], text=text[size:])
+        break
+    trail: list[_Seg] = []
+    while core and not core[-1].rendered:
+        text = core[-1].text
+        size = len(text)
+        while size > 0 and _is_outside_char(text[size - 1]):
+            size -= 1
+        if size == len(text):
+            break
+        trail.insert(0, replace(core[-1], text=text[size:]))
+        if size == 0:
+            core.pop()
+            continue
+        core[-1] = replace(core[-1], text=text[:size])
+        break
+    return lead, core, trail
+
+
+def _merge(segs: list[_Seg]) -> list[_Seg]:
+    merged: list[_Seg] = []
+    for seg in segs:
+        if (
+            merged
+            and not seg.rendered
+            and not merged[-1].rendered
+            and merged[-1].styles == seg.styles
+        ):
+            merged[-1] = replace(seg, text=merged[-1].text + seg.text)
+        else:
+            merged.append(seg)
+    return merged
+
+
+_STYLE_MARKERS = (("strong", "**"), ("em", "*"))
+
+
+def _render_inline(segs: list[_Seg], level: int = 0) -> str:
+    """Render segments to Markdown, wrapping each run of an emphasis style once."""
+    if level == len(_STYLE_MARKERS):
+        return "".join(seg.text if seg.rendered else _escape(seg.text) for seg in _merge(segs))
+    style, marker = _STYLE_MARKERS[level]
+    out: list[str] = []
+    index = 0
+    while index < len(segs):
+        end = index
+        has_style = style in segs[index].styles
+        while end < len(segs) and (style in segs[end].styles) == has_style:
+            end += 1
+        run = segs[index:end]
+        index = end
+        if not has_style:
+            out.append(_render_inline(run, level + 1))
+            continue
+        lead, core, trail = _peel(run)
+        if not core or core[0].rendered or core[-1].rendered:
+            out.append(_render_inline(run, level + 1))
+            continue
+        out.append(_render_inline(lead, level + 1))
+        out.append(f"{marker}{_render_inline(core, level + 1)}{marker}")
+        out.append(_render_inline(trail, level + 1))
+    return "".join(out)
+
+
+def _split_paragraphs(segs: list[_Seg]) -> list[list[_Seg]]:
+    """Split at runs of two or more hard breaks (whitespace between them is ignored)."""
+    groups: list[list[_Seg]] = []
+    current: list[_Seg] = []
+    gap: list[_Seg] = []
+    breaks = 0
+    for seg in segs:
+        if not seg.rendered and seg.text == _BREAK:
+            gap.append(seg)
+            breaks += 1
+        elif not seg.rendered and all(_is_blank_char(char) for char in seg.text):
+            gap.append(seg)
+        else:
+            if breaks >= 2:
+                groups.append(current)
+                current = []
+            else:
+                current.extend(gap)
+            gap, breaks = [], 0
+            current.append(seg)
+    groups.append(current)
+    return groups
+
+
+def _paragraph(segs: list[_Seg]) -> str | None:
+    if all(not seg.rendered and all(_is_blank_char(char) for char in seg.text) for seg in segs):
+        return None
+    text = re.sub(r" {2,}", " ", _render_inline(segs))
     text = _BREAK_SPACES.sub(_BREAK, text).strip(f" {_BREAK}")
     if not text:
         return None
@@ -159,70 +322,67 @@ class _Renderer:
         self.has_images = False
         self.warnings: list[str] = []
 
-    def blocks(self, nodes: list[_Element | str]) -> list[_Block]:
+    def blocks(
+        self, nodes: list[_Element | str], styles: frozenset[str] = frozenset()
+    ) -> list[_Block]:
         out: list[_Block] = []
-        buffer: list[str] = []
-        self._collect(nodes, out, buffer)
+        buffer: list[_Seg] = []
+        self._collect(nodes, out, buffer, styles)
         self._flush(out, buffer)
         return out
 
-    def _flush(self, out: list[_Block], buffer: list[str]) -> None:
-        paragraph = _paragraph("".join(buffer))
+    def _flush(self, out: list[_Block], buffer: list[_Seg]) -> None:
+        for group in _split_paragraphs(buffer):
+            paragraph = _paragraph(group)
+            if paragraph is not None:
+                out.append(_Block(paragraph, is_list=False))
         buffer.clear()
-        if paragraph is not None:
-            out.append(_Block(paragraph, is_list=False))
 
-    def _collect(self, nodes: list[_Element | str], out: list[_Block], buffer: list[str]) -> None:
+    def _collect(
+        self,
+        nodes: list[_Element | str],
+        out: list[_Block],
+        buffer: list[_Seg],
+        styles: frozenset[str],
+    ) -> None:
         for node in nodes:
             if isinstance(node, str):
-                buffer.append(_text(node))
-            elif node.tag in {"em", "i", "strong", "b", "br", "img"}:
-                buffer.append(self._inline_node(node, frozenset()))
-            elif node.tag in {"ul", "ol"}:
+                buffer.append(_Seg(_HTML_SPACE.sub(" ", node), styles))
+                continue
+            tag = node.tag
+            if tag in {"em", "i"}:
+                self._collect(node.children, out, buffer, styles | {"em"})
+            elif tag in {"strong", "b"}:
+                self._collect(node.children, out, buffer, styles | {"strong"})
+            elif tag == "br":
+                buffer.append(_Seg(_BREAK, styles))
+            elif tag == "img":
+                buffer.append(_Seg(self._image(node), styles, rendered=True))
+            elif tag in {"ul", "ol"}:
                 self._flush(out, buffer)
-                block = self._list(node)
+                block = self._list(node, styles)
                 if block is not None:
                     out.append(block)
-            elif node.tag == "dt":
+            elif tag == "dt":
                 self._flush(out, buffer)
-                term = _paragraph(self._inline(node.children, frozenset({"strong"})))
-                if term is not None:
-                    out.append(_Block(f"**{term}**", is_list=False))
-            elif node.tag in {"p", "dd"}:
+                self._collect(node.children, out, buffer, styles | {"strong"})
                 self._flush(out, buffer)
-                self._collect(node.children, out, buffer)
+            elif tag in _BLOCK_TAGS:
+                self._flush(out, buffer)
+                self._collect(node.children, out, buffer, styles)
                 self._flush(out, buffer)
             else:
-                self._collect(node.children, out, buffer)
+                self._collect(node.children, out, buffer, styles)
 
-    def _inline(self, nodes: list[_Element | str], active: frozenset[str]) -> str:
-        return "".join(
-            _text(node) if isinstance(node, str) else self._inline_node(node, active)
-            for node in nodes
-        )
-
-    def _inline_node(self, node: _Element, active: frozenset[str]) -> str:
-        tag = node.tag
-        if tag == "br":
-            return _BREAK
-        if tag == "img":
-            return self._image(node)
-        if tag in {"em", "i", "strong", "b"}:
-            style, marker = ("em", "*") if tag in {"em", "i"} else ("strong", "**")
-            if style in active:
-                return self._inline(node.children, active)
-            inner = self._inline(node.children, active | {style})
-            core = inner.strip(f" {_BREAK}")
-            if not core:
-                return inner
-            start = inner.index(core)
-            return f"{inner[:start]}{marker}{core}{marker}{inner[start + len(core) :]}"
-        inner = self._inline(node.children, active)
-        return f" {inner} " if tag in _BLOCKISH else inner
+    def _fetch(self, source: str) -> FetchedImage | None:
+        try:
+            return self._fetch_image(source)
+        except Exception:  # noqa: BLE001 - a failing fetcher must not fail the chapter
+            return None
 
     def _image(self, node: _Element) -> str:
         source = node.attrs.get("src", "").strip()
-        fetched = self._fetch_image(source) if source else None
+        fetched = self._fetch(source) if source else None
         if fetched is None:
             shown = source[:_MAX_WARNING_URL] or "(no src)"
             self.warnings.append(f"image unavailable: {shown}")
@@ -232,12 +392,12 @@ class _Renderer:
         encoded = base64.b64encode(fetched.data).decode("ascii")
         return f"![{alt}](data:{fetched.mime};base64,{encoded})"
 
-    def _list(self, node: _Element) -> _Block | None:
+    def _list(self, node: _Element, styles: frozenset[str]) -> _Block | None:
         ordered = node.tag == "ol"
         start = _parse_start(node.attrs.get("start")) if ordered else 1
         lines: list[str] = []
         for item in self._items(node.children):
-            blocks = self.blocks(item)
+            blocks = self.blocks(item, styles)
             if not blocks:
                 continue
             marker = (f"{start}." if not lines else "1.") if ordered else "-"

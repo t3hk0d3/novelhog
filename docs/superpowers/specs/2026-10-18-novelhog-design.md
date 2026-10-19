@@ -1250,10 +1250,20 @@ Package `novelhog`, under `src/novelhog/`.
 - Characters that are invalid in XML 1.0 (U+0000–U+0008, U+000B, U+000C,
   U+000E–U+001F, lone surrogates, U+FFFE, U+FFFF) are removed
   (`domain.text.strip_xml_invalid`, also applied to chapter and novel titles).
-- Paragraphs are separated by one blank line; empty paragraphs are dropped.
+- Paragraphs are separated by one blank line; empty paragraphs (including ones
+  holding only whitespace, nbsp or zero-width characters) are dropped.
+- Dropped block-level tags (`div`, `h1`–`h6`, `blockquote`, `section`, `pre`,
+  table rows and cells, `hr`, …) still end the current paragraph, so their text
+  never fuses with its neighbours; two or more consecutive `br` also end it.
+- Emphasis never crosses a paragraph or list boundary: an `em`/`strong` that
+  wraps blocks is applied inside each block. Adjacent runs of the same emphasis
+  are merged, leading/trailing whitespace and punctuation move outside the
+  markers, and a run that still cannot render as emphasis under CommonMark's
+  flanking rules is written as plain text (never as literal asterisks).
 - In-text headings such as "Chapter 29 …" remain plain paragraphs.
 - `img` → `![alt](data:<mime>;base64,…)` via `image_fetcher`; failure → the
-  literal text `[image unavailable]` plus a warning; the chapter still succeeds.
+  literal text `[image unavailable]` plus a warning (also when the fetcher
+  raises); the chapter still succeeds.
   `has_images` is true if at least one image was embedded.
 
 ### 8.2 Images (chapter images and covers)

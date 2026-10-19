@@ -1,6 +1,7 @@
 """Tests for the HTML to Markdown converter (spec section 8.1)."""
 
 import base64
+import re
 
 import pytest
 from markdown_it import MarkdownIt
@@ -83,7 +84,7 @@ class TestConvert__OnDroppedTags:
         assert md("<div><p>a <span>b</span> <a href='x'>c</a></p><p>d</p></div>") == "a b c\n\nd"
 
     @pytest.mark.parametrize("tag", ["script", "style", "noscript", "iframe"])
-    def test_convert__removes_contents_of_(self, tag: str) -> None:
+    def test_convert__removes_tag_with_contents(self, tag: str) -> None:
         assert md(f"<p>a</p><{tag}>secret <b>x</b></{tag}><p>b</p>") == "a\n\nb"
 
     def test_convert__removes_nested_noscript_entirely(self) -> None:
@@ -112,7 +113,7 @@ class TestConvert__OnEscaping:
 
     def test_convert__escapes_inside_emphasis_and_items(self) -> None:
         out = md("<p><em>*a*</em></p><ul><li>- b</li></ul>")
-        assert rendered(out) == "<p><em>*a*</em></p><ul><li>- b</li></ul>"
+        assert rendered(out) == "<p>*<em>a</em>*</p><ul><li>- b</li></ul>"
 
 
 class TestConvert__OnLists:
@@ -172,9 +173,10 @@ class TestConvert__OnLists:
             "<p>intro</p><ul><li>a<ul><li>b</li><li>c</li></ul></li><li>d</li></ul>"
             "<ol><li>e</li></ol>"
         )
-        html = rendered(out)
-        assert html.startswith("<p>intro</p><ul><li>a<ul><li>b</li><li>c</li></ul></li><li>d</li>")
-        assert html.endswith("</ul><ol><li>e</li></ol>")
+        assert rendered(out) == (
+            "<p>intro</p><ul><li>a<ul><li>b</li><li>c</li></ul></li><li>d</li></ul>"
+            "<ol><li>e</li></ol>"
+        )
 
 
 class TestConvert__OnImages:
@@ -221,11 +223,23 @@ class TestConvert__OnImages:
         assert len(result.warnings) == 1
 
 
+class TestConvert__OnFetcherFailure:
+    def test_convert__raising_fetcher_is_treated_as_unavailable(self) -> None:
+        def fetch(url: str) -> FetchedImage | None:
+            raise OSError(url)
+
+        result = convert('<p>a <img src="https://x/y.png"> b</p>', fetch)
+        assert result.markdown == "a [image unavailable] b"
+        assert result.has_images is False
+        assert len(result.warnings) == 1
+
+
 class TestConvert__OnXmlInvalidCharacters:
     @pytest.mark.parametrize(
-        "char", ["\x00", "\x08", "\x0b", "\x0c", "\x0e", "\x1f", "\ud800", "\udfff"]
+        "char",
+        ["\x00", "\x08", "\x0b", "\x0c", "\x0e", "\x1f", "\ud800", "\udfff", "\ufffe", "\uffff"],
     )
-    def test_convert__removes(self, char: str) -> None:
+    def test_convert__removes_xml_invalid_character(self, char: str) -> None:
         assert md(f"<p>a{char}b<em>c{char}</em></p>") == "ab*c*"
 
     def test_convert__removes_from_character_references(self) -> None:
@@ -240,5 +254,115 @@ class TestConvert__OnEmptyInput:
 
 class TestConvert__OnHostileInput:
     def test_convert__survives_very_deep_nesting(self) -> None:
-        out = md("<b>" * 20000 + "x")
-        assert "x" in out
+        assert md("<b>" * 20000 + "x") == "**x**"
+        assert md("<div>" * 20000 + "x") == "x"
+
+
+class TestConvert__OnBlankParagraphs:
+    @pytest.mark.parametrize(
+        "spacer",
+        ["&nbsp;", "&nbsp;&nbsp;", "&#8203;", "\ufeff", " &nbsp; &#8203; ", "<em>&nbsp;</em>"],
+    )
+    def test_convert__drops_paragraph_with_only(self, spacer: str) -> None:
+        assert md(f"<p>a</p><p>{spacer}</p><p>b</p>") == "a\n\nb"
+
+    def test_convert__keeps_nbsp_inside_real_text(self) -> None:
+        assert md("<p>a&nbsp;b</p>") == "a\u00a0b"
+
+    def test_convert__drops_blank_list_item(self) -> None:
+        assert md("<ul><li>&nbsp;</li><li>a</li></ul>") == "- a"
+
+
+def emphasis_html(html: str) -> str:
+    """Convert, render, and assert that no literal asterisk reaches the reader."""
+    out = rendered(md(html))
+    plain = re.sub(r"<[^>]+>", "", out)
+    assert "*" not in plain, (out, plain)
+    return out
+
+
+class TestConvert__OnEmphasisEdges:
+    @pytest.mark.parametrize(
+        ("html", "expected"),
+        [
+            ("<p><b>a</b><b>b</b></p>", "<p><strong>ab</strong></p>"),
+            ("<p><em>a</em><em>b</em></p>", "<p><em>ab</em></p>"),
+            ("<p><b>a</b> <b>b</b></p>", "<p><strong>a</strong> <strong>b</strong></p>"),
+            ("<p>Dragon<i>'s</i> lair</p>", "<p>Dragon'<em>s</em> lair</p>"),
+            ('<p>He said<em>"no"</em>then</p>', "<p>He said&quot;<em>no</em>&quot;then</p>"),
+            ('<p><strong>"x"</strong>y</p>', "<p>&quot;<strong>x</strong>&quot;y</p>"),
+            ("<p><em>word,</em>next</p>", "<p><em>word</em>,next</p>"),
+            ("<p>他说<em>“不”</em>然后</p>", "<p>他说“<em>不</em>”然后</p>"),
+            ("<p>a<em> b </em>c</p>", "<p>a <em>b</em> c</p>"),
+            ("<p><b>(x)</b></p>", "<p>(<strong>x</strong>)</p>"),
+            ("<p><b>a<br></b>b</p>", "<p><strong>a</strong><br>b</p>"),
+            ("<p><b>x <i>y</i> z</b></p>", "<p><strong>x <em>y</em> z</strong></p>"),
+            ("<p><i>a</i><b>b</b></p>", "<p><em>a</em><strong>b</strong></p>"),
+            ("<p><b>a</b><i>b</i></p>", "<p><strong>a</strong><em>b</em></p>"),
+        ],
+    )
+    def test_convert__renders_emphasis_without_literal_asterisks(
+        self, html: str, expected: str
+    ) -> None:
+        assert emphasis_html(html) == expected
+
+    @pytest.mark.parametrize(
+        "html", ["<p><b>-</b></p>", "<p><em> </em>x<b></b></p>", "<p><b>!!</b></p>"]
+    )
+    def test_convert__run_without_word_characters_is_plain_text(self, html: str) -> None:
+        assert "<em>" not in emphasis_html(html)
+        assert "<strong>" not in emphasis_html(html)
+
+    def test_convert__emphasis_around_image_is_plain_text(self) -> None:
+        result = convert("<p><b><img src=u></b>x</p>", lambda _: FetchedImage(b"x", "image/png"))
+        assert "**" not in result.markdown
+        assert "*" not in re.sub(r"<[^>]+>", "", rendered(result.markdown))
+
+
+class TestConvert__OnEmphasisAcrossBlocks:
+    def test_convert__wrapping_emphasis_applies_inside_each_paragraph(self) -> None:
+        assert md("<em><p>one</p><p>two</p></em>") == "*one*\n\n*two*"
+
+    def test_convert__unclosed_emphasis_does_not_swallow_paragraphs(self) -> None:
+        assert md("<i>x<p>a</p><p>b</p>") == "*x*\n\n*a*\n\n*b*"
+
+    def test_convert__emphasis_wrapping_list_applies_inside_items(self) -> None:
+        out = md("<b>x<ul><li>a</li></ul></b>")
+        assert out == "**x**\n\n- **a**"
+        assert rendered(out) == "<p><strong>x</strong></p><ul><li><strong>a</strong></li></ul>"
+
+    def test_convert__definition_term_with_bold_inside_is_not_doubled(self) -> None:
+        assert md("<dl><dt>a <b>b</b></dt></dl>") == "**a b**"
+
+
+class TestConvert__OnBlockLevelDroppedTags:
+    @pytest.mark.parametrize(
+        ("html", "expected"),
+        [
+            ("<div>line one</div><div>line two</div>", "line one\n\nline two"),
+            ("<h3>Chapter 1</h3>Text starts", "Chapter 1\n\nText starts"),
+            ("<p>a</p><blockquote>quoted</blockquote>tail", "a\n\nquoted\n\ntail"),
+            ("<table><tr><td>a</td><td>b</td></tr></table>", "a\n\nb"),
+            ("<table><tr><th>a</th><th>b</th></tr><tr><td>c</td></tr></table>", "a\n\nb\n\nc"),
+            ("a<hr>b", "a\n\nb"),
+            ("<section>a</section><article>b</article><pre>c</pre>", "a\n\nb\n\nc"),
+            ("<header>a</header><footer>b</footer>", "a\n\nb"),
+            ("a<span>b</span>c", "abc"),
+        ],
+    )
+    def test_convert__block_tag_ends_paragraph(self, html: str, expected: str) -> None:
+        assert md(html) == expected
+
+
+class TestConvert__OnConsecutiveBreaks:
+    def test_convert__double_br_ends_paragraph(self) -> None:
+        assert md("<p>a<br><br>b</p>") == "a\n\nb"
+
+    def test_convert__double_br_with_whitespace_between_ends_paragraph(self) -> None:
+        assert md("a<br> \n <br/>b<br><br><br>c") == "a\n\nb\n\nc"
+
+    def test_convert__single_br_stays_a_hard_break(self) -> None:
+        assert md("<p>a<br>b</p>") == "a\\\nb"
+
+    def test_convert__trailing_double_br_leaves_no_empty_paragraph(self) -> None:
+        assert md("<p>a<br><br></p><p>b</p>") == "a\n\nb"
