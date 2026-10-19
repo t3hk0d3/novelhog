@@ -5,6 +5,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
+from novelhog import log
 from novelhog.domain.text import strip_xml_invalid
 
 _VOID_TAGS = frozenset(
@@ -52,7 +53,9 @@ class _Page(HTMLParser):
             self._start_text(tag, values)
 
     def _handle_img(self, values: dict[str, str]) -> None:
-        src = (values.get("src") or values.get("data-src", "")).strip()
+        src = values.get("src", "").strip()
+        if not src or src.startswith("data:"):
+            src = values.get("data-src", "").strip()
         if not src:
             return
         self.images.append((src, values.get("alt", "")))
@@ -87,7 +90,7 @@ class _Page(HTMLParser):
             if self._text_target == "title":
                 self.title = text
             elif self._text_target == "h1":
-                self.h1 = text
+                self.h1 = text or None
             else:
                 self.json_ld.append(self._buffer)
             self._text_target = None
@@ -105,42 +108,54 @@ def _clean(value: str | None) -> str | None:
     return cleaned or None
 
 
-def find_title(toc_html: str) -> str | None:
+def _find_title(toc_html: str) -> str | None:
     """Detect the novel title: og:title, then `<title>` without its site suffix, then `<h1>`."""
     page = _parse(toc_html)
     return (
-        _clean(page.meta.get("og:title"))
+        _clean(" ".join((page.meta.get("og:title") or "").split()))
         or _clean(_SITE_SUFFIX.sub("", strip_xml_invalid(page.title).strip()))
         or _clean(page.h1)
     )
+
+
+_MAX_JSON_LD_DEPTH = 4  # document, list or @graph item, and one more level of nesting
 
 
 def _json_ld_image(blocks: list[str]) -> str | None:
     for block in blocks:
         try:
             data = json.loads(block)
-        except ValueError:
+        except ValueError, RecursionError:
             continue
-        found = _image_in(data)
+        found = _image_in(data, _MAX_JSON_LD_DEPTH)
         if found:
             return found
     return None
 
 
-def _image_in(data: object) -> str | None:
+def _image_in(data: object, depth: int) -> str | None:
+    """The first image of a JSON-LD node, looking through lists and `@graph` to a bounded depth."""
+    if depth <= 0:
+        return None
     if isinstance(data, list):
-        return next((found for item in data if (found := _image_in(item))), None)
+        return next((found for item in data if (found := _image_in(item, depth - 1))), None)
     if not isinstance(data, dict):
         return None
-    image = data.get("image")
-    if isinstance(image, str) and image.strip():
-        return image.strip()
-    if isinstance(image, dict | list):
-        return _image_in({"image": image.get("url")} if isinstance(image, dict) else image[:1])
-    return _image_in(data.get("@graph"))
+    return _image_value(data.get("image")) or _image_in(data.get("@graph"), depth - 1)
 
 
-def find_cover_url(toc_html: str, toc_url: str, title: str | None) -> str | None:
+def _image_value(image: object) -> str | None:
+    """A schema.org `image`: a URL string, an ImageObject with `url`, or a list of those."""
+    candidates = image if isinstance(image, list) else [image]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidate = candidate.get("url")  # noqa: PLW2901
+        if isinstance(candidate, str) and candidate.strip() and not candidate.startswith("data:"):
+            return candidate.strip()
+    return None
+
+
+def _find_cover_url(toc_html: str, toc_url: str, title: str | None) -> str | None:
     """Detect the cover image URL, resolved against `toc_url`; None when no heuristic matches."""
     page = _parse(toc_html)
     candidates = [
@@ -163,3 +178,21 @@ def _resolve(candidate: str | None, toc_url: str) -> str | None:
         return None
     url = urljoin(toc_url, candidate.strip())
     return url if urlsplit(url).scheme in {"http", "https"} else None
+
+
+def find_title(toc_html: str) -> str | None:
+    """Detect the title; a failing heuristic is logged and gives None, never an exception."""
+    try:
+        return _find_title(toc_html)
+    except Exception as exc:  # noqa: BLE001 - metadata is best effort
+        log.get().warning("find_title_failed", error=f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def find_cover_url(toc_html: str, toc_url: str, title: str | None) -> str | None:
+    """Detect the cover URL; a failing heuristic is logged and gives None, never an exception."""
+    try:
+        return _find_cover_url(toc_html, toc_url, title)
+    except Exception as exc:  # noqa: BLE001 - metadata is best effort
+        log.get().warning("find_cover_url_failed", error=f"{type(exc).__name__}: {exc}")
+        return None

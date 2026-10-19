@@ -1,5 +1,7 @@
 """Title and cover finders (spec section 6.7)."""
 
+import pytest
+
 from novelhog.scraper_adapter.finders import find_cover_url, find_title
 
 TOC = "https://example.org/series/12/lantern/"
@@ -39,6 +41,26 @@ class TestFindTitle__Cleaning:
         assert find_title(html) == "Glass Orchard"
 
 
+class TestFindTitle__Details:
+    def test_find_title__collapses_whitespace_in_og_title(self) -> None:
+        assert find_title(page('<meta property="og:title" content="A\n\n  B">')) == "A B"
+
+    def test_find_title__skips_empty_h1(self) -> None:
+        assert find_title(page(body="<h1> </h1><h1>Real</h1>")) == "Real"
+
+
+class TestFindersFailSoft:
+    def test_finders__return_none_and_log_when_parsing_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(_html: str) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("novelhog.scraper_adapter.finders._parse", boom)
+        assert find_title("<html>") is None
+        assert find_cover_url("<html>", TOC, None) is None
+
+
 class TestFindTitle__NothingMatches:
     def test_find_title__returns_none(self) -> None:
         assert find_title(page(body="<p>text</p>")) is None
@@ -67,6 +89,32 @@ class TestFindCoverUrl__Sources:
         ld = '{"@type": "Book", "image": {"url": "https://cdn.example/ld.jpg"}}'
         html = page(f'<script type="application/ld+json">{ld}</script>')
         assert find_cover_url(html, TOC, None) == "https://cdn.example/ld.jpg"
+
+    def test_find_cover_url__uses_first_string_of_json_ld_image_list(self) -> None:
+        ld = (
+            '{"@type": "Book", "image": ["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"]}'
+        )
+        html = page(f'<script type="application/ld+json">{ld}</script>')
+        assert find_cover_url(html, TOC, None) == "https://cdn.example/a.jpg"
+
+    def test_find_cover_url__uses_first_image_object_url_of_json_ld_list(self) -> None:
+        ld = '{"image": [{"@type": "ImageObject", "url": "https://cdn.example/y.jpg"}]}'
+        html = page(f'<script type="application/ld+json">{ld}</script>')
+        assert find_cover_url(html, TOC, None) == "https://cdn.example/y.jpg"
+
+    def test_find_cover_url__survives_deeply_nested_json_ld(self) -> None:
+        for ld in ("[" * 500 + "]" * 500, '{"@graph":' * 500 + "1" + "}" * 500):
+            html = page(
+                f'<script type="application/ld+json">{ld}</script>',
+                '<figure><img src="/f.jpg"></figure>',
+            )
+            assert find_cover_url(html, TOC, None) == "https://example.org/f.jpg"
+
+    def test_find_cover_url__prefers_data_src_over_placeholder_src(self) -> None:
+        html = page(
+            body='<figure><img src="data:image/gif;base64,AAAA" data-src="/r.jpg"></figure>'
+        )
+        assert find_cover_url(html, TOC, None) == "https://example.org/r.jpg"
 
     def test_find_cover_url__ignores_broken_json_ld(self) -> None:
         html = page(
