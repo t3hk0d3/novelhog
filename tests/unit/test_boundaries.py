@@ -62,11 +62,19 @@ class TestApiIsPure__WhenApiImportsWorkerOnlyModule:
             "novelhog.image_fetcher",
             "novelhog.html_to_markdown",
             "novelhog.notifications.channels",
+            "novelhog.net",
+            "novelhog.notifications.dispatcher",
+            "novelhog.worker",
+            "PIL",
+            "pywebpush",
+            "web_novel_scraper",
         ],
     )
     def test_lint_imports__fails_naming_the_forbidden_import(
         self, project: Path, forbidden: str
     ) -> None:
+        if forbidden == "novelhog.notifications.dispatcher":
+            _add_module(project, forbidden, '"""dispatcher."""\n')
         _add_module(project, "novelhog.api.offender", f"import {forbidden}\n")
         result = _run_lint_imports(project)
         assert result.returncode != 0
@@ -131,20 +139,55 @@ class TestScraperIsIsolated__WhenAnotherModuleImportsWebNovelScraper:
         assert _run_lint_imports(project).returncode == 0
 
 
+def _run_check_sh(
+    tmp_path: Path, fail_on: str
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run check.sh with a fake `uv` that logs its arguments and fails on `fail_on`."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        f'#!/usr/bin/env bash\necho "$*" >> "{log}"\n[ "$*" = "{fail_on}" ] && exit 1\nexit 0\n'
+    )
+    fake_uv.chmod(0o755)
+    result = subprocess.run(  # noqa: S603
+        ["bash", str(REPO_ROOT / "scripts" / "check.sh")],  # noqa: S607
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = log.read_text().splitlines() if log.exists() else []
+    return result, calls
+
+
+class TestCheckScript__OnCleanTree:
+    def test_check_sh__runs_every_gate_in_order(self, tmp_path: Path) -> None:
+        _, calls = _run_check_sh(tmp_path, fail_on="never")
+        assert calls == [
+            "run ruff format --check",
+            "run ruff check",
+            "run mypy --strict src tests tools",
+            "run lint-imports",
+            "run pytest",
+        ]
+
+    def test_check_sh__exits_zero(self, tmp_path: Path) -> None:
+        result, _ = _run_check_sh(tmp_path, fail_on="never")
+        assert result.returncode == 0
+
+
 class TestCheckScript__OnFailingGate:
     def test_check_sh__exits_non_zero_and_names_the_gate(self, tmp_path: Path) -> None:
-        fake_bin = tmp_path / "bin"
-        fake_bin.mkdir()
-        fake_uv = fake_bin / "uv"
-        fake_uv.write_text('#!/usr/bin/env bash\n[ "$2 $3" = "mypy --strict" ] && exit 1\nexit 0\n')
-        fake_uv.chmod(0o755)
-        env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
-        result = subprocess.run(  # noqa: S603
-            ["bash", str(REPO_ROOT / "scripts" / "check.sh")],  # noqa: S607
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result, _ = _run_check_sh(tmp_path, fail_on="run mypy --strict src tests tools")
         assert result.returncode != 0
         assert "FAILED gate: mypy --strict" in result.stderr
+
+    def test_check_sh__does_not_run_later_gates(self, tmp_path: Path) -> None:
+        _, calls = _run_check_sh(tmp_path, fail_on="run mypy --strict src tests tools")
+        assert calls == [
+            "run ruff format --check",
+            "run ruff check",
+            "run mypy --strict src tests tools",
+        ]

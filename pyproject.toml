@@ -16,7 +16,7 @@ dependencies = [
     "pywebpush",
     "py-vapid",
     "structlog",
-    "import-linter",
+    "requests",
 ]
 
 [project.scripts]
@@ -30,6 +30,8 @@ dev = [
     "mypy",
     "ruff",
     "import-linter",
+    "asgi-lifespan",
+    "types-requests",
 ]
 
 [build-system]
@@ -55,6 +57,10 @@ strict = true
 mypy_path = "src:."
 explicit_package_bases = true
 
+[[tool.mypy.overrides]]
+module = ["web_novel_scraper.*", "pywebpush.*", "py_vapid.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -75,6 +81,12 @@ forbidden_modules = [
     "novelhog.image_fetcher",
     "novelhog.html_to_markdown",
     "novelhog.notifications.channels",
+    "novelhog.notifications.dispatcher",
+    "novelhog.net",
+    "novelhog.worker",
+    "PIL",
+    "pywebpush",
+    "web_novel_scraper",
 ]
 
 [[tool.importlinter.contracts]]
