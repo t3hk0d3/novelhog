@@ -52,7 +52,7 @@ select = ["E", "F", "W", "I", "B", "UP", "N", "S", "BLE", "TRY"]
 
 [tool.mypy]
 strict = true
-mypy_path = "src"
+mypy_path = "src:."
 explicit_package_bases = true
 
 [tool.pytest.ini_options]
@@ -62,6 +62,7 @@ asyncio_mode = "auto"
 [tool.importlinter]
 root_package = "novelhog"
 include_external_packages = true
+contract_types = ["allowed_imports: tools.importlinter_contracts.AllowedImportsContract"]
 
 [[tool.importlinter.contracts]]
 name = "api-is-pure"
@@ -78,35 +79,10 @@ forbidden_modules = [
 
 [[tool.importlinter.contracts]]
 name = "repo-is-standalone"
-type = "forbidden"
-source_modules = ["novelhog.repo"]
-forbidden_modules = [
-    "novelhog.api",
-    "novelhog.worker",
-    "novelhog.config",
-    "novelhog.storage",
-    "novelhog.scraper_adapter",
-    "novelhog.exporter",
-    "novelhog.images",
-    "novelhog.image_fetcher",
-    "novelhog.html_to_markdown",
-    "novelhog.chapter_store",
-    "novelhog.notifications",
-    "novelhog.vapid",
-    "novelhog.cli",
-    "web_novel_scraper",
-    "fastapi",
-    "starlette",
-    "uvicorn",
-    "httpx",
-    "requests",
-    "PIL",
-    "markdown_it",
-    "ebooklib",
-    "pywebpush",
-    "py_vapid",
-    "structlog",
-]
+type = "allowed_imports"
+source_module = "novelhog.repo"
+allowed_modules = ["sqlalchemy", "alembic", "novelhog.ids", "novelhog.domain"]
+allow_stdlib = true
 
 [[tool.importlinter.contracts]]
 name = "scraper-is-isolated"

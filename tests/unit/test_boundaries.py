@@ -31,6 +31,11 @@ def project(tmp_path: Path) -> Path:
         tmp_path / "src",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    shutil.copytree(
+        REPO_ROOT / "tools",
+        tmp_path / "tools",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
     return tmp_path
 
 
@@ -76,13 +81,25 @@ class TestApiIsPure__WhenApiImportsWorkerOnlyModule:
 class TestRepoIsStandalone__WhenRepoImportsOutsideItsAllowance:
     @pytest.mark.parametrize(
         "forbidden",
-        ["novelhog.config", "novelhog.storage", "novelhog.worker", "fastapi", "PIL"],
+        [
+            "novelhog.config",
+            "novelhog.storage",
+            "novelhog.worker",
+            "novelhog.log",
+            "fastapi",
+            "PIL",
+            "pydantic",
+            "psycopg",
+        ],
     )
     def test_lint_imports__fails(self, project: Path, forbidden: str) -> None:
+        if forbidden == "novelhog.log":
+            _add_module(project, "novelhog.log", '"""log."""\n')
         _add_module(project, "novelhog.repo.offender", f"import {forbidden}\n")
         result = _run_lint_imports(project)
         assert result.returncode != 0
         assert "repo-is-standalone BROKEN" in result.stdout
+        assert f"novelhog.repo.offender -> {forbidden}" in result.stdout
 
     @pytest.mark.parametrize(
         "allowed",

@@ -16,7 +16,7 @@ gate() {
 
 gate "ruff format --check" uv run ruff format --check
 gate "ruff check" uv run ruff check
-gate "mypy --strict" uv run mypy --strict src tests
+gate "mypy --strict" uv run mypy --strict src tests tools
 gate "lint-imports" uv run lint-imports
 gate "pytest" uv run pytest
 echo "All gates passed."
