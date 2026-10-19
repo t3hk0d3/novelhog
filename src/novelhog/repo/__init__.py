@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from novelhog.repo import db
+from novelhog.repo.chapters import Chapters
 from novelhog.repo.context import RepoContext
 from novelhog.repo.db import Busy, Revisions, SchemaOutdated
 from novelhog.repo.events import Events
@@ -35,6 +36,7 @@ class Repo:
             static_base_url=static_base_url,
             refresh_min_interval=refresh_min_interval,
         )
+        self.chapters = Chapters(self.context)
         self.events = Events(self.context)
         self.hosts = Hosts(self.context)
         self.novels = Novels(self.context)

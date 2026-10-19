@@ -203,3 +203,68 @@ class TestWrite__WithAnotherWriterHoldingTheLock:
         finally:
             thread.join()
             engine.dispose()
+
+
+@pytest.fixture
+def postgres_repo(repo: Repo) -> Repo:
+    if repo.engine.dialect.name != "postgresql":
+        pytest.skip("deadlocks and lock timeouts are Postgres behaviour")
+    for name in ("a.com", "b.com"):
+        _insert_host(repo, name, INSTANT)
+    return repo
+
+
+def _update_host(repo: Repo, name: str) -> Any:
+    return hosts.update().where(hosts.c.host == name).values(updated_at=INSTANT)
+
+
+class TestWrite__OnPostgresLockConflicts:
+    def test_write__reports_a_deadlock_as_busy(self, postgres_repo: Repo) -> None:
+        barrier = threading.Barrier(2, timeout=30)
+        outcomes: list[str] = []
+
+        def crossing(first: str, second: str) -> None:
+            try:
+                with db.write(postgres_repo.engine) as connection:
+                    connection.execute(_update_host(postgres_repo, first))
+                    barrier.wait()
+                    connection.execute(_update_host(postgres_repo, second))
+                outcomes.append("ok")
+            except Busy:
+                outcomes.append("busy")
+
+        threads = [
+            threading.Thread(target=crossing, args=pair, daemon=True)
+            for pair in (("a.com", "b.com"), ("b.com", "a.com"))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
+        assert sorted(outcomes) == ["busy", "ok"]
+
+    def test_write__reports_a_lock_timeout_as_busy(self, postgres_repo: Repo) -> None:
+        holding, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with db.write(postgres_repo.engine) as connection:
+                connection.execute(_update_host(postgres_repo, "a.com"))
+                holding.set()
+                release.wait(timeout=30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        assert holding.wait(timeout=30)
+        try:
+            with pytest.raises(Busy), db.write(postgres_repo.engine) as connection:
+                connection.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                connection.execute(_update_host(postgres_repo, "a.com"))
+        finally:
+            release.set()
+            holder.join(timeout=30)
+
+    def test_write__other_database_errors_are_not_busy(self, postgres_repo: Repo) -> None:
+        with pytest.raises(Exception, match="duplicate key") as caught:  # noqa: PT011
+            _insert_host(postgres_repo, "a.com", INSTANT)
+        assert not isinstance(caught.value, Busy)

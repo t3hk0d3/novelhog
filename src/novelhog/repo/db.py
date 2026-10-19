@@ -26,7 +26,7 @@ _WRITE_OPTION = "novelhog_write"
 
 
 class Busy(Exception):  # noqa: N818  (public name fixed by the spec: `repo.Busy`)
-    """A write found the database locked after the busy timeout."""
+    """A write found the database locked (SQLite), or hit a deadlock or lock timeout (Postgres)."""
 
 
 class SchemaOutdated(Exception):  # noqa: N818  (public name fixed by the spec)
@@ -85,8 +85,14 @@ def _configure_sqlite(engine: Engine) -> None:
             connection.exec_driver_sql("BEGIN")
 
 
-def _is_locked(error: OperationalError) -> bool:
-    return "database is locked" in str(error.orig)
+_POSTGRES_BUSY_SQLSTATES = frozenset({"40P01", "55P03"})  # deadlock detected, lock not available
+
+
+def _is_busy(error: OperationalError) -> bool:
+    """Whether the error is SQLite's "database is locked" or a Postgres deadlock or lock timeout."""
+    if "database is locked" in str(error.orig):
+        return True
+    return getattr(error.orig, "sqlstate", None) in _POSTGRES_BUSY_SQLSTATES
 
 
 @contextmanager
@@ -94,7 +100,8 @@ def write(engine: Engine) -> Iterator[Connection]:
     """Run one write transaction: commit on success, roll back and re-raise on error.
 
     On SQLite the transaction starts with `BEGIN IMMEDIATE`; a lock that outlasts the busy
-    timeout is raised as `Busy`.
+    timeout is raised as `Busy`. On Postgres a deadlock (40P01) or lock timeout (55P03) is
+    raised as `Busy` too (spec section 4, "Lock order").
     """
     try:
         with engine.connect() as connection:
@@ -102,7 +109,7 @@ def write(engine: Engine) -> Iterator[Connection]:
             with connection.begin():
                 yield connection
     except OperationalError as error:
-        if _is_locked(error):
+        if _is_busy(error):
             raise Busy(str(error.orig)) from error
         raise
 

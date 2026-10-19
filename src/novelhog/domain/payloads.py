@@ -75,10 +75,13 @@ class NovelView:
 
 @dataclass(frozen=True)
 class ChapterView:
-    """The API `Chapter` object. `error` and `error_at` matter only in the error state."""
+    """The API `Chapter` object. `error` and `error_at` matter only in the error state.
+
+    `position` is `None` only in events about chapters a sync removed from the TOC.
+    """
 
     id: str
-    position: int
+    position: int | None
     url: str
     title: str | None
     state: ChapterState
