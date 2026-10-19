@@ -1,7 +1,10 @@
 """Tests for the HTML to Markdown converter (spec section 8.1)."""
 
 import base64
+import random
 import re
+import time
+from html import unescape
 
 import pytest
 from markdown_it import MarkdownIt
@@ -395,3 +398,67 @@ class TestConvert__OnSymbolsAtEmphasisEdges:
 
     def test_convert__symbol_edge_that_cannot_flank_is_plain_text(self) -> None:
         assert emphasis_html("<p><b>100$</b>x</p>") == "<p>100$x</p>"
+
+
+def _plain_text(html: str) -> str:
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", "", html))).strip()
+
+
+def _rendered_text(markdown: str) -> str:
+    html: str = _MD.render(markdown)
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", "", html))).strip()
+
+
+class TestConvert__OnVerifiedEmphasis:
+    @pytest.mark.parametrize(
+        "html",
+        [
+            "<b><i>\U0001f525</i></b>b",
+            "x<b><i>$a</i></b>",
+            "<b>a<i>b$</i></b>c",
+            "<i>+</i><b>a</b>",
+            "<i>\U0001f525<b>a</b></i>",
+            "<b>HP</b><i>+50</i>",
+            "<b><i>Senpai~</i></b>desu",
+            "Level up<b><i>✨</i></b>!",
+            "<i>very<b>much</b></i><b>so</b>",
+            "<b>b</b><i><b>不</b>a</i>",
+        ],
+    )
+    def test_convert__keeps_text_and_shows_no_literal_markers(self, html: str) -> None:
+        out = md(f"<p>{html}</p>")
+        assert _rendered_text(out) == _plain_text(html), out
+
+    def test_convert__keeps_emphasis_where_it_renders(self) -> None:
+        assert rendered(md("<p>a <b>b</b> <i>c</i></p>")) == (
+            "<p>a <strong>b</strong> <em>c</em></p>"
+        )
+
+    def test_convert__fuzzed_emphasis_trees_keep_text_and_show_no_markers(self) -> None:
+        rng = random.Random(20261019)  # noqa: S311 - seeded test data, not crypto
+        atoms = ["a", "b", "$", "\U0001f525", ".", "'", '"', " ", "*", "_", "&lt;", "&amp;"]
+        atoms += ["!", "-", "1", "~", "©", "+", "“", "不", "。", "(", ")"]
+
+        def tree(depth: int) -> str:
+            parts: list[str] = []
+            for _ in range(rng.randint(1, 4)):
+                if depth < 3 and rng.random() < 0.4:
+                    tag = rng.choice(["b", "i", "em", "strong", "span"])
+                    parts.append(f"<{tag}>{tree(depth + 1)}</{tag}>")
+                else:
+                    parts.append("".join(rng.choice(atoms) for _ in range(rng.randint(1, 3))))
+            return "".join(parts)
+
+        failures: list[str] = []
+        for _ in range(3000):
+            html = tree(0)
+            out = md(f"<p>{html}</p>")
+            if _rendered_text(out) != _plain_text(html):
+                failures.append(f"{html!r} -> {out!r}")
+        assert failures[:5] == []
+
+    def test_convert__large_chapter_with_emphasis_converts_quickly(self) -> None:
+        html = '<p>He said <b>"no"</b> and <i>$5</i><b>x</b><i>y</i> then left.</p>' * 5000
+        started = time.perf_counter()
+        convert(html, _no_images)
+        assert time.perf_counter() - started < 3

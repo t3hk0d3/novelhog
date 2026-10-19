@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from typing import NamedTuple
 
+from markdown_it import MarkdownIt
+
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.images import FetchedImage
 
@@ -70,6 +72,7 @@ _BREAK = "\0"  # in-flight hard line break; NUL never survives strip_xml_invalid
 _IMAGE_UNAVAILABLE = "[image unavailable]"
 _MAX_WARNING_URL = 200
 _MAX_START = 999_999_999
+_MAX_REPAIR_RUNS = 30
 
 _HTML_SPACE = re.compile(r"[ \t\r\n\f]+")
 _METACHARS = re.compile(r"[\\*_#>\[\]`|~<&]")
@@ -275,7 +278,17 @@ def _merge(segs: list[_Seg]) -> list[_Seg]:
 _STYLE_MARKERS = (("strong", "**"), ("em", "*"))
 
 
-def _render_inline(segs: list[_Seg], level: int = 0) -> str:
+@dataclass
+class _Emphasis:
+    """Which emphasis runs of one paragraph may be written; runs are numbered as met."""
+
+    all_off: bool = False
+    disabled: frozenset[int] = frozenset()
+    run_count: int = 0
+    written: int = 0
+
+
+def _render_inline(segs: list[_Seg], state: _Emphasis, level: int = 0) -> str:
     """Render segments to Markdown, wrapping each run of an emphasis style once."""
     if level == len(_STYLE_MARKERS):
         return "".join(seg.text if seg.rendered else _escape(seg.text) for seg in _merge(segs))
@@ -290,7 +303,12 @@ def _render_inline(segs: list[_Seg], level: int = 0) -> str:
         run = segs[index:end]
         index = end
         if not has_style:
-            out.append(_render_inline(run, level + 1))
+            out.append(_render_inline(run, state, level + 1))
+            continue
+        run_id = state.run_count
+        state.run_count += 1
+        if state.all_off or run_id in state.disabled:
+            out.append(_render_inline(run, state, level + 1))
             continue
         lead, core, trail = _peel(run)
         before = _char_beside(lead, last=True) or _char_beside(segs[:first], last=True)
@@ -301,11 +319,12 @@ def _render_inline(segs: list[_Seg], level: int = 0) -> str:
             or core[-1].rendered
             or not _symbol_edges_flank(before, core, after)
         ):
-            out.append(_render_inline(run, level + 1))
+            out.append(_render_inline(run, state, level + 1))
             continue
-        out.append(_render_inline(lead, level + 1))
-        out.append(f"{marker}{_render_inline(core, level + 1)}{marker}")
-        out.append(_render_inline(trail, level + 1))
+        state.written += 1
+        out.append(_render_inline(lead, state, level + 1))
+        out.append(f"{marker}{_render_inline(core, state, level + 1)}{marker}")
+        out.append(_render_inline(trail, state, level + 1))
     return "".join(out)
 
 
@@ -333,14 +352,66 @@ def _split_paragraphs(segs: list[_Seg]) -> list[list[_Seg]]:
     return groups
 
 
+_VERIFIER = MarkdownIt("zero").enable(
+    [
+        "escape",
+        "backticks",
+        "emphasis",
+        "entity",
+        "newline",
+        "image",
+        "link",
+        "html_inline",
+        "autolink",
+    ]
+)
+_TEXT_TOKENS = frozenset({"text", "text_special"})
+
+
+def _renders_without_literal_markers(markdown: str, segs: list[_Seg]) -> bool:
+    """Check by rendering: text carries exactly the asterisks of the source, none of ours.
+
+    Emphasis markers only ever add characters, so text is never lost; a marker that CommonMark
+    does not turn into emphasis stays visible as a literal asterisk in a text token.
+    """
+    expected = sum(seg.text.count("*") for seg in segs if not seg.rendered)
+    shown = 0
+    for token in _VERIFIER.parseInline(markdown):
+        for child in token.children or []:
+            if child.type in _TEXT_TOKENS:
+                shown += child.content.count("*")
+    return shown == expected
+
+
+def _build_paragraph(segs: list[_Seg], state: _Emphasis) -> str:
+    text = re.sub(r" {2,}", " ", _render_inline(segs, state))
+    text = _BREAK_SPACES.sub(_BREAK, text).strip(f" {_BREAK}")
+    return "\\\n".join(_escape_line_start(line) for line in text.split(_BREAK))
+
+
 def _paragraph(segs: list[_Seg]) -> str | None:
+    """Render one paragraph; emphasis is verified and dropped where it would not render."""
     if all(not seg.rendered and all(_is_blank_char(char) for char in seg.text) for seg in segs):
         return None
-    text = re.sub(r" {2,}", " ", _render_inline(segs))
-    text = _BREAK_SPACES.sub(_BREAK, text).strip(f" {_BREAK}")
+    state = _Emphasis()
+    text = _build_paragraph(segs, state)
     if not text:
         return None
-    return "\\\n".join(_escape_line_start(line) for line in text.split(_BREAK))
+    if state.written == 0:
+        return text
+    if _renders_without_literal_markers(text, segs):
+        return text
+    runs = state.run_count
+    if runs <= _MAX_REPAIR_RUNS:
+        for run_id in range(runs):
+            candidate = _build_paragraph(segs, _Emphasis(disabled=frozenset({run_id})))
+            if _renders_without_literal_markers(candidate, segs):
+                return candidate
+        for upto in range(2, runs + 1):
+            candidate = _build_paragraph(segs, _Emphasis(disabled=frozenset(range(upto))))
+            if _renders_without_literal_markers(candidate, segs):
+                return candidate
+    return _build_paragraph(segs, _Emphasis(all_off=True))
 
 
 def _parse_start(value: str | None) -> int:
