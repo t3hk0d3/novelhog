@@ -24,8 +24,8 @@ chapter ranges to EPUB for phones and e-readers.
    downloads) and a push notification arrives even when no novelhog tab is open.
 5. Export a downloaded range to an EPUB with a cover, without ads or empty
    paragraphs, and download it from any device.
-6. `docker compose up` next to an existing FlareSolverr, behind the user's own
-   HTTPS reverse proxy, is the whole deployment.
+6. `docker compose up` (which brings the worker's own FlareSolverr), behind the
+   user's own HTTPS reverse proxy, is the whole deployment.
 
 ### In scope (v1)
 
@@ -74,7 +74,7 @@ flowchart TB
         cache[["scraper cache<br/>(container-local)"]]
     end
 
-    flaresolverr["FlareSolverr"]
+    flaresolverr["FlareSolverr<br/>(one per worker)"]
     sites["Novel sites"]
     channels["Notification channels<br/>Web Push (v1) · Telegram (later)"]
 
@@ -120,8 +120,14 @@ Responsibilities are split by concern, not by load:
   needs to create `app.db-wal` and `app.db-shm` next to the database);
   `/data/static` is read-write for `novelhog-worker` and read-only for
   `novelhog-web`. With Postgres, `/data/db` is unused.
-- Only `novelhog-worker` joins FlareSolverr's Docker network (an external
-  network in `compose.yaml`; `compose.test.yaml` replaces it for tests).
+- **Every worker is paired 1:1 with its own FlareSolverr.** `compose.yaml` ships
+  one pair: `novelhog-worker` and a `flaresolverr` service on a private network
+  that only the two of them join, with `NOVELHOG_FLARESOLVERR_URL` pointing at
+  it. More workers means more pairs (each worker with its own FlareSolverr and
+  URL, e.g. a second pair in an override file); workers are never scaled with
+  `--scale`, which would break the pairing. The worker does not `depends_on`
+  FlareSolverr: while it is unreachable, work is put back as an infrastructure
+  error (§6.1). `compose.test.yaml` leaves FlareSolverr out for tests.
 - `novelhog-worker` has `stop_grace_period: 2m`, so a chapter in progress can
   finish on `docker compose down`.
 - `novelhog-web` publishes one port (default `8080`) for the user's HTTPS
@@ -138,10 +144,11 @@ Responsibilities are split by concern, not by load:
   push), must pass the original `Host` header, and must not buffer
   `/api/v1/events`. The README includes Caddy and nginx snippets and backup
   instructions (§11.1). Cache headers come from the built-in Caddy.
-- Scaling: `novelhog-web` (stateless) can be scaled on one host with SQLite. v1
-  runs **one** worker; several workers sharing one FlareSolverr are not supported
-  yet (the scraper's FlareSolverr session names collide, §6.7). Multi-host
-  clustering needs Postgres and is future work (§12).
+- Scaling: `novelhog-web` (stateless) can be scaled on one host with SQLite, and
+  so can worker/FlareSolverr pairs (claims, fencing and the event clock make
+  concurrent workers safe). Several workers may fetch from the same site at the
+  same time; per-site limits are future work. Multi-host clustering needs
+  Postgres and shared static storage (§12).
 
 ## 3. Identifiers
 
@@ -1166,8 +1173,8 @@ dispatch_notifications():
     agent, so images are fetched without them; an image host behind Cloudflare
     gives `[image unavailable]`.
   - The scraper names FlareSolverr sessions with one random letter and opens a
-    browser session per chapter. One worker is fine; several workers sharing one
-    FlareSolverr may kill each other's sessions (§12).
+    browser session per chapter. Because every worker has its own FlareSolverr
+    (§2), session names never collide.
 
 ### 6.8 Outbound HTTP guard
 
@@ -1690,11 +1697,10 @@ desktop chapters, export dialog, phone normal and select mode).
   `notify()` in the API). First implementation: UDP datagram to every address the
   worker service name resolves to, with the timed wait kept as fallback; the
   worker always re-checks the database. With Postgres: `LISTEN/NOTIFY`.
-- **Several workers and multi-host clustering** on Postgres. The claim, fencing
-  and event-clock design already supports it; still needed: unique FlareSolverr
-  session names per worker (the scraper picks one random letter), shared static
-  storage (S3), per-site download limits (e.g. claimable host slots), and CI runs
-  with several workers.
+- **Multi-host clustering** on Postgres. The claim, fencing and event-clock
+  design already supports it, and every worker brings its own FlareSolverr;
+  still needed: shared static storage (S3), and per-site download limits across
+  workers (e.g. claimable host slots).
 - **FlareSolverr cookies for images** (own FlareSolverr client or an upstream
   scraper change), so images behind Cloudflare can be fetched.
 - **S3 static backend** (`S3StaticStorage`), setting `Content-Type` and
