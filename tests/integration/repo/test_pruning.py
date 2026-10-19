@@ -12,9 +12,9 @@ NOVEL = "NV000000000001"
 DAY = 86400
 
 
-def _add(repo: Repo, entity_id: str = NOVEL) -> int:
+def _add(repo: Repo, entity_id: str = NOVEL, payload: dict[str, object] | None = None) -> int:
     with db.write(repo.engine) as conn:
-        return event_log.append(conn, NOVEL, entity_id, {}, now=repo.clock())
+        return event_log.append(conn, NOVEL, entity_id, payload or {}, now=repo.clock())
 
 
 def _seqs(repo: Repo) -> list[int]:
@@ -57,18 +57,22 @@ class TestPruneConsumers:
         # boundary capped at 2: only seq 1 is deletable, and it has a newer NV row
         assert _seqs(repo) == [2, 3, 4, 5]
 
-    def test_prune__moves_a_lagging_consumer_to_the_age_boundary_and_reports_it(
+    def test_prune__moves_a_lagging_consumer_reports_skipped_releases_and_fences_its_owner(
         self, repo: Repo, clock: FakeClock
     ) -> None:
-        for _ in range(3):  # seq 1..3, old
-            _add(repo)
-        repo.consumers.claim("dead", "w", 60)
+        _add(repo, payload={"released": [1], "followed": True})  # 1: a release
+        _add(repo, payload={"released": [2], "followed": False})  # 2: not followed
+        _add(repo, "CH000000000001", {"released": [3], "followed": True})  # 3: not an NV event
+        _add(repo, payload={"released": [], "followed": True})  # 4: nothing released
+        repo.consumers.claim("dead", "w", 10 * DAY)
         with db.write(repo.engine) as conn:
-            conn.execute(update(consumers).values(last_seq=0, claimed_by=None, claimed_until=None))
+            conn.execute(update(consumers).values(last_seq=0))
         clock.advance(seconds=8 * DAY)
-        _add(repo)  # 4
         _add(repo)  # 5
+        _add(repo)  # 6
         report = repo.events.prune()
-        assert report.consumers_moved == [("dead", 0, 3)]
-        assert _seqs(repo) == [4, 5]
-        assert repo.consumers.claim("dead", "w", 60) == 3
+        assert report.consumers_moved == [("dead", 0, 4, 1)]
+        assert _seqs(repo) == [3, 5, 6]
+        assert repo.consumers.advance("dead", "w", 5) is False
+        assert repo.consumers.renew("dead", "w", 60) is False
+        assert repo.consumers.claim("dead", "w2", 60) == 4

@@ -115,10 +115,15 @@ class EventRow:
 
 @dataclass(frozen=True)
 class PruneReport:
-    """What `prune` did: rows deleted, and consumers moved as `(name, old, new)` last_seq."""
+    """What `prune` did: rows deleted, and the consumers moved forward.
+
+    Each moved consumer is `(name, old last_seq, new last_seq, skipped_releases)`, where
+    `skipped_releases` counts the `release` notification events (`NV` events with a non-empty
+    `released` and `followed = true`, spec section 6.6) in the skipped range `(old, new]`.
+    """
 
     deleted: int
-    consumers_moved: list[tuple[str, int, int]]
+    consumers_moved: list[tuple[str, int, int, int]]
 
 
 def _first_seq_since(conn: Connection, cutoff: datetime, latest: int) -> int:
@@ -127,6 +132,18 @@ def _first_seq_since(conn: Connection, cutoff: datetime, latest: int) -> int:
         select(func.min(events_table.c.seq)).where(events_table.c.at >= cutoff)
     ).scalar_one()
     return latest + 1 if found is None else int(found)
+
+
+def _count_releases(conn: Connection, after: int, up_to: int) -> int:
+    """Count `release` notification events (spec section 6.6) with `after < seq <= up_to`."""
+    payloads = conn.execute(
+        select(events_table.c.payload).where(
+            events_table.c.seq > after,
+            events_table.c.seq <= up_to,
+            events_table.c.entity_id.like("NV%"),
+        )
+    ).scalars()
+    return sum(1 for p in payloads if p.get("released") and p.get("followed") is True)
 
 
 class Events:
@@ -187,7 +204,8 @@ class Events:
 
         The boundary is the first `seq` younger than `keep_s`, capped at the slowest consumer's
         `last_seq + 1`. A consumer whose next event is older than `max_consumer_lag_s` is first
-        moved forward so that it next reads the first event inside that window.
+        moved forward so that it next reads the first event inside that window. The move also clears
+        its claim, so the old owner's `advance` and `renew` return False.
         """
         now = self._clock()
         with db.write(self._engine) as conn:
@@ -195,7 +213,7 @@ class Events:
                 conn.execute(select(event_clock.c.seq).where(event_clock.c.id == 1)).scalar_one()
             )
             lag_start = _first_seq_since(conn, now - timedelta(seconds=max_consumer_lag_s), latest)
-            moved: list[tuple[str, int, int]] = []
+            moved: list[tuple[str, int, int, int]] = []
             for name, last_seq in conn.execute(
                 select(consumers.c.name, consumers.c.last_seq).order_by(consumers.c.name)
             ).all():
@@ -203,10 +221,16 @@ class Events:
                     applied = conn.execute(
                         update(consumers)
                         .where(consumers.c.name == name, consumers.c.last_seq == last_seq)
-                        .values(last_seq=lag_start - 1, updated_at=now)
+                        .values(
+                            last_seq=lag_start - 1,
+                            updated_at=now,
+                            claimed_by=None,
+                            claimed_until=None,
+                        )
                     ).rowcount
                     if applied:
-                        moved.append((name, int(last_seq), lag_start - 1))
+                        skipped = _count_releases(conn, int(last_seq), lag_start - 1)
+                        moved.append((name, int(last_seq), lag_start - 1, skipped))
             boundary = _first_seq_since(conn, now - timedelta(seconds=keep_s), latest)
             slowest = conn.execute(select(func.min(consumers.c.last_seq))).scalar_one()
             if slowest is not None:

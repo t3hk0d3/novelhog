@@ -31,6 +31,13 @@ class TestSince:
         rows = repo.events.since(0, novel_id=OTHER)
         assert [e.seq for e in rows] == [2, 3]
 
+    def test_since__applies_the_limit_after_the_novel_filter(self, repo: Repo) -> None:
+        _add(repo, OTHER, OTHER)
+        _add(repo, NOVEL)
+        _add(repo, OTHER, OTHER)
+        _add(repo, OTHER, OTHER)
+        assert [e.seq for e in repo.events.since(0, novel_id=OTHER, limit=2)] == [1, 3]
+
     def test_since__derives_kind_from_the_entity_prefix(self, repo: Repo) -> None:
         for entity in (NOVEL, "CH000000000001", "EX000000000001"):
             _add(repo, entity)
