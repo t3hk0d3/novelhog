@@ -53,16 +53,15 @@ def emit_novel_change(
     static_base_url: str,
     released: list[int] | None = None,
     errors: Mapping[str, tuple[str, datetime]] | None = None,
-    positions_changed: bool = False,
 ) -> None:
     """Append the events of a chapter change: one `CH` per chapter, one `NV`, then the `EX`s.
 
-    The `EX` events go to every waiting export of the novel whose range contains a changed
-    chapter (all waiting exports when `positions_changed`, because a sync moved or removed
-    chapters). `released` adds the sync's released positions to the `NV` payload; `errors` gives
-    the message and time of chapters that just failed (other chapters in `error` carry their
-    previous error forward). Call it last in the transaction, after `novels.lock_novel` and every
-    row write; snapshots are built lazily inside `append`.
+    The `EX` events go to every waiting export of the novel with a changed end chapter or whose
+    range contains a changed chapter that still has a position. `released` adds the sync's
+    released positions to the `NV` payload; `errors` gives the message and time of chapters that
+    just failed (other chapters in `error` carry their previous error forward). Call it last in
+    the transaction, after `novels.lock_novel` and every row write; snapshots are built lazily
+    inside `append`.
     """
     # Imported here: novels, chapters and exports import this module.
     from novelhog.repo import chapters, exports, novels  # noqa: PLC0415
@@ -82,9 +81,7 @@ def emit_novel_change(
     for chapter_id in changed_chapter_ids:
         append(conn, novel_id, chapter_id, chapter_payload(chapter_id), now=now)
     append(conn, novel_id, novel_id, novel_payload, now=now)
-    for export_id in exports.affected_waiting(
-        conn, novel_id, changed_chapter_ids, positions_changed=positions_changed
-    ):
+    for export_id in exports.affected_waiting(conn, novel_id, changed_chapter_ids):
         append(conn, novel_id, export_id, export_payload(export_id), now=now)
 
 

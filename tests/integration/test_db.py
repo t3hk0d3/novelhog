@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import OperationalError
 
 from novelhog.repo import Busy, Repo, db
 from novelhog.repo.schema import hosts
@@ -264,7 +265,9 @@ class TestWrite__OnPostgresLockConflicts:
             release.set()
             holder.join(timeout=30)
 
-    def test_write__other_database_errors_are_not_busy(self, postgres_repo: Repo) -> None:
-        with pytest.raises(Exception, match="duplicate key") as caught:  # noqa: PT011
-            _insert_host(postgres_repo, "a.com", INSTANT)
+    def test_write__other_operational_errors_are_not_busy(self, postgres_repo: Repo) -> None:
+        with pytest.raises(OperationalError) as caught, db.write(postgres_repo.engine) as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '50ms'"))
+            conn.execute(text("SELECT pg_sleep(2)"))
+        assert caught.value.orig.sqlstate == "57014"  # type: ignore[union-attr]
         assert not isinstance(caught.value, Busy)

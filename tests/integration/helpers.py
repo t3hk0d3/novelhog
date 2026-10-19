@@ -3,9 +3,9 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Connection, insert
+from sqlalchemy import Connection, Engine, insert, select
 
-from novelhog.repo.schema import chapters, exports, hosts, novels
+from novelhog.repo.schema import chapters, events, exports, hosts, novels
 
 NOW = datetime.fromisoformat("2026-10-19T12:00:00+00:00")
 NOVEL_ID = "NV000000000001"
@@ -67,3 +67,16 @@ def insert_export(connection: Connection, **overrides: Any) -> None:
     """Insert a host, a novel, one chapter and an export row."""
     insert_novel_with_chapter(connection)
     connection.execute(insert(exports).values(**export_row(**overrides)))
+
+
+def assert_no_events_after_delete(engine: Engine, novel_id: str) -> None:
+    """Assert that the novel's `deleted` NV event is its last event (no ghost CH/NV/EX after it)."""
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(events.c.seq, events.c.payload)
+            .where(events.c.novel_id == novel_id)
+            .order_by(events.c.seq)
+        ).all()
+    deleted = [row.seq for row in rows if row.payload.get("deleted")]
+    assert len(deleted) == 1
+    assert rows[-1].seq == deleted[0]

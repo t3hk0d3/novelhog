@@ -10,11 +10,12 @@ from sqlalchemy import insert, select, update
 from novelhog.domain.chapters import ChapterRange, ChapterState
 from novelhog.domain.errors import NotFound, ValidationFailed
 from novelhog.repo import Repo, db
+from novelhog.repo import chapters as chapters_repo
 from novelhog.repo import events as event_log
 from novelhog.repo.chapters import error_of
 from novelhog.repo.schema import chapter_contents, chapters, events, exports
 from tests.conftest import FakeClock
-from tests.integration.helpers import chapter_row, export_row
+from tests.integration.helpers import assert_no_events_after_delete, chapter_row, export_row
 
 URL = "https://example.com/novel"
 
@@ -468,23 +469,31 @@ class TestErrorOf:
             assert error_of(conn, chapter_id(1)) is None
 
 
-def _race_patch_and_delete(repo: Repo, novel: str) -> list[str]:
-    barrier = threading.Barrier(2, timeout=30)
+def _race_patch_and_delete(repo: Repo, novel: str, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Hold `patch` inside its transaction (novel row locked) while `delete` runs into it."""
+    has_row = threading.Event()
     outcomes: list[str] = []
+    original = chapters_repo._transition
+
+    def slow_transition(*args: Any, **kwargs: Any) -> Any:
+        has_row.set()
+        threading.Event().wait(1.0)  # let delete run into the held row lock
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chapters_repo, "_transition", slow_transition)
 
     def patcher() -> None:
         try:
-            barrier.wait()
             repo.chapters.patch(novel, ChapterState.PENDING, ChapterRange(1, 2))
             outcomes.append("patch:ok")
-        except NotFound:
-            outcomes.append("patch:not_found")
         except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
             outcomes.append(f"patch:{error!r}")
+        finally:
+            has_row.set()
 
     def deleter() -> None:
         try:
-            barrier.wait()
+            has_row.wait(timeout=30)
             repo.novels.delete(novel)
             outcomes.append("delete:ok")
         except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
@@ -502,27 +511,11 @@ def _race_patch_and_delete(repo: Repo, novel: str) -> list[str]:
 class TestPatch__RacingADelete:
     """Both writers lock the novel row first, so neither deadlocks nor breaks a foreign key."""
 
-    def test_patch__and_delete_serialise_without_deadlock_or_fk_violation(self, repo: Repo) -> None:
-        repo.hosts.publish(["example.com"])
-        for round_number in range(5):
-            novel = repo.novels.create(f"{URL}-{round_number}", followed=True).id
-            with db.write(repo.engine) as conn:
-                for i in (1, 2):
-                    conn.execute(
-                        insert(chapters).values(
-                            **chapter_row(
-                                id=f"CH{round_number}{i:011d}",
-                                novel_id=novel,
-                                url=f"{URL}-{round_number}/{i}",
-                                position=i,
-                            )
-                        )
-                    )
-            assert _race_patch_and_delete(repo, novel) in (
-                ["delete:ok", "patch:not_found"],
-                ["delete:ok", "patch:ok"],
-            )
-            with db.read(repo.engine) as conn:
-                assert (
-                    conn.execute(select(chapters).where(chapters.c.novel_id == novel)).all() == []
-                )
+    def test_patch__and_delete_serialise_without_deadlock_or_fk_violation(
+        self, repo: Repo, novel_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        add_chapters(repo, novel_id, [{}, {}])
+        assert _race_patch_and_delete(repo, novel_id, monkeypatch) == ["delete:ok", "patch:ok"]
+        with db.read(repo.engine) as conn:
+            assert conn.execute(select(chapters).where(chapters.c.novel_id == novel_id)).all() == []
+        assert_no_events_after_delete(repo.engine, novel_id)

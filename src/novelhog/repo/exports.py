@@ -79,39 +79,36 @@ def snapshot(conn: Connection, export_id: str, *, static_base_url: str) -> Expor
 
 
 def affected_waiting(
-    conn: Connection,
-    novel_id: str,
-    changed_chapter_ids: Sequence[str],
-    *,
-    positions_changed: bool,
+    conn: Connection, novel_id: str, changed_chapter_ids: Sequence[str]
 ) -> list[str]:
-    """Return the ids of the novel's waiting exports whose range contains a changed chapter.
+    """Return the ids of the novel's waiting exports that a chapter change affects.
 
-    With `positions_changed` (a sync moved, removed or returned chapters, so ranges may have
-    gained or lost members that are no longer where they were) every waiting export qualifies.
+    An export is affected when one of its end chapters is among the changed ones (its range may
+    have become empty), or when its current range contains a changed chapter that still has a
+    position (spec section 4, "Event log").
     """
     waiting = conn.execute(
         select(exports.c.id, exports.c.first_chapter_id, exports.c.last_chapter_id)
         .where(and_(exports.c.novel_id == novel_id, exports.c.state == ExportState.WAITING))
         .order_by(exports.c.created_at, exports.c.id)
     ).all()
-    if not waiting:
+    if not waiting or not changed_chapter_ids:
         return []
-    if positions_changed:
-        return [row.id for row in waiting]
-    if not changed_chapter_ids:
-        return []
+    changed_ids = set(changed_chapter_ids)
     wanted = {i for row in waiting for i in (row.first_chapter_id, row.last_chapter_id)}
-    wanted.update(changed_chapter_ids)
+    wanted.update(changed_ids)
     positions = {
         r.id: r.position
         for r in conn.execute(
             select(chapters.c.id, chapters.c.position).where(chapters.c.id.in_(wanted))
         )
     }
-    changed = {positions[i] for i in changed_chapter_ids if positions.get(i) is not None}
+    changed = {positions[i] for i in changed_ids if positions.get(i) is not None}
     affected = []
     for row in waiting:
+        if row.first_chapter_id in changed_ids or row.last_chapter_id in changed_ids:
+            affected.append(row.id)
+            continue
         first, last = positions.get(row.first_chapter_id), positions.get(row.last_chapter_id)
         if first is None or last is None:
             continue

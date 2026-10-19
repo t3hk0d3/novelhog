@@ -10,8 +10,9 @@ from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo.chapters import TocDiff, apply_toc
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapter_contents, chapters, events
+from novelhog.repo.schema import chapter_contents, chapters, events, exports
 from tests.conftest import FakeClock
+from tests.integration.helpers import assert_no_events_after_delete, export_row
 
 BASE = "https://example.com/novel"
 
@@ -41,7 +42,6 @@ def sync(
             now=now,
             static_base_url="/static",
             released=diff.new,
-            positions_changed=diff.positions_changed,
         )
     return diff
 
@@ -324,6 +324,63 @@ class TestApplyToc__Events:
         assert seqs[-3:] == [rows(repo, novel_id)[u(1)].id, rows(repo, novel_id)[u(2)].id, novel_id]
 
 
+def _export(repo: Repo, novel_id: str, export_id: str, first: str, last: str) -> None:
+    with db.write(repo.engine) as conn:
+        conn.execute(
+            insert(exports).values(
+                **export_row(
+                    id=export_id, novel_id=novel_id, first_chapter_id=first, last_chapter_id=last
+                )
+            )
+        )
+
+
+def _ex_events(repo: Repo, export_id: str) -> list[Any]:
+    with db.read(repo.engine) as conn:
+        return list(conn.execute(select(events).where(events.c.entity_id == export_id)).all())
+
+
+class TestApplyToc__ExEvents:
+    def test_apply_toc__emits_ex_for_an_export_whose_end_chapter_was_removed(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2), u(3)], initial=True)
+        found = rows(repo, novel_id)
+        _export(repo, novel_id, "EX000000000001", found[u(2)].id, found[u(3)].id)
+        sync(repo, novel_id, [u(1), u(2)])
+        (event,) = _ex_events(repo, "EX000000000001")
+        assert event.payload["chapter_to"] is None
+
+    def test_apply_toc__emits_ex_for_an_export_whose_range_holds_a_changed_chapter(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2), u(3)], initial=True)
+        found = rows(repo, novel_id)
+        _export(repo, novel_id, "EX000000000001", found[u(1)].id, found[u(3)].id)
+        sync(repo, novel_id, [u(1), u(9), u(2), u(3)])
+        (event,) = _ex_events(repo, "EX000000000001")
+        assert event.payload["progress"]["total"] == 4
+
+    def test_apply_toc__skips_an_export_whose_range_holds_no_changed_chapter(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2), u(3)], initial=True)
+        found = rows(repo, novel_id)
+        _export(repo, novel_id, "EX000000000001", found[u(1)].id, found[u(2)].id)
+        sync(repo, novel_id, [u(1), u(2), u(3), u(4)])
+        assert _ex_events(repo, "EX000000000001") == []
+
+
+class TestApplyToc__RemovedOrder:
+    def test_apply_toc__removed_chapters_are_reported_by_old_position(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(n) for n in range(1, 6)], initial=True)
+        found = rows(repo, novel_id)
+        diff = sync(repo, novel_id, [u(3)])
+        assert diff.removed == [found[u(n)].id for n in (1, 2, 4, 5)]
+
+
 class TestApplyToc__RacingADelete:
     """Both writers lock the novel row first, so neither deadlocks nor breaks a foreign key."""
 
@@ -353,7 +410,6 @@ class TestApplyToc__RacingADelete:
                         now=now,
                         static_base_url="/static",
                         released=diff.new,
-                        positions_changed=diff.positions_changed,
                     )
                 outcomes.append("sync:ok")
             except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
@@ -378,3 +434,4 @@ class TestApplyToc__RacingADelete:
         assert sorted(outcomes) == ["delete:ok", "sync:ok"]
         with db.read(repo.engine) as conn:
             assert conn.execute(select(chapters)).all() == []
+        assert_no_events_after_delete(repo.engine, novel_id)

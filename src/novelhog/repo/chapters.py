@@ -76,11 +76,6 @@ class TocDiff:
         """Every inserted, moved, removed or returned chapter, for `emit_novel_change`."""
         return [*self.inserted, *self.moved, *self.removed, *self.returned]
 
-    @property
-    def positions_changed(self) -> bool:
-        """Whether existing chapters moved, left or re-entered the TOC."""
-        return bool(self.moved or self.removed or self.returned)
-
 
 def _parse_time(value: object) -> datetime:
     return datetime.fromisoformat(str(value))
@@ -283,6 +278,7 @@ def apply_toc(
     gone = [
         row for url, row in existing.items() if url not in position_of and row.position is not None
     ]
+    gone.sort(key=lambda row: row.position)
     removed = [row.id for row in gone]
     dequeued = [row.id for row in gone if row.state == ChapterState.PENDING]
     if removed:
