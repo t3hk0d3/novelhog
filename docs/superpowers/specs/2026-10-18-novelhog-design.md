@@ -92,11 +92,11 @@ Responsibilities are split by concern, not by load:
 |---|---|
 | `novelhog-web` (container) | Everything that faces people, and nothing about novel sites. Runs two processes: **Caddy** (the only exposed port) and the **API**. |
 | Caddy (in `novelhog-web`) | Serves the built SPA at `/` (with SPA fallback to `index.html`), `sw.js` and `manifest.webmanifest` at the root, and local static files from `/data/static` at `/static`; reverse-proxies `/api/*` to the API on `127.0.0.1:8000` with response buffering off (SSE). Owns cache and download headers (§8.3). |
-| API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push target registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
+| API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push subscription registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
 | `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the event log it writes. |
 | SPA | React app + service worker, built to static files baked into the image at `/srv/web` and served by Caddy (single origin, no CORS). |
 | `novelhog.repo` | The database interface: a standalone package (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
-| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, notification targets, the event log and its consumers. Accessed only through `novelhog.repo`. |
+| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, subscriptions, the event log and its consumers. Accessed only through `novelhog.repo`. |
 | Static storage | Covers and export files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
 
 ### Deployment
@@ -127,7 +127,7 @@ Responsibilities are split by concern, not by load:
 
 - Format: two-letter uppercase type prefix + 12 random characters from
   `[a-z0-9]`, generated with `secrets`.
-  - `NV` novel, `CH` chapter, `EX` export, `NT` notification target.
+  - `NV` novel, `CH` chapter, `EX` export, `SB` subscription.
     Example: `CHk3x9q2m7b4wz`.
 - 36¹² ≈ 4.7·10¹⁸ (~62 bits). Primary keys are unique; an insert that collides is
   retried with a fresh ID.
@@ -239,9 +239,9 @@ CREATE TABLE settings (                          -- small key/value store
     updated_at TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE notification_targets (              -- where notifications are delivered
+CREATE TABLE subscriptions (                     -- where notifications are delivered, any channel
     id         TEXT PRIMARY KEY
-               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NT'
+               CHECK (length(id) = 14 AND substr(id, 1, 2) = 'SB'
                       AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
     channel    TEXT NOT NULL,                    -- 'webpush' (v1); 'telegram', … later
     address    TEXT NOT NULL CHECK (json_valid(address)), -- channel-specific
@@ -334,8 +334,8 @@ GET    /api/v1/novels/{novel_id}/exports
 POST   /api/v1/novels/{novel_id}/exports
 DELETE /api/v1/novels/{novel_id}/exports/{export_id}
 POST   /api/v1/webpush/subscriptions
-GET    /api/v1/notification-targets
-DELETE /api/v1/notification-targets/{target_id}
+GET    /api/v1/subscriptions
+DELETE /api/v1/subscriptions/{subscription_id}
 GET    /api/v1/events
 ```
 
@@ -518,7 +518,7 @@ stateDiagram-v2
     end note
 ```
 
-### 5.6 Settings and notification targets
+### 5.6 Settings and subscriptions
 
 `GET /api/v1/settings` returns the server settings the UI needs at startup:
 
@@ -538,25 +538,25 @@ The UI loads it once, hides the notifications bell when
 `notifications.channels.webpush.enabled` is false, and uses `vapid_public_key`
 for `PushManager.subscribe`. The key is read from the `settings` table.
 
-**Notification target** (any channel):
-`{id: "NT…", channel: string, label: string | null, created_at: string}`; the
+**Subscription** (any channel):
+`{id: "SB…", channel: string, label: string | null, created_at: string}`; the
 channel-specific address (push endpoint and keys, chat ID…) is never returned.
 
 | Route | Request | Response | Errors |
 |---|---|---|---|
-| `POST /webpush/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 NotificationTarget`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422`, `503 channel_disabled` |
-| `GET /notification-targets` | — | `NotificationTarget[]` by `created_at` | — |
-| `DELETE /notification-targets/{id}` | — | `204` | `404` |
+| `POST /webpush/subscriptions` | `{endpoint, keys: {p256dh, auth}}` | `201 Subscription`; an existing `endpoint` is replaced and keeps its `id` (`200`) | `422`, `503 channel_disabled` |
+| `GET /subscriptions` | — | `Subscription[]` by `created_at` | — |
+| `DELETE /subscriptions/{id}` | — | `204` | `404` |
 
-- Storage is channel-neutral (`notification_targets`). Only **enrolment** is
+- Storage is channel-neutral (`subscriptions`). Only **enrolment** is
   channel-specific, because each channel proves ownership differently: the
   browser creates a Web Push subscription itself, while a Telegram chat would be
   enrolled by its bot service writing through `novelhog.repo`. There is no
-  generic "create target" route.
+  generic "create subscription" route.
 - A Web Push subscription is stored with `channel = 'webpush'`,
   `address = {endpoint, keys}`, `address_key = endpoint`, `label = User-Agent`.
-- "Turn off on this device" deletes the device's own target through the generic
-  route; the UI keeps its target ID in `localStorage` and falls back to looking
+- "Turn off on this device" deletes the device's own subscription through the generic
+  route; the UI keeps its subscription ID in `localStorage` and falls back to looking
   it up by re-subscribing (same endpoint → same ID).
 
 ### 5.7 Events (SSE)
@@ -735,19 +735,19 @@ sequenceDiagram
     participant DB as SQLite (novelhog.repo)
     participant N as Notifier consumer (worker)
     participant C as Channel (WebPush, later Telegram)
-    participant T as Target (browser, chat)
+    participant S as Subscriber (browser, chat)
 
     W->>DB: one transaction: state change + events
     loop every worker pass
         N->>DB: claim consumer 'notifier', read events after last_seq
         loop each event
             N->>N: rules → message or nothing
-            loop each notification target
-                N->>C: send(target, message)
-                C->>T: deliver
+            loop each subscription
+                N->>C: send(subscription, message)
+                C->>S: deliver
                 alt endpoint gone (404/410)
                     C-->>N: Gone
-                    N->>DB: delete target
+                    N->>DB: delete subscription
                 else other failure
                     C-->>N: Failed (logged)
                 end
@@ -765,16 +765,16 @@ dispatch_notifications():
     for each event:
         message = rules.match(event)                     # None for most events
         if message:
-            for each target in notification_targets:
-                channel = channels[target.channel]       # unknown channel: skip, log
-                result = channel.send(target, message)
-                Gone   → delete the target
+            for each subscription in subscriptions:
+                channel = channels[subscription.channel] # unknown channel: skip, log
+                result = channel.send(subscription, message)
+                Gone   → delete the subscription
                 Failed → log (no retry)
     last_seq = seq of the last event read; release the claim   (one transaction)
 ```
 
 - Only one process advances a consumer at a time; other workers skip the step.
-- Every target receives every notification in v1 (one person, no per-target
+- Every subscription receives every notification in v1 (one person, no per-subscription
   filters).
 - If push is not configured (no `NOVELHOG_PUBLIC_URL` / `VAPID_SUBJECT`), the
   `webpush` channel is not registered; the cursor still advances.
@@ -790,7 +790,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
-| `repo` | The database interface: all SQL, migrations, leases, claiming, event log, consumers, targets, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `repo` | The database interface: all SQL, migrations, leases, claiming, event log, consumers, subscriptions, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
@@ -800,7 +800,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `exporter` | Format registry (`format → mime, extension, accepted image types, builder`). EPUB: Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → `ebooklib`; cover; inline images extracted to EPUB items and converted per §8.4 |
 | `images` | Pillow helpers: `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)` |
 | `notifications.rules` | `match(event) -> NotificationMessage(title, body, url, icon) \| None`: which events notify and their channel-neutral wording (§6.6, §8.6) |
-| `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(target, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
+| `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(subscription, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
 | `notifications.dispatcher` | `dispatch()`: the `notifier` consumer; claims its cursor, reads new events, applies the rules, delivers through the registry, advances the cursor (§6.6) |
 | `vapid` | `ensure_keys(repo)`: creates the VAPID key pair in `settings` if missing (API startup) |
 | `api` | FastAPI app under `/api/v1`: routers, SSE, error handlers. Serves no files. Uses only `repo`, `domain`, `ids`, `vapid`, `storage.url` |
@@ -1095,8 +1095,8 @@ manifest makes the app installable.
     disabled with the tooltip "Blocked in browser settings".
   - Subscribing requests permission, calls `PushManager.subscribe` with
     `vapid_public_key`, then `POST /webpush/subscriptions` and keeps the returned
-    target ID; unsubscribing calls `unsubscribe()` and
-    `DELETE /notification-targets/{id}`. Over plain HTTP the bell is disabled with a
+    subscription ID; unsubscribing calls `unsubscribe()` and
+    `DELETE /subscriptions/{id}`. Over plain HTTP the bell is disabled with a
     tooltip that HTTPS is required and the banner is not shown; on iOS outside an
     installed PWA the banner explains "Add to Home Screen" instead of Turn on.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
@@ -1203,7 +1203,7 @@ desktop chapters, export dialog, phone normal and select mode).
   content-addressed table.
 - **Telegram notifications.** A `TelegramChannel` registered in the worker's
   channel registry (`address = {chat_id}`), plus a separate `novelhog-telegram`
-  bot service that uses `novelhog.repo` to register targets on `/start`, remove
+  bot service that uses `novelhog.repo` to register subscriptions on `/start`, remove
   them on `/stop`, and answer simple commands (library, new chapters). It may
   also read the event log with its own `consumers` row. No change to the event
   log or the worker loop.
@@ -1236,8 +1236,8 @@ desktop chapters, export dialog, phone normal and select mode).
   writes `released = []`; `rules.match` returns a `release` message only for
   non-empty `released` with `followed = true`, an `export_ready` message only for
   a ready export with `waited = true`, and nothing for every other event; the
-  dispatcher delivers each matching event to every target once, skips unknown
-  channels, deletes targets on `Gone`, logs `Failed`, and advances `last_seq`
+  dispatcher delivers each matching event to every subscription once, skips unknown
+  channels, deletes subscriptions on `Gone`, logs `Failed`, and advances `last_seq`
   only after the batch; only one process holds the `notifier` claim at a time
   and a stale claim is taken over; a crash before advancing re-delivers at most
   one batch; `WebPushChannel` maps `404`/`410` to `Gone`.
@@ -1245,10 +1245,10 @@ desktop chapters, export dialog, phone normal and select mode).
   transaction; pruning keeps the newest event per entity, never deletes events
   after the slowest consumer's `last_seq`, and moves a consumer more than 7 days
   behind forward with a warning.
-- **Targets API:** `POST /webpush/subscriptions` creates a `webpush` target and
-  returns the same ID for the same endpoint; `GET /notification-targets` lists
-  all channels without addresses; `DELETE /notification-targets/{id}` removes
-  any channel's target.
+- **Subscriptions API:** `POST /webpush/subscriptions` creates a `webpush` subscription and
+  returns the same ID for the same endpoint; `GET /subscriptions` lists
+  all channels without addresses; `DELETE /subscriptions/{id}` removes
+  any channel's subscription.
 - **VAPID:** `ensure_keys` creates the pair once, is a no-op when it exists, and
   two concurrent callers end with one pair; `/settings` exposes only the public
   key.
