@@ -1,3 +1,4 @@
+import { useHref } from 'react-router';
 import type { Chapter } from '../api/client';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { dateOnly, relative } from '../lib/time';
@@ -20,10 +21,12 @@ function Row({
   onOpenDetails,
 }: { chapter: Chapter; wide: boolean } & Omit<Props, 'chapters'>) {
   const title = chapter.title ?? `Chapter ${String(chapter.position)}`;
+  // In-app target (current route plus ?chapter=<id>) so every way of following the link stays here.
+  const href = useHref({ search: `?chapter=${chapter.id}` });
   return (
     <li className="border-b border-line">
       <a
-        href={chapter.url}
+        href={href}
         aria-label={`${title}, ${STATE_LABELS[chapter.state]}, open details`}
         onClick={(event) => {
           event.preventDefault();

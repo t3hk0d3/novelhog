@@ -1,7 +1,8 @@
-import { render, screen, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makeChapter } from '../test/fixtures';
+import { renderWithProviders as render } from '../test/render';
 import { ChapterTable } from './ChapterTable';
 
 function setWide(wide: boolean) {
@@ -72,6 +73,16 @@ describe('ChapterTable', () => {
       expect(
         screen.getByRole('link', { name: 'Page 1, Pending, open details' }),
       ).toBeInTheDocument();
+    });
+
+    it('link to the chapter inside the app, not to the source site', () => {
+      const chapter = makeChapter(4);
+      render(<ChapterTable chapters={[chapter]} isNew={never} onOpenDetails={vi.fn()} />, {
+        route: '/novels/NV000000000001',
+      });
+      const href = screen.getByRole('link').getAttribute('href');
+      expect(href).toBe(`/novels/NV000000000001?chapter=${chapter.id}`);
+      expect(href).not.toContain(chapter.url);
     });
 
     it('show the new dot only for new chapters', () => {
