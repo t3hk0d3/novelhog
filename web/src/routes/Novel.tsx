@@ -6,6 +6,8 @@ import { isDeletedNovel, type DeletedNovel } from '../api/events';
 import { ChapterDetails } from '../components/ChapterDetails';
 import { ChapterTable } from '../components/ChapterTable';
 import { ChapterFilters } from '../components/ChapterFilters';
+import { ExportDialog } from '../components/ExportDialog';
+import { ExportsPanel } from '../components/ExportsPanel';
 import { NovelHeader } from '../components/NovelHeader';
 import { OverviewBar } from '../components/OverviewBar';
 import { RangeChips } from '../components/RangeChips';
@@ -94,9 +96,9 @@ function NovelPage({ novel }: { novel: NovelData }) {
       { replace, state: chapterId === null ? null : { details: pushedByUs || !replace } },
     );
   };
-  // The first and last position Export EPUB… asked for; Task 38's export dialog reads it
-  // (null = closed).
-  const [, setExportRange] = useState<{ from: number; to: number } | null>(null);
+  // The first and last position Export EPUB… (action bar or header menu) asked for; the export
+  // dialog is open while it is set.
+  const [exportRange, setExportRange] = useState<{ from: number; to: number } | null>(null);
 
   useEffect(() => {
     if (seenSent.current) return;
@@ -119,12 +121,19 @@ function NovelPage({ novel }: { novel: NovelData }) {
   }, [detailsMissing]);
   return (
     <div className={`flex flex-col gap-4 ${selection.active ? 'pb-32' : ''}`}>
-      <NovelHeader novel={novel} />
+      <NovelHeader
+        novel={novel}
+        onExport={() => {
+          const lastPosition = all[all.length - 1]?.position;
+          if (lastPosition !== undefined) setExportRange({ from: 1, to: lastPosition });
+        }}
+      />
       {chapters.isError && (
         <p role="alert" className="text-danger">
           {errorMessage(chapters.error)}
         </p>
       )}
+      <ExportsPanel novelId={novel.id} />
       <OverviewBar
         chapters={all}
         ranges={view.ranges}
@@ -189,6 +198,22 @@ function NovelPage({ novel }: { novel: NovelData }) {
             />
           )}
         </>
+      )}
+      {exportRange !== null && (
+        <ExportDialog
+          novelId={novel.id}
+          novelTitle={novel.title ?? novel.host}
+          chapters={all}
+          from={exportRange.from}
+          to={exportRange.to}
+          onClose={() => {
+            setExportRange(null);
+          }}
+          onSubmitted={() => {
+            setExportRange(null);
+            selection.exit();
+          }}
+        />
       )}
     </div>
   );

@@ -148,4 +148,22 @@ describe('NovelHeader', () => {
     const dialog = screen.getByRole('dialog', { name: 'Delete novel' });
     expect(within(dialog).getByText(/The Ninth Cartographer/)).toBeInTheDocument();
   });
+
+  describe('Export EPUB… in More', () => {
+    it('calls onExport', async () => {
+      const onExport = vi.fn();
+      renderWithProviders(
+        <NovelHeader novel={makeNovel({ total_pages: 5 })} onExport={onExport} />,
+      );
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Export EPUB…' }));
+      expect(onExport).toHaveBeenCalledOnce();
+    });
+
+    it('is disabled with zero chapters', async () => {
+      renderWithProviders(<NovelHeader novel={makeNovel({ total_pages: 0 })} onExport={vi.fn()} />);
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      expect(screen.getByRole('button', { name: 'Export EPUB…' })).toBeDisabled();
+    });
+  });
 });
