@@ -169,13 +169,24 @@ CREATE TABLE exports (
     chapter_to   INTEGER NOT NULL,
     mime         TEXT NOT NULL,                  -- e.g. 'application/epub+zip'
     filename     TEXT NOT NULL,                  -- '<Title> Chapters <from>-<to>.<ext>'
-    storage_key  TEXT NOT NULL UNIQUE,
-    size_bytes   INTEGER NOT NULL CHECK (size_bytes >= 0),
+    state        TEXT NOT NULL DEFAULT 'waiting'
+                 CHECK (state IN ('waiting', 'building', 'ready', 'failed')),
+    error        TEXT,                           -- build failure message, 'failed' only
+    storage_key  TEXT UNIQUE,                    -- set when ready
+    size_bytes   INTEGER CHECK (size_bytes >= 0),-- set when ready
+    waited       INTEGER NOT NULL DEFAULT 0 CHECK (waited IN (0, 1)), -- range was incomplete at request time
+    claimed_by   TEXT,                           -- worker id while building
+    claimed_at   TEXT,                           -- build start, for recovery
     created_at   TEXT NOT NULL,
-    CHECK (chapter_to >= chapter_from)
+    ready_at     TEXT,
+    CHECK (chapter_to >= chapter_from),
+    CHECK ((state = 'ready') = (storage_key IS NOT NULL AND size_bytes IS NOT NULL)),
+    CHECK ((state = 'failed') = (error IS NOT NULL)),
+    CHECK ((state = 'building') = (claimed_by IS NOT NULL AND claimed_at IS NOT NULL))
 ) STRICT;
 
 CREATE INDEX exports_by_novel ON exports (novel_id, created_at);
+CREATE INDEX exports_waiting  ON exports (created_at) WHERE state = 'waiting';
 
 CREATE TABLE push_subscriptions (
     id         TEXT PRIMARY KEY
@@ -250,6 +261,7 @@ GET    /api/v1/novels/{novel_id}/chapters
 PATCH  /api/v1/novels/{novel_id}/chapters
 GET    /api/v1/novels/{novel_id}/exports
 POST   /api/v1/novels/{novel_id}/exports
+DELETE /api/v1/novels/{novel_id}/exports/{export_id}
 POST   /api/v1/push/subscriptions
 DELETE /api/v1/push/subscriptions/{subscription_id}
 GET    /api/v1/events
@@ -311,10 +323,18 @@ chapter_from int
 chapter_to   int
 format       "epub"           v1; later "pdf", "fb2", …
 mime         string           e.g. "application/epub+zip"
-size_bytes   int
-url          string
+state        "waiting" | "building" | "ready" | "failed"
+progress     {downloaded: int, total: int}      chapters of the range downloaded
+blocked      {errors: int[], not_queued: int[]} chapter numbers holding a waiting export back
+error        string | null    only in "failed"
+size_bytes   int | null       set when ready
+url          string | null    set when ready
 created_at   string
+ready_at     string | null
 ```
+
+`progress` and `blocked` are computed from the chapters of the range; `blocked`
+is empty unless the export is `waiting`.
 
 **Chapter selector** (`chapters` field): `int[] | {start: int, end: int}`.
 The range is inclusive. A list must be non-empty; duplicates are ignored; every
@@ -367,13 +387,27 @@ Chapters in any other state are listed in `skipped`. Requesting `downloading`,
 | Route | Request | Response | Errors |
 |---|---|---|---|
 | `GET /novels/{id}/exports` | — | `Export[]` by `created_at` desc | `404` |
-| `POST /novels/{id}/exports` | `{chapters: {start, end}, format?: "epub", chapters_per_book?: int}` | `201 Export[]` (one per book) | `404`, `422` (list selector, unsupported format, or range not fully `downloaded`; `details.missing: int[]`) |
+| `POST /novels/{id}/exports` | `{chapters: {start, end}, format?: "epub"}` | `201 Export`; an identical export (same range and format) that is still `waiting` or `building` is returned instead with `200` | `404`, `422` (list selector, unsupported format) |
+| `DELETE /novels/{id}/exports/{export_id}` | — | `204`; only for `waiting` exports | `404`, `409` (already building or finished) |
 
-`format` defaults to `"epub"`, the only format in v1. Formats live in a registry
-in `exporter` mapping `format → (mime, extension, builder)`; `Export.format` is
-derived from the stored `mime` through that registry, so adding PDF or FB2 later
-needs no schema change. `chapters_per_book` defaults to the full range. Exports read only the database
-and the cover, so they need no lease and can run while the worker is busy.
+- One export is one file. Several books are several exports with their own
+  ranges; there is no chapters-per-book option.
+- `POST` is asynchronous. In one transaction it moves every chapter of the range
+  that is `not_requested` or `error` to `pending` (same rules and changes as
+  `PATCH /chapters`) and creates the export in `waiting`, with `waited = 1` if
+  any chapter of the range was not yet `downloaded`.
+- The worker builds it once every chapter of the range is `downloaded` (§6.5).
+  If the range was already complete, that happens on the worker's next pass.
+- A `waiting` export never fails because of chapters. If chapters of the range
+  are in `error` or were dequeued (`not_requested`), it stays `waiting` and
+  reports them in `blocked`; re-queuing them lets it continue.
+- `DELETE` cancels a waiting export and removes its row; it does not dequeue
+  the chapters it queued.
+- `format` defaults to `"epub"`, the only format in v1. Formats live in a
+  registry in `exporter` mapping `format → (mime, extension, accepted image
+  types, builder)`; `Export.format` is derived from the stored `mime` through
+  that registry, so adding PDF or FB2 later needs no schema change.
+- Every state change of an export appends an `export` change (SSE).
 
 ### 5.6 Settings and push
 
@@ -436,6 +470,9 @@ loop:
     if novel = lease_due_refresh():                  # next_refresh_at <= now, free lease,
         refresh(novel); release_lease(novel)         # oldest next_refresh_at first
         continue
+    if export = claim_ready_export():                # waiting, range fully downloaded,
+        build(export)                                # oldest created_at first (§6.5)
+        continue
     if novel = lease_next_download():                # oldest queued_at with free lease
         batch = claim(novel, BATCH_SIZE)             # lowest numbers → downloading
         for chapter in batch:
@@ -451,12 +488,14 @@ loop:
 
 - Each lease/claim step is one atomic transaction.
 - `recover()` moves `downloading` chapters of novels whose lease expired back to
-  `pending` and clears the lease.
+  `pending` and clears the lease, and moves `building` exports whose
+  `claimed_at` is older than `LEASE_TTL` back to `waiting`.
 - SIGTERM/SIGINT: finish the current chapter, requeue the rest of the batch,
   release the lease, exit 0.
 - Errors in the loop itself (e.g. database locked) are logged, then back off 5 s,
   10 s, 20 s, … capped at `IDLE_SLEEP`.
-- Refreshes take priority over downloads because they are short.
+- Priority: refreshes, then export builds, then downloads. Refreshes and builds
+  are short; downloads are batched.
 
 ### 6.2 Refresh (TOC sync)
 
@@ -501,6 +540,32 @@ refresh(novel):
 3. `chapter_store.put(chapter_id, markdown)`; the chapter row gets `title`,
    `has_images`, `state = downloaded`.
 
+### 6.5 Export builds
+
+```
+claim_ready_export():
+    one transaction: pick the oldest export in 'waiting' whose chapters
+    chapter_from..chapter_to are all 'downloaded'; set state = 'building',
+    claimed_by = me, claimed_at = now; append an export change
+
+build(export):
+    try:
+        data = exporter.build(export.format, novel, chapters of the range, cover)
+        storage.put(key, data, mime, download_name = filename)
+        state = 'ready', storage_key, size_bytes, ready_at = now
+        if export.waited: notifier.notify_export_ready(novel, export)
+    except:
+        state = 'failed', error = '<ExceptionType>: <summary>' (traceback logged)
+    clear claimed_by / claimed_at; append an export change
+```
+
+- Builds read only the database, the cover and static storage; they take no
+  novel lease and can run while chapters of the same novel download.
+- A `failed` export is final; the UI offers "Try again", which creates a new
+  export for the same range.
+- Exports whose range was already complete at request time (`waited = 0`) do
+  not send a push; the user is still on the page.
+
 ## 7. Modules
 
 Package `novelhog`, under `src/novelhog/`.
@@ -519,7 +584,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage` |
 | `exporter` | Format registry (`format → mime, extension, accepted image types, builder`). EPUB: Markdown → XHTML (`markdown-it-py`, raw HTML disabled) → `ebooklib`; cover; inline images extracted to EPUB items and converted per §8.4 |
 | `images` | Pillow helpers: `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)` |
-| `notifier` | `notify_release(novel, numbers)`: sends one Web Push to every subscription via `pywebpush`; deletes subscriptions answered with `404`/`410`; logs other failures, no retry. VAPID key load/generate |
+| `notifier` | `notify_release(novel, numbers)` and `notify_export_ready(novel, export)`: send one Web Push to every subscription via `pywebpush`; delete subscriptions answered with `404`/`410`; log other failures, no retry. VAPID key load/generate |
 | `api` | FastAPI app, routers, SSE, error handlers, static mounts, `sw.js` and manifest |
 | `worker` | Loop, refresh, downloads, signal handling, recovery |
 | `cli` | `novelhog api`, `novelhog worker` |
@@ -613,8 +678,11 @@ The cover goes through the same conversion.
 
 ### 8.6 Push notification
 
-- Payload: `{title: <novel title>, body: "<N> new chapters (<first>–<last>)",
+- New chapters: `{title: <novel title>, body: "<N> new chapters (<first>–<last>)",
   url: <PUBLIC_URL>/novels/<id>, icon: <cover_url or app icon>}`.
+- Export ready (only for exports that had to wait): `{title: <novel title>,
+  body: "<filename> is ready", url: <PUBLIC_URL>/novels/<id>#exports,
+  icon: <cover_url or app icon>}`.
 - The service worker shows it and opens/focuses `url` on click.
 
 ## 9. Configuration
@@ -748,8 +816,31 @@ manifest makes the app installable.
        Download (`not_requested`), Cancel (`pending`), Retry download
        (`error`), none for `downloading`/`downloaded`. Actions use the same
        `PATCH /chapters` call with a one-item list.
-   - Export EPUB… opens a dialog with the selected range and chapters per book.
-   - Exports panel: filename, range, size, date, download link.
+   - **Export dialog** (Export EPUB… in the action bar; dialog on desktop, bottom
+     sheet on phones): one export, one file.
+     - From/To inputs prefilled from the selection's first and last chapter,
+       with a small bar showing the range's chapter states.
+     - Format (EPUB only in v1) and the resulting file name.
+     - If every chapter is downloaded: "110 chapters, all downloaded" and the
+       button **Export**.
+     - Otherwise a calm note "30 chapters will be downloaded first (601–630)"
+       and the button **Download & export**; chapters in `error` are counted
+       there too and re-queued.
+     - Closing after submit shows a toast ("Export queued" or "Exporting…");
+       progress continues in the exports panel.
+   - **Exports panel**: one row per export, newest first: filename, range,
+     state and actions.
+
+     | State | Row shows | Actions |
+     |---|---|---|
+     | `waiting` | progress bar "84 / 110 downloaded" | Cancel |
+     | `waiting`, blocked | "Blocked by 2 errors" / "3 chapters not queued" | Retry / Queue them, Cancel |
+     | `building` | spinner "Building…" | — |
+     | `ready` | size and date | Download |
+     | `failed` | error message | Try again (new export, same range) |
+
+   - Dequeuing chapters (select mode → Cancel queued) that a waiting export
+     needs shows a confirmation naming the export.
 - **Follow toggle**: a pill button with a star icon (`aria-pressed`). Following:
   solid gold star, label "Following". Not following: grey outline star, label
   "Follow". Used on library cards, the novel header and the add dialog.
@@ -833,13 +924,12 @@ details.
 
 ![Chapter details bottom sheet](sketches/phone-chapter-details.png)
 
-**Export dialog, desktop**: valid range, chapters per book, preview of the
-resulting files.
+**Export dialog, desktop**: all chapters downloaded; one file.
 
 ![Export dialog](sketches/export-dialog.png)
 
-**Export sheet, phone, chapters missing**: export disabled; offers to queue the
-missing chapters or shrink the range to the downloaded part.
+**Export sheet, phone, chapters missing**: the missing chapters are downloaded
+first and the export waits for them.
 
 ![Export sheet with missing chapters](sketches/phone-export-missing.png)
 
@@ -902,7 +992,18 @@ desktop chapters, export dialog, phone normal and select mode).
   while the state is `error` and survives pruning.
 - **Notifier (fake sender):** exactly one push per sync with new chapters of a
   followed novel; none for no new chapters, initial import or unfollowed novels;
-  `410` deletes the subscription; VAPID keys stable across restarts.
+  `410` deletes the subscription; VAPID keys stable across restarts; one
+  export-ready push for an export with `waited = 1`, none with `waited = 0`.
+- **Exports (real temporary SQLite):** `POST` queues `not_requested` and `error`
+  chapters of the range and creates a `waiting` export with the right `waited`;
+  an identical waiting export is returned instead of a duplicate; the worker
+  builds only when the whole range is `downloaded`; `waiting → building →
+  ready` sets storage key, size and `ready_at`; a build exception gives `failed`
+  with a message; `blocked` lists errors and dequeued chapters and the export
+  continues after they are re-queued and downloaded; `DELETE` removes a waiting
+  export, leaves its chapters queued and answers `409` once building; expired
+  `building` claims return to `waiting`; every state change emits an `export`
+  change.
 - **API:** `httpx` against the app with a fake `scraper_adapter`; every route,
   success and each error code, including `503 push_disabled`.
 - **Regression (offline HTML fixtures in the repo):** fanmtl `&gt;` pagination;
