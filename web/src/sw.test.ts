@@ -31,10 +31,11 @@ beforeEach(() => {
     addEventListener: (type: string, handler: Handler) => {
       handlers[type] = handler;
     },
+    location: { origin: 'https://h' },
     registration: { showNotification },
     clients: { matchAll, openWindow },
   };
-  runInNewContext(source, { self });
+  runInNewContext(source, { self, URL });
 });
 
 /** Runs a handler and awaits whatever it passed to event.waitUntil. */
@@ -85,6 +86,13 @@ describe('sw.js', () => {
       await dispatch('notificationclick', { notification });
       expect(notification.close).toHaveBeenCalled();
       expect(openWindow).toHaveBeenCalledWith('https://h/novels/NV1');
+    });
+
+    it('opens the app root instead of a cross-origin url', async () => {
+      await dispatch('notificationclick', {
+        notification: notificationFor('https://evil.example/x'),
+      });
+      expect(openWindow).toHaveBeenCalledWith('https://h/');
     });
 
     it('focuses an open tab on the url without navigating', async () => {

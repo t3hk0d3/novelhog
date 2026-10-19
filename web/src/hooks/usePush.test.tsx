@@ -1,7 +1,7 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { makeSettings } from '../test/fixtures';
 import { fakeBrowser } from '../test/push';
 import { testClient } from '../test/render';
@@ -10,7 +10,7 @@ import { SUBSCRIPTION_ID_KEY, usePush } from './usePush';
 vi.mock('./useLiveEvents', () => ({ useLiveReady: () => true }));
 
 let webpush: Parameters<typeof makeSettings>[0];
-let fetchMock: ReturnType<typeof vi.fn>;
+let fetchMock: Mock<(input: string, init?: RequestInit) => Promise<Response>>;
 
 beforeEach(() => {
   localStorage.clear();
@@ -39,7 +39,7 @@ function mount() {
 }
 
 const calls = (method: string) =>
-  fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === method);
+  fetchMock.mock.calls.filter(([, init]) => init?.method === method);
 
 describe('usePush', () => {
   it('is hidden when webpush is disabled in settings', async () => {
@@ -164,6 +164,30 @@ describe('usePush', () => {
       expect(result.current.status).toBe('blocked');
     });
 
+    it('rolls the browser subscription back when the POST fails', async () => {
+      const browser = fakeBrowser();
+      fetchMock.mockImplementation((input: string, init?: RequestInit) => {
+        if (input.endsWith('/settings'))
+          return Promise.resolve(Response.json(makeSettings(webpush)));
+        if (init?.method === 'POST') {
+          return Promise.resolve(
+            Response.json({ error: { code: 'boom', message: 'Boom' } }, { status: 500 }),
+          );
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('off');
+      });
+      await act(async () => {
+        await expect(result.current.subscribe()).rejects.toThrow('Boom');
+      });
+      expect(browser.subscription.unsubscribe).toHaveBeenCalled();
+      expect(result.current.status).toBe('off');
+      expect(localStorage.getItem(SUBSCRIPTION_ID_KEY)).toBeNull();
+    });
+
     it('on InvalidStateError unsubscribes the old subscription and subscribes again', async () => {
       const browser = fakeBrowser();
       browser.pushManager.subscribe.mockRejectedValueOnce(
@@ -196,6 +220,29 @@ describe('usePush', () => {
       expect(calls('DELETE')[0]?.[0]).toBe('/api/v1/subscriptions/SB9');
       expect(localStorage.getItem(SUBSCRIPTION_ID_KEY)).toBeNull();
       expect(result.current.status).toBe('off');
+    });
+
+    it('tolerates a 404 on DELETE as already gone', async () => {
+      const browser = fakeBrowser({ subscribed: true });
+      localStorage.setItem(SUBSCRIPTION_ID_KEY, 'SB9');
+      fetchMock.mockImplementation((input: string, init?: RequestInit) => {
+        if (input.endsWith('/settings'))
+          return Promise.resolve(Response.json(makeSettings(webpush)));
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(
+            Response.json({ error: { code: 'not_found', message: 'Gone' } }, { status: 404 }),
+          );
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('on');
+      });
+      await act(() => result.current.unsubscribe());
+      expect(browser.subscription.unsubscribe).toHaveBeenCalled();
+      expect(result.current.status).toBe('off');
+      expect(localStorage.getItem(SUBSCRIPTION_ID_KEY)).toBeNull();
     });
 
     it('looks the id up by re-posting the endpoint when none is stored', async () => {

@@ -150,7 +150,13 @@ export function usePush(): Push {
         return;
       }
       const subscription = await browserSubscribe(vapidKey);
-      writeStoredId(await register(subscription));
+      try {
+        writeStoredId(await register(subscription));
+      } catch (error) {
+        // Do not leave a browser subscription the server does not know: the bell would show "on".
+        await subscription.unsubscribe().catch(() => false);
+        throw error;
+      }
       setSubscribed(true);
     } finally {
       setBusy(false);

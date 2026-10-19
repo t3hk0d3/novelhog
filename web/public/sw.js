@@ -4,7 +4,8 @@
 self.addEventListener('push', (event) => {
   let message = {};
   try {
-    message = event.data ? event.data.json() : {};
+    const parsed = event.data ? event.data.json() : {};
+    if (parsed && typeof parsed === 'object') message = parsed;
   } catch {
     // a push without a JSON payload still shows a generic notification
   }
@@ -20,8 +21,17 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = event.notification.data && event.notification.data.url;
-  if (!url) return;
+  const requested = event.notification.data && event.notification.data.url;
+  if (!requested) return;
+  // Only same-origin urls are opened; anything else falls back to the app root.
+  let target = new URL('/', self.location.origin);
+  try {
+    const parsed = new URL(requested, self.location.origin);
+    if (parsed.origin === target.origin) target = parsed;
+  } catch {
+    // unparsable url: keep the root
+  }
+  const url = target.href;
   const withoutHash = (value) => value.split('#')[0];
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (windows) => {
