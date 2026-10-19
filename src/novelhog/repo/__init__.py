@@ -5,6 +5,7 @@ from datetime import datetime
 
 from novelhog.repo import db
 from novelhog.repo.chapters import Chapters
+from novelhog.repo.contents import Contents
 from novelhog.repo.context import RepoContext
 from novelhog.repo.db import Busy, Revisions, SchemaOutdated
 from novelhog.repo.events import Events
@@ -12,6 +13,7 @@ from novelhog.repo.hosts import Hosts
 from novelhog.repo.novels import Novels
 from novelhog.repo.settings import Settings
 from novelhog.repo.types import utcnow
+from novelhog.repo.work import Work
 
 __all__ = ["Busy", "Repo", "Revisions", "SchemaOutdated", "utcnow"]
 
@@ -37,10 +39,12 @@ class Repo:
             refresh_min_interval=refresh_min_interval,
         )
         self.chapters = Chapters(self.context)
+        self.contents = Contents(self.context)
         self.events = Events(self.context)
         self.hosts = Hosts(self.context)
         self.novels = Novels(self.context)
         self.settings = Settings(self.context)
+        self.work = Work(self.context)
 
     def migrate(self) -> str:
         """Apply pending migrations and return the head revision."""
