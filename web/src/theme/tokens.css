@@ -1,0 +1,83 @@
+/* Design tokens for both themes (spec section 10). System follows the OS unless
+   data-theme="light" | "dark" is set on <html>. */
+:root {
+  color-scheme: light;
+  --page: #f6f7f9;
+  --surface: #ffffff;
+  --ink: #18202a;
+  --ink-muted: #556070;
+  --line: #dde2e9;
+  --accent: #1f5fae;
+  --accent-ink: #ffffff;
+  --gold: #b7791f;
+
+  --status-not-requested-tab: #e8ebef;
+  --status-not-requested-icon: #6b7685;
+  --status-pending-tab: #dce9f8;
+  --status-pending-icon: #1f5fae;
+  --status-downloading-tab: #f2b13c;
+  --status-downloading-icon: #3a2600;
+  --status-downloaded-tab: #dce9f8;
+  --status-downloaded-icon: #1f5fae;
+  --status-error-tab: #c62f2f;
+  --status-error-icon: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --page: #0f141a;
+    --surface: #161d26;
+    --ink: #e3e8ef;
+    --ink-muted: #9aa7b8;
+    --line: #26303c;
+    --accent: #7fb0f0;
+    --accent-ink: #0f141a;
+    --gold: #e7b04a;
+
+    --status-not-requested-tab: #232c37;
+    --status-not-requested-icon: #98a4b3;
+    --status-pending-tab: #1c2f47;
+    --status-pending-icon: #7fb0f0;
+    --status-downloading-tab: #d99a2b;
+    --status-downloading-icon: #1f1400;
+    --status-downloaded-tab: #1c2f47;
+    --status-downloaded-icon: #7fb0f0;
+    --status-error-tab: #d9534f;
+    --status-error-icon: #ffffff;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #0f141a;
+  --surface: #161d26;
+  --ink: #e3e8ef;
+  --ink-muted: #9aa7b8;
+  --line: #26303c;
+  --accent: #7fb0f0;
+  --accent-ink: #0f141a;
+  --gold: #e7b04a;
+
+  --status-not-requested-tab: #232c37;
+  --status-not-requested-icon: #98a4b3;
+  --status-pending-tab: #1c2f47;
+  --status-pending-icon: #7fb0f0;
+  --status-downloading-tab: #d99a2b;
+  --status-downloading-icon: #1f1400;
+  --status-downloaded-tab: #1c2f47;
+  --status-downloaded-icon: #7fb0f0;
+  --status-error-tab: #d9534f;
+  --status-error-icon: #ffffff;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-gold: var(--gold);
+}

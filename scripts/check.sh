@@ -19,4 +19,5 @@ gate "ruff check" uv run ruff check
 gate "mypy --strict" uv run mypy --strict src tests tools
 gate "lint-imports" uv run lint-imports
 gate "pytest" uv run pytest
+gate "web check" npm --prefix web run check
 echo "All gates passed."

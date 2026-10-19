@@ -1,0 +1,13 @@
+@import 'tailwindcss';
+@import './theme/tokens.css';
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+}
