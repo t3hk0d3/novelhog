@@ -15,6 +15,7 @@ from html.parser import HTMLParser
 from typing import NamedTuple
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.images import FetchedImage
@@ -69,7 +70,7 @@ _BLOCK_TAGS = frozenset(
 )
 _MAX_DEPTH = 200
 _BREAK = "\0"  # in-flight hard line break; NUL never survives strip_xml_invalid
-_IMAGE_UNAVAILABLE = "[image unavailable]"
+_IMAGE_UNAVAILABLE = "[image unavailable]"  # written escaped, so it never forms a link
 _MAX_WARNING_URL = 200
 _MAX_START = 999_999_999
 _MAX_REPAIR_RUNS = 30
@@ -77,6 +78,8 @@ _MAX_REPAIR_RUNS = 30
 _HTML_SPACE = re.compile(r"[ \t\r\n\f]+")
 _METACHARS = re.compile(r"[\\*_#>\[\]`|~<&]")
 _BREAK_SPACES = re.compile(f" ?{_BREAK}[ {_BREAK}]*")
+_SPACES = re.compile(" +")
+_LINE_EDGE_SPACES = re.compile(" *\n *")
 _LINE_START = re.compile(r"^(?:([-+=])|(\d{1,9})([.)]))")
 
 
@@ -166,11 +169,15 @@ class _Block(NamedTuple):
 
 @dataclass(frozen=True)
 class _Seg:
-    """A run of inline content: raw text (``_BREAK`` is a hard break) or rendered Markdown."""
+    """A run of inline content: raw text (``_BREAK`` is a hard break) or rendered Markdown.
+
+    For rendered Markdown, ``plain`` is the text a reader sees (an image's alt text).
+    """
 
     text: str
     styles: frozenset[str] = frozenset()
     rendered: bool = False
+    plain: str = ""
 
 
 def _escape(text: str) -> str:
@@ -368,19 +375,36 @@ _VERIFIER = MarkdownIt("zero").enable(
 _TEXT_TOKENS = frozenset({"text", "text_special"})
 
 
-def _renders_without_literal_markers(markdown: str, segs: list[_Seg]) -> bool:
-    """Check by rendering: text carries exactly the asterisks of the source, none of ours.
+def _normalise_spaces(text: str) -> str:
+    return _LINE_EDGE_SPACES.sub("\n", _SPACES.sub(" ", text)).strip(" ")
 
-    Emphasis markers only ever add characters, so text is never lost; a marker that CommonMark
-    does not turn into emphasis stays visible as a literal asterisk in a text token.
+
+def _expected_text(segs: list[_Seg]) -> str:
+    """The paragraph's text as a reader should see it, hard breaks as newlines."""
+    text = "".join(seg.plain if seg.rendered else seg.text for seg in segs)
+    return _normalise_spaces(text.replace(_BREAK, "\n")).strip("\n")
+
+
+def _shown_text(tokens: list[Token]) -> str:
+    parts: list[str] = []
+    for token in tokens:
+        if token.type in _TEXT_TOKENS:
+            parts.append(token.content)
+        elif token.type in {"hardbreak", "softbreak"}:
+            parts.append("\n")
+        elif token.type == "image":
+            parts.append(_shown_text(token.children or []))
+    return "".join(parts)
+
+
+def _renders_as_text(markdown: str, expected: str) -> bool:
+    """Check by rendering: the reader sees exactly the expected text, no literal markers.
+
+    Any marker CommonMark does not turn into emphasis shows up as an extra asterisk, and any
+    text swallowed by other syntax (a link, raw HTML) goes missing, so either fails the check.
     """
-    expected = sum(seg.text.count("*") for seg in segs if not seg.rendered)
-    shown = 0
-    for token in _VERIFIER.parseInline(markdown):
-        for child in token.children or []:
-            if child.type in _TEXT_TOKENS:
-                shown += child.content.count("*")
-    return shown == expected
+    shown = "".join(_shown_text(token.children or []) for token in _VERIFIER.parseInline(markdown))
+    return _normalise_spaces(shown) == expected
 
 
 def _build_paragraph(segs: list[_Seg], state: _Emphasis) -> str:
@@ -399,17 +423,18 @@ def _paragraph(segs: list[_Seg]) -> str | None:
         return None
     if state.written == 0:
         return text
-    if _renders_without_literal_markers(text, segs):
+    expected = _expected_text(segs)
+    if _renders_as_text(text, expected):
         return text
     runs = state.run_count
     if runs <= _MAX_REPAIR_RUNS:
         for run_id in range(runs):
             candidate = _build_paragraph(segs, _Emphasis(disabled=frozenset({run_id})))
-            if _renders_without_literal_markers(candidate, segs):
+            if _renders_as_text(candidate, expected):
                 return candidate
         for upto in range(2, runs + 1):
             candidate = _build_paragraph(segs, _Emphasis(disabled=frozenset(range(upto))))
-            if _renders_without_literal_markers(candidate, segs):
+            if _renders_as_text(candidate, expected):
                 return candidate
     return _build_paragraph(segs, _Emphasis(all_off=True))
 
@@ -463,7 +488,8 @@ class _Renderer:
             elif tag == "br":
                 buffer.append(_Seg(_BREAK, styles))
             elif tag == "img":
-                buffer.append(_Seg(self._image(node), styles, rendered=True))
+                markdown, plain = self._image(node)
+                buffer.append(_Seg(markdown, styles, rendered=True, plain=plain))
             elif tag in {"ul", "ol"}:
                 self._flush(out, buffer)
                 block = self._list(node, styles)
@@ -486,17 +512,18 @@ class _Renderer:
         except Exception:  # noqa: BLE001 - a failing fetcher must not fail the chapter
             return None
 
-    def _image(self, node: _Element) -> str:
+    def _image(self, node: _Element) -> tuple[str, str]:
+        """Return the image's Markdown and the text a reader sees in its place."""
         source = node.attrs.get("src", "").strip()
         fetched = self._fetch(source) if source else None
         if fetched is None:
             shown = source[:_MAX_WARNING_URL] or "(no src)"
             self.warnings.append(f"image unavailable: {shown}")
-            return _IMAGE_UNAVAILABLE
+            return _escape(_IMAGE_UNAVAILABLE), _IMAGE_UNAVAILABLE
         self.has_images = True
-        alt = _escape(_HTML_SPACE.sub(" ", node.attrs.get("alt", "")).strip())
+        alt = _HTML_SPACE.sub(" ", node.attrs.get("alt", "")).strip()
         encoded = base64.b64encode(fetched.data).decode("ascii")
-        return f"![{alt}](data:{fetched.mime};base64,{encoded})"
+        return f"![{_escape(alt)}](data:{fetched.mime};base64,{encoded})", alt
 
     def _list(self, node: _Element, styles: frozenset[str]) -> _Block | None:
         ordered = node.tag == "ol"
