@@ -8,6 +8,10 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - `snake_case` for modules, functions and variables; `PascalCase` for classes.
 - Tests are named `test_<unit>__<behaviour>`, e.g. `test_claim_batch__skips_claimed_novel`.
 - No bare `except:`.
+- Every module starts with a module docstring.
+- Public functions are fully typed.
+- Domain errors (`NotFound`, `Conflict`, `ValidationFailed`) are raised in `domain` and `repo`
+  and mapped to HTTP responses only in `api`.
 - Error codes are `snake_case`.
 - Wire timestamps are RFC 3339 UTC with milliseconds and `Z`.
 - `repo` never logs: it returns reports and raises domain errors.
@@ -40,7 +44,11 @@ docs/superpowers/specs/
 
 - Every test directory has an `__init__.py` (module names repeat across `unit`, `integration`
   and `api`).
-- Each test file carries the BDD effects of its unit, one test per effect.
+- One test per BDD effect, grouped in classes named after the scenario, for example
+  `class TestClaimBatch__OnClaimedNovel`.
+- Fixtures live in `tests/conftest.py`.
+- Integration tests use a real temporary database (SQLite by default, PostgreSQL via
+  `NOVELHOG_TEST_DATABASE_URL`). They never mock `repo`.
 
 ## Import boundaries
 
@@ -52,3 +60,7 @@ contract (`tools/importlinter_contracts.py`) checks direct imports only.
 
 `scripts/check.sh` runs `ruff format --check`, `ruff check`, `mypy --strict src tests tools`,
 `lint-imports` and `pytest`, and exits non-zero at the first failing gate.
+
+## Commits
+
+`type: summary`, where `type` is one of `feat`, `fix`, `test`, `docs`, `chore`, `refactor`.

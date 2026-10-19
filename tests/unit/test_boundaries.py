@@ -73,8 +73,6 @@ class TestApiIsPure__WhenApiImportsWorkerOnlyModule:
     def test_lint_imports__fails_naming_the_forbidden_import(
         self, project: Path, forbidden: str
     ) -> None:
-        if forbidden == "novelhog.notifications.dispatcher":
-            _add_module(project, forbidden, '"""dispatcher."""\n')
         _add_module(project, "novelhog.api.offender", f"import {forbidden}\n")
         result = _run_lint_imports(project)
         assert result.returncode != 0
