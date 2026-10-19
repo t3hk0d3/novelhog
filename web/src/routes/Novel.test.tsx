@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +28,7 @@ function mount(novel: Novel, chapters: Chapter[]) {
     if (input.includes('/chapters')) {
       return Promise.resolve(Response.json({ items: chapters, total: chapters.length }));
     }
+    if (input.endsWith('/exports')) return Promise.resolve(Response.json([]));
     if (method === 'PATCH') return Promise.resolve(Response.json({ ...novel, new_pages: 0 }));
     return Promise.resolve(Response.json(novel));
   });
@@ -170,6 +171,107 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
     it('shows the import error when the import failed', async () => {
       mount(makeNovel({ import_error: 'timeout' }), []);
       expect(await screen.findByText('Import failed: timeout')).toBeInTheDocument();
+    });
+  });
+
+  describe('select mode', () => {
+    it('Select enters it, announces it and shows the toolbar and action bar', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      expect(screen.queryByRole('region', { name: 'Selection actions' })).toBeNull();
+      await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+      expect(screen.getByText('Select mode, 0 selected')).toBeInTheDocument();
+      expect(screen.getByText('0 selected', { selector: 'p' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Selection actions' })).toBeInTheDocument();
+      expect(screen.getByRole('listbox')).toBeInTheDocument();
+    });
+
+    it('Done and Escape leave it and clear the selection', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+      await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
+      expect(screen.getAllByText(/1 selected/).length).toBeGreaterThan(0);
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.queryByRole('listbox')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: 'Select' }));
+      expect(screen.getByText('0 selected', { selector: 'p' })).toBeInTheDocument();
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('listbox')).toBeNull();
+    });
+
+    it('Select all covers the rows matching the search, not the hidden ones', async () => {
+      mount(makeNovel({ total_pages: 4 }), [
+        ...makeChapters(3),
+        makeChapter(4, { title: 'The Storm' }),
+      ]);
+      await userEvent.type(await screen.findByRole('searchbox'), 'page');
+      await userEvent.click(screen.getByRole('button', { name: 'Select' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Select all' }));
+      expect(screen.getByText('3 selected', { selector: 'p' })).toBeInTheDocument();
+    });
+
+    it('keeps a selected chapter selected when a live event updates it', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+      await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
+      act(() => {
+        FakeEventSource.instances[0]?.emit('chapter', {
+          ...makeChapter(2, { state: 'pending' }),
+          novel_id: 'NV000000000001',
+        });
+      });
+      const row = await screen.findByRole('option', { name: 'Page 2, Pending' });
+      expect(row).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByText(/2–2 · 1 queued/)).toBeInTheDocument();
+    });
+
+    it('a bulk action sends one PATCH, shows the toast and leaves select mode', async () => {
+      const fetchMock = mount(
+        makeNovel({ total_pages: 3 }),
+        makeChapters(3, { 2: 'not_requested' }),
+      );
+      await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+      await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(Response.json({ updated: [2], skipped: [] })),
+      );
+      await userEvent.click(screen.getByRole('button', { name: 'Download' }));
+      expect(await screen.findByText('Queued 1 · skipped 0')).toBeInTheDocument();
+      expect(screen.queryByRole('listbox')).toBeNull();
+      expect(urlsOf(fetchMock).at(-1)).toBe('PATCH /api/v1/novels/NV000000000001/chapters');
+    });
+
+    describe('focus', () => {
+      it('moves to the selection heading on entering and back to Select on Done', async () => {
+        mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+        await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+        expect(screen.getByText('0 selected', { selector: 'p' })).toHaveFocus();
+        await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+        expect(screen.getByRole('button', { name: 'Select' })).toHaveFocus();
+      });
+
+      it('moves to the row that started the mode and returns to it on Escape', async () => {
+        mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+        await screen.findByText('Page 2');
+        fireEvent.click(screen.getByRole('link', { name: /^Page 2,/ }), { shiftKey: true });
+        expect(screen.getByRole('option', { name: /^Page 2,/ })).toHaveFocus();
+        await userEvent.keyboard('{Escape}');
+        expect(screen.getByRole('link', { name: /^Page 2,/ })).toHaveFocus();
+      });
+
+      it('returns to the Select button after a finished bulk action', async () => {
+        const fetchMock = mount(
+          makeNovel({ total_pages: 3 }),
+          makeChapters(3, { 2: 'not_requested' }),
+        );
+        await userEvent.click(await screen.findByRole('button', { name: 'Select' }));
+        await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
+        fetchMock.mockImplementationOnce(() =>
+          Promise.resolve(Response.json({ updated: [2], skipped: [] })),
+        );
+        await userEvent.click(screen.getByRole('button', { name: 'Download' }));
+        await screen.findByText('Queued 1 · skipped 0');
+        expect(screen.getByRole('button', { name: 'Select' })).toHaveFocus();
+      });
     });
   });
 });
