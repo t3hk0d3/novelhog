@@ -1,7 +1,9 @@
 """Novels: create, read, update, sync requests and delete (spec sections 4 and 5.3)."""
 
-from datetime import datetime
-from typing import Any
+import random
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Connection, and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -10,9 +12,10 @@ from novelhog import ids
 from novelhog.domain import payloads
 from novelhog.domain.errors import Conflict, NotFound, ServiceUnavailable, ValidationFailed
 from novelhog.domain.payloads import NovelView
+from novelhog.domain.refresh import jittered, next_interval
 from novelhog.domain.text import strip_xml_invalid
 from novelhog.domain.urls import host_of, normalize_toc_url, static_url
-from novelhog.repo import db, events, hosts, trash
+from novelhog.repo import claims, db, events, hosts, trash
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import (
     chapter_contents,
@@ -20,6 +23,9 @@ from novelhog.repo.schema import (
     exports,
 )
 from novelhog.repo.schema import novels as novels_table
+
+if TYPE_CHECKING:
+    from novelhog.repo.chapters import TocDiff
 
 _counters = (
     select(
@@ -45,6 +51,52 @@ _counters = (
     .group_by(chapters.c.novel_id)
     .subquery("counters")
 )
+
+
+@dataclass(frozen=True)
+class NovelClaim:
+    """A novel claimed for a TOC sync, with what the sync needs to know about it."""
+
+    novel_id: str
+    host: str
+    toc_url: str
+    title: str | None
+    cover_key: str | None
+    followed: bool
+    initial: bool
+    refresh_interval: int
+
+
+@dataclass(frozen=True)
+class SyncSucceeded:
+    """A fetched TOC. `title`, `language` and `cover_key` are None when nothing was found."""
+
+    urls: list[str]
+    title: str | None
+    language: str | None
+    cover_key: str | None
+    min_s: int
+    max_s: int
+    rng: random.Random
+
+
+@dataclass(frozen=True)
+class SyncFailed:
+    """A failed sync: `import_error` is set on the initial import only; the schedule is given."""
+
+    import_error: str | None
+    interval: int
+    next_at: datetime
+
+
+SyncOutcome = SyncSucceeded | SyncFailed
+
+
+@dataclass(frozen=True)
+class FinishReport:
+    """What `finish_sync` changed (an empty diff after a failure)."""
+
+    diff: TocDiff
 
 
 def _views(conn: Connection, where: Any, *, now: datetime, static_base_url: str) -> list[NovelView]:
@@ -272,6 +324,126 @@ class Novels:
             keys = [k for k in dict.fromkeys([novel_row.cover_key, *ready_keys]) if k is not None]
             trash.add(conn, keys, now)
             events.append(conn, novel_id, novel_id, payloads.deleted_novel(novel_id), now=now)
+
+    def claim_due_refresh(self, worker_id: str, ttl: int) -> NovelClaim | None:
+        """Claim the available novel with the oldest `next_refresh_at <= now` for `ttl` seconds.
+
+        Appends an `NV` event (`syncing` true). Returns None when nothing is due.
+        """
+        now = self._clock()
+        with db.write(self._engine) as conn:
+            rows = claims.claim(
+                conn,
+                novels_table,
+                eligible=novels_table.c.next_refresh_at <= now,
+                priority=[novels_table.c.next_refresh_at],
+                owner=worker_id,
+                now=now,
+                ttl=timedelta(seconds=ttl),
+                returning=[
+                    novels_table.c.id,
+                    novels_table.c.host,
+                    novels_table.c.toc_url,
+                    novels_table.c.title,
+                    novels_table.c.cover_key,
+                    novels_table.c.followed,
+                    novels_table.c.last_refreshed_at,
+                    novels_table.c.refresh_interval,
+                ],
+            )
+            if not rows:
+                return None
+            row = rows[0]
+            self._emit(conn, row.id, now)
+        return NovelClaim(
+            novel_id=row.id,
+            host=row.host,
+            toc_url=row.toc_url,
+            title=row.title,
+            cover_key=row.cover_key,
+            followed=row.followed,
+            initial=row.last_refreshed_at is None,
+            refresh_interval=row.refresh_interval,
+        )
+
+    def renew_claim(self, novel_id: str, worker_id: str, ttl: int) -> bool:
+        """Extend the sync claim by `ttl` seconds; False once the claim was lost."""
+        now = self._clock()
+        with db.write(self._engine) as conn:
+            renewed = claims.renew(
+                conn,
+                novels_table,
+                [novel_id],
+                owner=worker_id,
+                now=now,
+                ttl=timedelta(seconds=ttl),
+            )
+        return renewed == 1
+
+    def finish_sync(
+        self, novel_id: str, worker_id: str, outcome: SyncOutcome
+    ) -> FinishReport | None:
+        """Apply a sync result and release the claim in one fenced transaction (spec 6.2).
+
+        Lock order: the novel row, the claim fence, the chapter diff, then the events. Returns
+        None, having changed nothing, when the novel is gone or the claim was lost.
+        """
+        from novelhog.repo import chapters as chapter_repo  # noqa: PLC0415  (import cycle)
+
+        now = self._clock()
+        with db.write(self._engine) as conn:
+            if not lock_novel(conn, novel_id):
+                return None
+            fenced = claims.fenced_update(
+                conn, novels_table, novel_id, owner=worker_id, now=now, values={"updated_at": now}
+            )
+            if not fenced:
+                return None
+            row = conn.execute(select(novels_table).where(novels_table.c.id == novel_id)).one()
+            if isinstance(outcome, SyncSucceeded):
+                initial = row.last_refreshed_at is None
+                diff = chapter_repo.apply_toc(
+                    conn, novel_id, outcome.urls, initial=initial, followed=row.followed, now=now
+                )
+                interval = next_interval(
+                    row.refresh_interval,
+                    found_new=bool(diff.new),
+                    failed=False,
+                    min_s=outcome.min_s,
+                    max_s=outcome.max_s,
+                )
+                due = now + timedelta(seconds=jittered(interval, outcome.rng))
+                values: dict[str, object] = {
+                    "title": row.title if row.title is not None else outcome.title,
+                    "language": outcome.language if outcome.language else row.language,
+                    "cover_key": outcome.cover_key if outcome.cover_key else row.cover_key,
+                    "import_error": None,
+                    "last_refreshed_at": now,
+                    "refresh_interval": interval,
+                }
+            else:
+                diff = chapter_repo.TocDiff(new=[], moved=[], removed=[], returned=[])
+                due = outcome.next_at
+                values = {"refresh_interval": outcome.interval}
+                if outcome.import_error is not None:
+                    values["import_error"] = outcome.import_error
+            values |= {
+                "next_refresh_at": now if row.sync_requested else due,
+                "sync_requested": False,
+                "updated_at": now,
+            }
+            claims.release(
+                conn, novels_table, [novel_id], owner=worker_id, now=now, extra_set=values
+            )
+            events.emit_novel_change(
+                conn,
+                novel_id,
+                diff.changed_ids,
+                now=now,
+                static_base_url=self._static_base_url,
+                released=diff.new,
+            )
+        return FinishReport(diff)
 
     def list(self) -> list[NovelView]:
         """Return all novels, newest first."""
