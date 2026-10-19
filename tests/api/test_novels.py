@@ -1,5 +1,7 @@
 """Tests for the hosts and novels routes."""
 
+import secrets
+
 from fastapi.testclient import TestClient
 
 from novelhog.repo import Repo
@@ -96,6 +98,15 @@ class TestCreateNovel__WithInvalidUrl:
     def test_create_novel__rejects_non_default_port(self, client: TestClient, repo: Repo) -> None:
         repo.hosts.publish(["example.org"])
         response = client.post("/api/v1/novels", json={"toc_url": "https://example.org:8443/n"})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_url"
+
+
+class TestCreateNovel__WithOverLongUrl:
+    def test_create_novel__returns_422_invalid_url(self, client: TestClient, repo: Repo) -> None:
+        repo.hosts.publish(["example.org"])
+        url = "https://example.org/" + secrets.token_hex(1500)
+        response = client.post("/api/v1/novels", json={"toc_url": url})
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "invalid_url"
 

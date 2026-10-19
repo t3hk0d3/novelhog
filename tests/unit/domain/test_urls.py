@@ -138,3 +138,26 @@ class TestStaticUrl__OnSpecialCharacters:
         assert not any(c in last for c in "#? ")
         assert unquote(tail) == f"exports/NV1/EX1/{name}"
         assert tail.count("/") == 3
+
+
+class TestNormalizeUrl__OnLength:
+    @staticmethod
+    def _url_of_length(length: int) -> str:
+        prefix = "https://example.com/"
+        return prefix + "a" * (length - len(prefix))
+
+    def test_normalize_url__accepts_exactly_the_maximum(self) -> None:
+        assert len(normalize_url(self._url_of_length(2048))) == 2048
+
+    def test_normalize_url__rejects_one_over_with_invalid_url(self) -> None:
+        with pytest.raises(ValidationFailed) as caught:
+            normalize_url(self._url_of_length(2049))
+        assert caught.value.code == "invalid_url"
+
+    def test_normalize_toc_url__rejects_over_long_url(self) -> None:
+        with pytest.raises(ValidationFailed):
+            normalize_toc_url(self._url_of_length(2049))
+
+    def test_normalize_url__measures_after_normalisation(self) -> None:
+        url = self._url_of_length(2048) + "#" + "f" * 100
+        assert len(normalize_url(url)) == 2048
