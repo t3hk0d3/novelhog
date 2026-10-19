@@ -296,15 +296,35 @@ CREATE TABLE consumers (                         -- durable readers of the event
 | partial indexes (`WHERE …`) | `Index(…, sqlite_where=…, postgresql_where=…)` |
 | `"end"` and other reserved words | avoided (already `chapter_from`/`chapter_to`) |
 
-**Locking** is the one behaviour that differs by database and lives only in
-`repo/locking.py`. Every lease, claim and consumer step uses
-`locking.claim_rows(...)`:
+**Claims** use optimistic compare-and-set updates, identical on both
+databases; there is no `SELECT … FOR UPDATE`. Every lease, claim and consumer
+step goes through `repo/claims.py`, which issues one statement of this shape:
 
-- SQLite: the step runs in a `BEGIN IMMEDIATE` transaction, which serialises
-  writers.
-- Postgres: the candidate rows are selected with `FOR UPDATE SKIP LOCKED`, so
-  several workers claim different novels, chapters, exports or consumers
-  concurrently without blocking each other.
+```
+UPDATE <table>
+SET <owner> = :me, <claimed or expiry column> = :now [, state = …]
+WHERE id IN (SELECT id FROM <table>
+             WHERE <eligible> AND (<owner> IS NULL OR <expired>)
+             ORDER BY <priority> LIMIT :n)
+  AND (<owner> IS NULL OR <expired>)
+RETURNING <columns>
+```
+
+- The outer `WHERE` repeats the "free or expired" condition. SQLite executes
+  write statements one at a time; Postgres (`READ COMMITTED`) re-evaluates the
+  outer `WHERE` against the newest row version after a concurrent update. Either
+  way a row is claimed by exactly one worker, and a losing worker's statement
+  matches nothing.
+- `RETURNING` tells the caller which rows it now owns.
+- A single-row claim that returns nothing while eligible rows remain is retried
+  up to 3 times, picking the next candidate.
+- Expiry compares against the claiming process's clock; hosts are assumed to be
+  NTP-synchronised, which is safe with `LEASE_TTL` measured in minutes.
+- Ownership lives only in these columns; no database lock is held while work is
+  done, so a slow download never blocks another worker.
+- On SQLite, write transactions start with `BEGIN IMMEDIATE` so a transaction
+  that reads before it writes waits for the write lock instead of failing with
+  "database is locked". This is a connection setting, not part of claiming.
 
 Notes:
 
@@ -653,7 +673,7 @@ loop:
     sleep(IDLE_SLEEP)
 ```
 
-- Each lease/claim step is one atomic transaction through `repo/locking.py` (SQLite: `BEGIN IMMEDIATE`; Postgres: `FOR UPDATE SKIP LOCKED`, §4).
+- Each lease/claim step is one compare-and-set `UPDATE … RETURNING` through `repo/claims.py` (§4), in its own transaction.
 - `publish_hosts()` replaces the `hosts` table with the hosts in the installed
   scraper's decode guide (one transaction). Novels whose host is no longer
   listed keep working until a sync fails.
@@ -822,7 +842,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
-| `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `locking.py` (dialect-specific claiming), Alembic migrations, leases, claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `claims.py` (compare-and-set claiming), Alembic migrations, leases, claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
@@ -1305,9 +1325,10 @@ desktop chapters, export dialog, phone normal and select mode).
 - **Database portability:** every repository and integration test takes its
   database from `NOVELHOG_TEST_DATABASE_URL` (default: a temporary SQLite file).
   CI runs the suite twice, on SQLite and on PostgreSQL 16 (service container);
-  `scripts/test_pg.sh` does the same locally with Docker. Locking tests check
-  that two workers never claim the same row on either database, and that on
-  Postgres they claim different rows concurrently without waiting.
+  `scripts/test_pg.sh` does the same locally with Docker. Claim tests check
+  on both databases that concurrent workers never claim the same row, that a
+  worker losing a race retries and gets the next candidate, and that an expired
+  claim is taken over.
 - **Migrations:** `alembic upgrade head` on an empty database produces the same
   schema as `schema.py` (Alembic autogenerate reports no differences) on both
   databases.
