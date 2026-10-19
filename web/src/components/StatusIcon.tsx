@@ -1,6 +1,6 @@
 import type { ChapterState } from '../api/client';
 
-const LABELS: Record<ChapterState, string> = {
+export const STATE_LABELS: Record<ChapterState, string> = {
   not_requested: 'Not requested',
   pending: 'Pending',
   downloading: 'Downloading',
@@ -73,7 +73,7 @@ export function StatusIcon({ state }: { state: ChapterState }) {
       >
         <Glyph state={state} />
       </svg>
-      <span className="sr-only">{LABELS[state]}</span>
+      <span className="sr-only">{STATE_LABELS[state]}</span>
     </>
   );
 }
