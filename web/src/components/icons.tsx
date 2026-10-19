@@ -92,3 +92,39 @@ export function ExternalLinkIcon() {
     </Svg>
   );
 }
+
+const BELL_BODY = 'M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7M10 20a2 2 0 0 0 4 0';
+
+export function BellIcon() {
+  return (
+    <Svg name="bell">
+      <path d={BELL_BODY} />
+    </Svg>
+  );
+}
+
+export function BellFilledIcon() {
+  return (
+    <Svg name="bell-filled">
+      <path d={BELL_BODY} fill="currentColor" />
+    </Svg>
+  );
+}
+
+/** A bell with a diagonal strike-through. */
+export function BellOffIcon() {
+  return (
+    <Svg name="bell-off">
+      <path d={BELL_BODY} />
+      <path d="M3 3l18 18" />
+    </Svg>
+  );
+}
+
+export function CloseIcon() {
+  return (
+    <Svg name="close">
+      <path d="M6 6l12 12M18 6L6 18" />
+    </Svg>
+  );
+}

@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 
 beforeEach(() => {
@@ -50,5 +50,50 @@ describe('App header', () => {
     const banner = screen.getByRole('banner');
     await userEvent.click(within(banner).getByRole('button', { name: 'Add novel' }));
     expect(screen.getByRole('dialog', { name: 'Add novel' })).toBeInTheDocument();
+  });
+});
+
+describe('App service worker', () => {
+  function mountApp() {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+    vi.unstubAllGlobals();
+  });
+
+  function stubWorker() {
+    const register = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { register, ready: new Promise(() => undefined) },
+    });
+    return register;
+  }
+
+  it('registers /sw.js in a secure context', () => {
+    vi.stubGlobal('isSecureContext', true);
+    const register = stubWorker();
+    mountApp();
+    expect(register).toHaveBeenCalledWith('/sw.js');
+  });
+
+  it('does not register over plain HTTP', () => {
+    vi.stubGlobal('isSecureContext', false);
+    const register = stubWorker();
+    mountApp();
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when the browser has no service workers', () => {
+    vi.stubGlobal('isSecureContext', true);
+    expect(() => {
+      mountApp();
+    }).not.toThrow();
   });
 });
