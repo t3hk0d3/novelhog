@@ -1,5 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Chapter } from '../api/client';
 import { makeChapter, makeChapters } from '../test/fixtures';
@@ -212,7 +213,7 @@ describe('ChapterDetails', () => {
       show(failed());
       await userEvent.click(screen.getByRole('button', { name: 'Copy error message' }));
       expect(window.getSelection()?.toString()).toBe('TimeoutError: no response after 3 retries');
-      expect(await screen.findByText('Press Ctrl+C to copy')).toBeInTheDocument();
+      expect(await screen.findByText('Text selected, copy it')).toBeInTheDocument();
     });
 
     it('Copy selects the text when the clipboard rejects', async () => {
@@ -338,6 +339,31 @@ describe('ChapterDetails', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Retry download' }));
       expect(await screen.findByRole('alert')).toHaveTextContent('Server said no');
       expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('an error on one chapter does not show after stepping to the next', async () => {
+      stubPatch(undefined, false);
+      const chapters = makeChapters(3);
+      function Stepper() {
+        const [id, setId] = useState(chapters[0]?.id ?? '');
+        return (
+          <ChapterDetails
+            novelId={NOVEL}
+            chapterId={id}
+            chapters={chapters.map((c) => ({ ...c, state: 'not_requested' as const }))}
+            rows={chapters}
+            onStep={setId}
+            onClose={vi.fn()}
+          />
+        );
+      }
+      renderWithProviders(<Stepper />);
+      await userEvent.click(screen.getByRole('button', { name: 'Download' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Server said no');
+      await userEvent.click(screen.getByRole('button', { name: 'Next chapter' }));
+      expect(screen.getByRole('heading', { name: 'Chapter 2 of 3' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled();
     });
 
     it('says so when the server skipped the chapter', async () => {

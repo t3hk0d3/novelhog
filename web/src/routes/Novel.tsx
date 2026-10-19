@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, type Novel as NovelData } from '../api/client';
 import { isDeletedNovel, type DeletedNovel } from '../api/events';
 import { ChapterDetails } from '../components/ChapterDetails';
@@ -74,7 +74,16 @@ function NovelPage({ novel }: { novel: NovelData }) {
   // deep link or new tab opens it, and the back gesture closes it.
   const [searchParams, setSearchParams] = useSearchParams();
   const detailsId = searchParams.get('chapter');
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Set on the history entry that opening details pushed, so closing can pop it instead of
+  // leaving a dead entry; a deep link has no such entry and closes by replacing.
+  const pushedByUs = (location.state as { details?: boolean } | null)?.details === true;
   const setDetailsId = (chapterId: string | null, replace: boolean) => {
+    if (chapterId === null && pushedByUs) {
+      void navigate(-1);
+      return;
+    }
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
@@ -82,7 +91,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
         else next.set('chapter', chapterId);
         return next;
       },
-      { replace },
+      { replace, state: chapterId === null ? null : { details: pushedByUs || !replace } },
     );
   };
   // The first and last position Export EPUB… asked for; Task 38's export dialog reads it
@@ -106,7 +115,8 @@ function NovelPage({ novel }: { novel: NovelData }) {
   // A link to a chapter that no longer exists (or never did) just drops the parameter.
   useEffect(() => {
     if (detailsMissing) setDetailsId(null, true);
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setDetailsId is recreated each render
+  }, [detailsMissing]);
   return (
     <div className={`flex flex-col gap-4 ${selection.active ? 'pb-32' : ''}`}>
       <NovelHeader novel={novel} />

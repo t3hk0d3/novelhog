@@ -53,7 +53,7 @@ function ErrorBox({ chapter }: { chapter: Chapter }) {
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    setNote('Press Ctrl+C to copy');
+    setNote('Text selected, copy it');
   }
 
   function copy() {
@@ -114,6 +114,8 @@ function SheetHandle({ onClose }: { onClose: () => void }) {
       aria-hidden="true"
       onPointerDown={(event: ReactPointerEvent) => {
         startY.current = event.clientY;
+        if (typeof event.currentTarget.setPointerCapture === 'function')
+          event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerUp={(event: ReactPointerEvent) => {
         const from = startY.current;
@@ -138,20 +140,23 @@ function SheetHandle({ onClose }: { onClose: () => void }) {
  */
 export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onClose }: Props) {
   const wide = useMediaQuery(DESKTOP);
-  const [skipped, setSkipped] = useState(false);
+  // Results belong to the chapter they were sent for; stepping away hides them (no remount).
+  const [skippedPosition, setSkippedPosition] = useState<number | null>(null);
   const patch = useMutation({
     mutationFn: ({ state, position }: { state: ChapterState; position: number }) =>
       api.patchChapters(novelId, state, [position]),
     onMutate: () => {
-      setSkipped(false);
+      setSkippedPosition(null);
     },
-    onSuccess: (result) => {
-      setSkipped(result.skipped.length > 0);
+    onSuccess: (result, { position }) => {
+      setSkippedPosition(result.skipped.length > 0 ? position : null);
     },
   });
 
   const chapter = chapters.find((c) => c.id === chapterId);
   if (!chapter) return null;
+  const mine = patch.variables?.position === chapter.position;
+  const skipped = skippedPosition === chapter.position;
 
   // Step through the view's rows; a chapter outside them (a deep link) steps through all.
   const order = rows.some((c) => c.id === chapterId) ? rows : chapters;
@@ -231,14 +236,14 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
         {field('Last change', dateTime(chapter.updated_at))}
         {field('Images', <span className="text-ink-muted">{imagesText(chapter)}</span>)}
       </dl>
-      {patch.isError && (
+      {patch.isError && mine && (
         <p role="alert" className="mt-3 text-sm font-semibold text-danger">
           {errorMessage(patch.error)}
         </p>
       )}
       {skipped && (
         <p role="alert" className="mt-3 text-sm font-semibold text-danger">
-          The chapter changed before this applied; nothing was sent.
+          The chapter changed before this applied; nothing was changed.
         </p>
       )}
       <div className="mt-4 flex gap-2 border-t border-line pt-4 max-[719px]:[&>*]:flex-1 min-[720px]:justify-end">
@@ -254,7 +259,7 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
         {action && (
           <button
             type="button"
-            disabled={patch.isPending}
+            disabled={patch.isPending && mine}
             onClick={() => {
               patch.mutate({ state: action.next, position: chapter.position });
             }}

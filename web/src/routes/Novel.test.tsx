@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation } from 'react-router';
+import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import type { Chapter, Novel } from '../api/client';
@@ -22,8 +23,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+let goBack: () => void = () => undefined;
+
 function Search() {
-  return <p data-testid="search">{useLocation().search}</p>;
+  const location = useLocation();
+  const navigate = useNavigate();
+  useEffect(() => {
+    goBack = () => {
+      void navigate(-1);
+    };
+  });
+  return (
+    <>
+      <p data-testid="search">{location.search}</p>
+      <p data-testid="nav">{useNavigationType()}</p>
+    </>
+  );
 }
 
 function mount(novel: Novel, chapters: Chapter[], search = '') {
@@ -315,6 +330,37 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(search()).toBe('');
       expect(row).toHaveFocus();
+    });
+
+    it('open then close pops the pushed entry, so Back goes to the previous page', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('link', { name: /^Page 2,/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Close' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
+      expect(search()).toBe('');
+      expect(screen.getByTestId('nav')).toHaveTextContent('POP');
+    });
+
+    it('a deep link closes by replace', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3), '?chapter=CH000000000003');
+      await userEvent.click(await screen.findByRole('button', { name: 'Close' }));
+      expect(search()).toBe('');
+      expect(screen.getByTestId('nav')).toHaveTextContent('REPLACE');
+    });
+
+    it('Back while open closes the dialog', async () => {
+      mount(makeNovel({ total_pages: 3 }), makeChapters(3));
+      await userEvent.click(await screen.findByRole('link', { name: /^Page 2,/ }));
+      await screen.findByRole('dialog');
+      act(() => {
+        goBack();
+      });
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
+      expect(search()).toBe('');
     });
 
     it('Next steps to the following row and updates the parameter', async () => {
