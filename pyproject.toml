@@ -66,6 +66,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    # fastapi.testclient still builds on httpx; httpx2 is not packaged for it yet.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.importlinter]
 root_package = "novelhog"
