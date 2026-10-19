@@ -366,3 +366,32 @@ class TestConvert__OnConsecutiveBreaks:
 
     def test_convert__trailing_double_br_leaves_no_empty_paragraph(self) -> None:
         assert md("<p>a<br><br></p><p>b</p>") == "a\n\nb"
+
+
+class TestConvert__OnEscapesAtSegmentBoundaries:
+    def test_convert__lt_before_plain_fallback_run_does_not_open_html_comment(self) -> None:
+        out = md("<p>&lt;<b>!</b>-- hidden</p><p>after</p>")
+        assert rendered(out) == "<p>&lt;!-- hidden</p><p>after</p>"
+
+    def test_convert__lt_before_image_run_does_not_open_html_block(self) -> None:
+        out = convert(
+            "<p>&lt;<b>div <img src=u></b></p>", lambda _: FetchedImage(b"x", "image/png")
+        )
+        assert rendered(out.markdown).startswith("<p>&lt;div <img")
+
+    def test_convert__ampersand_before_fallback_run_stays_literal(self) -> None:
+        out = convert(
+            "<p>&amp;<b>copy;<img src=u></b></p>", lambda _: FetchedImage(b"x", "image/png")
+        )
+        assert rendered(out.markdown).startswith("<p>&amp;copy;<img")
+
+
+class TestConvert__OnSymbolsAtEmphasisEdges:
+    def test_convert__symbol_at_end_stays_inside_bold(self) -> None:
+        assert emphasis_html("<p><b>100$</b></p>") == "<p><strong>100$</strong></p>"
+
+    def test_convert__emoji_at_start_stays_inside_italics(self) -> None:
+        assert emphasis_html("<p><i>\U0001f525fire</i></p>") == "<p><em>\U0001f525fire</em></p>"
+
+    def test_convert__symbol_edge_that_cannot_flank_is_plain_text(self) -> None:
+        assert emphasis_html("<p><b>100$</b>x</p>") == "<p>100$x</p>"

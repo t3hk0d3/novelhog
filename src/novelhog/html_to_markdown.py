@@ -7,6 +7,7 @@ are meaningful; every other tag is dropped and its text kept.
 
 import base64
 import re
+import string
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -71,9 +72,7 @@ _MAX_WARNING_URL = 200
 _MAX_START = 999_999_999
 
 _HTML_SPACE = re.compile(r"[ \t\r\n\f]+")
-_METACHARS = re.compile(r"[\\*_#>\[\]`|~]")
-_TAG_START = re.compile(r"<(?=[A-Za-z/!?])")
-_ENTITY_START = re.compile(r"&(?=#?\w+;)")
+_METACHARS = re.compile(r"[\\*_#>\[\]`|~<&]")
 _BREAK_SPACES = re.compile(f" ?{_BREAK}[ {_BREAK}]*")
 _LINE_START = re.compile(r"^(?:([-+=])|(\d{1,9})([.)]))")
 
@@ -172,9 +171,7 @@ class _Seg:
 
 
 def _escape(text: str) -> str:
-    text = _METACHARS.sub(r"\\\g<0>", text)
-    text = _TAG_START.sub(r"\\<", text)
-    return _ENTITY_START.sub(r"\\&", text)
+    return _METACHARS.sub(r"\\\g<0>", text)
 
 
 def _escape_line_start(line: str) -> str:
@@ -192,7 +189,38 @@ def _is_blank_char(char: str) -> bool:
 
 def _is_outside_char(char: str) -> bool:
     """Characters that must not sit just inside an emphasis marker."""
-    return char == _BREAK or unicodedata.category(char)[0] in "PSZC" or char.isspace()
+    return char == _BREAK or unicodedata.category(char)[0] in "PZC" or char.isspace()
+
+
+def _is_symbol(char: str) -> bool:
+    return unicodedata.category(char)[0] == "S"
+
+
+def _is_flank_neutral(char: str | None) -> bool:
+    """True at the paragraph edge, for whitespace and for punctuation (ASCII punctuation too)."""
+    return (
+        char is None
+        or char == _BREAK
+        or char.isspace()
+        or char in string.punctuation
+        or unicodedata.category(char)[0] == "P"
+    )
+
+
+def _char_beside(segs: list[_Seg], *, last: bool) -> str | None:
+    """The last (or first) character of the nearest non-empty segment."""
+    for seg in reversed(segs) if last else segs:
+        if seg.text:
+            return seg.text[-1] if last else seg.text[0]
+    return None
+
+
+def _symbol_edges_flank(before: str | None, core: list[_Seg], after: str | None) -> bool:
+    """A symbol just inside a marker counts as punctuation, so the outside must be neutral too."""
+    opening, closing = core[0].text[0], core[-1].text[-1]
+    return (not _is_symbol(opening) or _is_flank_neutral(before)) and (
+        not _is_symbol(closing) or _is_flank_neutral(after)
+    )
 
 
 def _peel(run: list[_Seg]) -> tuple[list[_Seg], list[_Seg], list[_Seg]]:
@@ -255,7 +283,7 @@ def _render_inline(segs: list[_Seg], level: int = 0) -> str:
     out: list[str] = []
     index = 0
     while index < len(segs):
-        end = index
+        first = end = index
         has_style = style in segs[index].styles
         while end < len(segs) and (style in segs[end].styles) == has_style:
             end += 1
@@ -265,7 +293,14 @@ def _render_inline(segs: list[_Seg], level: int = 0) -> str:
             out.append(_render_inline(run, level + 1))
             continue
         lead, core, trail = _peel(run)
-        if not core or core[0].rendered or core[-1].rendered:
+        before = _char_beside(lead, last=True) or _char_beside(segs[:first], last=True)
+        after = _char_beside(trail, last=False) or _char_beside(segs[end:], last=False)
+        if (
+            not core
+            or core[0].rendered
+            or core[-1].rendered
+            or not _symbol_edges_flank(before, core, after)
+        ):
             out.append(_render_inline(run, level + 1))
             continue
         out.append(_render_inline(lead, level + 1))
