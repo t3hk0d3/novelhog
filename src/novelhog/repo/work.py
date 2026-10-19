@@ -39,7 +39,7 @@ class ChapterClaim:
 
 @dataclass(frozen=True)
 class RecoveryReport:
-    """What `recover` reset. Export and consumer parts are filled by later tasks.
+    """What `recover` reset. The consumer part is filled by a later task.
 
     `chapters_freed` counts expired `pending` claims (no events) and also removed chapters that
     were downloading, which return to `not_requested` (with events).
@@ -264,9 +264,9 @@ class Work:
         return [chapter_id for chapter_id in chapter_ids if chapter_id in owned_ids]
 
     def recover(self) -> RecoveryReport:
-        """Reset every lapsed claim of chapters and novels (spec section 4, "Recovery").
+        """Reset every lapsed claim of chapters, novels and exports (spec section 4, "Recovery").
 
-        Later tasks add the export and consumer parts to the report.
+        A later task adds the consumer part to the report.
         """
         now = self._clock()
         requeued, freed = self._recover_chapters(now)

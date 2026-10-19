@@ -155,8 +155,8 @@ def _end_position(chapter_id: Any) -> Any:
     return select(chapters.c.position).where(chapters.c.id == chapter_id).scalar_subquery()
 
 
-def _buildable() -> Any:
-    """A waiting export to build: skip_missing, an end without position, or range downloaded."""
+def _range_ready() -> Any:
+    """The range may be built: skip_missing, an end without position, or range downloaded."""
     first, last = (
         _end_position(exports.c.first_chapter_id),
         _end_position(exports.c.last_chapter_id),
@@ -171,10 +171,12 @@ def _buildable() -> Any:
             and_(other.c.position >= last, other.c.position <= first),
         ),
     )
-    return and_(
-        exports.c.state == _WAITING,
-        or_(exports.c.skip_missing, first.is_(None), last.is_(None), ~incomplete),
-    )
+    return or_(exports.c.skip_missing, first.is_(None), last.is_(None), ~incomplete)
+
+
+def _buildable() -> Any:
+    """A waiting export whose range may be built."""
+    return and_(exports.c.state == _WAITING, _range_ready())
 
 
 class Exports:
@@ -229,6 +231,8 @@ class Exports:
             if not rows or rows[0].position != start or rows[-1].position != end:
                 raise ValidationFailed("invalid_selector", "The range names a missing chapter")
             first_id, last_id = rows[0].id, rows[-1].id
+            # Only `create` inserts exports and always under `lock_novel`, so this check cannot
+            # race another create (the `exports_active` index stays as a backstop).
             existing = conn.execute(
                 select(exports.c.id).where(
                     exports.c.novel_id == novel_id,
@@ -330,6 +334,10 @@ class Exports:
 
         Buildable: `skip_missing`, an end chapter without position, or every chapter between
         the ends downloaded. Returns `None` when nothing is buildable.
+
+        The claim commits first (it selects across novels and takes no novel lock); the `EX`
+        event and the chapter list follow in a second transaction under the novel lock, which
+        re-checks the range and hands the export back to `waiting` if it is no longer complete.
         """
         while True:
             now = self._clock()
@@ -366,6 +374,24 @@ class Exports:
                 )
             ).first()
             if row is None:
+                return None
+            # Authoritative re-check: chapter writers hold the novel lock too, so the range
+            # cannot change between this check and the chapter list below.
+            if (
+                conn.execute(
+                    select(exports.c.id).where(exports.c.id == export_id, _range_ready())
+                ).first()
+                is None
+            ):
+                claims.release(
+                    conn,
+                    exports,
+                    [export_id],
+                    owner=worker_id,
+                    now=now,
+                    extra_set={"state": _WAITING},
+                    where=exports.c.state == _BUILDING,
+                )
                 return None
             novel = conn.execute(select(novels).where(novels.c.id == novel_id)).one()
             ends = {
@@ -419,9 +445,10 @@ class Exports:
                 == 1
             )
 
-    def _end_build(self, export_id: str, worker_id: str, values: dict[str, object]) -> bool:
+    def _end_build(
+        self, export_id: str, worker_id: str, values: dict[str, object], now: datetime
+    ) -> bool:
         """Fenced end of a build: apply `values`, clear the claim and append the EX event."""
-        now = self._clock()
         with db.write(self._engine) as conn:
             novel_id = conn.execute(
                 select(exports.c.novel_id).where(exports.c.id == export_id)
@@ -454,12 +481,16 @@ class Exports:
                 "size_bytes": size_bytes,
                 "ready_at": now,
             },
+            now,
         )
 
     def fail(self, export_id: str, worker_id: str, message: str) -> bool:
         """Mark the build `failed` with `message`; False and no change when the claim was lost."""
         return self._end_build(
-            export_id, worker_id, {"state": ExportState.FAILED.value, "error": message}
+            export_id,
+            worker_id,
+            {"state": ExportState.FAILED.value, "error": message},
+            self._clock(),
         )
 
     def list(self, novel_id: str) -> list[ExportView]:

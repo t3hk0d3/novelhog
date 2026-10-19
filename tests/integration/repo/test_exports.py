@@ -635,3 +635,45 @@ class TestChapterChangeEvents:
             [1],
         )
         assert len(ex_events(repo, view.id)) == before + 1
+
+
+class TestClaimReady__RangeChangesBeforeTheFollowUp:
+    @pytest.mark.parametrize("change", ["redownload", "sync_insert"])
+    def test_claim_ready__hands_the_export_back_to_waiting_and_returns_no_claim(
+        self, repo: Repo, novel_id: str, monkeypatch: pytest.MonkeyPatch, change: str
+    ) -> None:
+        add_chapters(repo, novel_id, ["downloaded", "downloaded", "downloaded"])
+        view, _ = repo.exports.create(novel_id, 1, 3, EPUB)
+        original = repo.exports._started
+
+        def racing(*args: Any, **kwargs: Any) -> Any:
+            if change == "redownload":
+                set_state(repo, 2, state="pending", queued_at=repo.clock())
+            else:
+                set_state(repo, 3, position=4)
+                add_chapters_at(repo, novel_id, 3)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(repo.exports, "_started", racing)
+        seq = repo.events.latest_seq()
+        assert repo.exports.claim_ready(ME, TTL) is None
+        row = export_row(repo, view.id)
+        assert (row.state, row.claimed_by, row.claimed_until) == ("waiting", None, None)
+        assert repo.events.latest_seq() == seq
+
+
+def add_chapters_at(repo: Repo, novel_id: str, position: int) -> None:
+    """Insert one `pending` chapter at `position` (a sync inserting upstream)."""
+    with db.write(repo.engine) as conn:
+        conn.execute(
+            insert(chapters).values(
+                **chapter_row(
+                    id=cid(90 + position),
+                    novel_id=novel_id,
+                    url=f"{URL}/new{position}",
+                    position=position,
+                    state="pending",
+                    queued_at=repo.clock(),
+                )
+            )
+        )
