@@ -1,17 +1,29 @@
 """The event log: commit-ordered `seq` values from `event_clock` (spec section 4, "Event log").
 
-`append` is internal to `repo`; the public `Events` class only reads the clock.
+`append` is internal to `repo`; the public `Events` class reads the log and prunes it.
+
+Readers (`since`, `replay_status`) rely on `append` holding the clock row lock until commit, so
+events become visible in `seq` order: a reader that has seen `seq` N never misses a lower `seq`
+committing later. `tests/integration/repo/test_event_append.py` pins this invariant.
 """
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Literal
 
-from sqlalchemy import Connection, insert, select, update
+from sqlalchemy import Connection, delete, func, insert, select, update
 
 from novelhog.repo import db
 from novelhog.repo.context import RepoContext
-from novelhog.repo.schema import event_clock
+from novelhog.repo.schema import consumers, event_clock
 from novelhog.repo.schema import events as events_table
+
+_KINDS: dict[str, Literal["novel", "chapter", "export"]] = {
+    "NV": "novel",
+    "CH": "chapter",
+    "EX": "export",
+}
 
 Payload = dict[str, object] | Callable[[], dict[str, object]]
 
@@ -85,11 +97,44 @@ def emit_novel_change(
         append(conn, novel_id, export_id, export_payload(export_id), now=now)
 
 
+@dataclass(frozen=True)
+class EventRow:
+    """A stored event: its `seq`, the novel and entity it belongs to, the snapshot and the time."""
+
+    seq: int
+    novel_id: str
+    entity_id: str
+    payload: dict[str, object]
+    at: datetime
+
+    @property
+    def kind(self) -> Literal["novel", "chapter", "export"]:
+        """The SSE event name, derived from the `entity_id` prefix."""
+        return _KINDS[self.entity_id[:2]]
+
+
+@dataclass(frozen=True)
+class PruneReport:
+    """What `prune` did: rows deleted, and consumers moved as `(name, old, new)` last_seq."""
+
+    deleted: int
+    consumers_moved: list[tuple[str, int, int]]
+
+
+def _first_seq_since(conn: Connection, cutoff: datetime, latest: int) -> int:
+    """The smallest `seq` whose event is at or after `cutoff`, or `latest + 1` if none."""
+    found = conn.execute(
+        select(func.min(events_table.c.seq)).where(events_table.c.at >= cutoff)
+    ).scalar_one()
+    return latest + 1 if found is None else int(found)
+
+
 class Events:
-    """Read access to the event log."""
+    """Read access to the event log, plus pruning."""
 
     def __init__(self, context: RepoContext) -> None:
         self._engine = context.engine
+        self._clock = context.clock
 
     def latest_seq(self) -> int:
         """Return the clock value: the last `seq` handed out (0 on an empty log)."""
@@ -97,3 +142,84 @@ class Events:
             return int(
                 conn.execute(select(event_clock.c.seq).where(event_clock.c.id == 1)).scalar_one()
             )
+
+    def since(self, seq: int, *, novel_id: str | None = None, limit: int = 500) -> list[EventRow]:
+        """Return events with a `seq` above the given one, in order, at most `limit`."""
+        statement = select(events_table).where(events_table.c.seq > seq)
+        if novel_id is not None:
+            statement = statement.where(events_table.c.novel_id == novel_id)
+        statement = statement.order_by(events_table.c.seq).limit(limit)
+        with db.read(self._engine) as conn:
+            return [
+                EventRow(row.seq, row.novel_id, row.entity_id, row.payload, row.at)
+                for row in conn.execute(statement).all()
+            ]
+
+    def replay_status(
+        self, seq: int, *, max_age_s: int = 86400, max_rows: int = 5000
+    ) -> Literal["ok", "resync"]:
+        """Say whether a client that last saw `seq` can be sent the events after it.
+
+        `resync` when `seq` is above the clock, its row is gone (pruned) or older than `max_age_s`,
+        or more than `max_rows` events follow. An empty log accepts only `seq` 0.
+        """
+        threshold = self._clock() - timedelta(seconds=max_age_s)
+        with db.read(self._engine) as conn:
+            latest = int(
+                conn.execute(select(event_clock.c.seq).where(event_clock.c.id == 1)).scalar_one()
+            )
+            if seq > latest:
+                return "resync"
+            if seq == latest == 0:
+                return "ok"
+            at = conn.execute(
+                select(events_table.c.at).where(events_table.c.seq == seq)
+            ).scalar_one_or_none()
+            if at is None or at < threshold:
+                return "resync"
+            following = conn.execute(
+                select(func.count()).select_from(events_table).where(events_table.c.seq > seq)
+            ).scalar_one()
+            return "resync" if following > max_rows else "ok"
+
+    def prune(self, *, keep_s: int = 86400, max_consumer_lag_s: int = 604800) -> PruneReport:
+        """Delete old events, keeping the newest of every entity and all a consumer still needs.
+
+        The boundary is the first `seq` younger than `keep_s`, capped at the slowest consumer's
+        `last_seq + 1`. A consumer whose next event is older than `max_consumer_lag_s` is first
+        moved forward so that it next reads the first event inside that window.
+        """
+        now = self._clock()
+        with db.write(self._engine) as conn:
+            latest = int(
+                conn.execute(select(event_clock.c.seq).where(event_clock.c.id == 1)).scalar_one()
+            )
+            lag_start = _first_seq_since(conn, now - timedelta(seconds=max_consumer_lag_s), latest)
+            moved: list[tuple[str, int, int]] = []
+            for name, last_seq in conn.execute(
+                select(consumers.c.name, consumers.c.last_seq).order_by(consumers.c.name)
+            ).all():
+                if last_seq + 1 < lag_start:
+                    applied = conn.execute(
+                        update(consumers)
+                        .where(consumers.c.name == name, consumers.c.last_seq == last_seq)
+                        .values(last_seq=lag_start - 1, updated_at=now)
+                    ).rowcount
+                    if applied:
+                        moved.append((name, int(last_seq), lag_start - 1))
+            boundary = _first_seq_since(conn, now - timedelta(seconds=keep_s), latest)
+            slowest = conn.execute(select(func.min(consumers.c.last_seq))).scalar_one()
+            if slowest is not None:
+                boundary = min(boundary, int(slowest) + 1)
+            newer = events_table.alias("newer")
+            has_newer = (
+                select(newer.c.seq)
+                .where(
+                    newer.c.entity_id == events_table.c.entity_id, newer.c.seq > events_table.c.seq
+                )
+                .exists()
+            )
+            deleted = conn.execute(
+                delete(events_table).where(events_table.c.seq < boundary, has_newer)
+            ).rowcount
+        return PruneReport(deleted=deleted, consumers_moved=moved)

@@ -5,6 +5,7 @@ from datetime import datetime
 
 from novelhog.repo import db
 from novelhog.repo.chapters import Chapters
+from novelhog.repo.consumers import Consumers
 from novelhog.repo.contents import Contents
 from novelhog.repo.context import RepoContext
 from novelhog.repo.db import Busy, Revisions, SchemaOutdated
@@ -41,6 +42,7 @@ class Repo:
             refresh_min_interval=refresh_min_interval,
         )
         self.chapters = Chapters(self.context)
+        self.consumers = Consumers(self.context)
         self.contents = Contents(self.context)
         self.events = Events(self.context)
         self.exports = Exports(self.context)

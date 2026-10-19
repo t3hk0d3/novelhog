@@ -18,7 +18,7 @@ from novelhog.repo import claims, contents, db, events
 from novelhog.repo import exports as export_repo
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel, snapshot
-from novelhog.repo.schema import chapters, novels
+from novelhog.repo.schema import chapters, consumers, novels
 from novelhog.repo.schema import exports as exports_table
 
 _PENDING = ChapterState.PENDING.value
@@ -39,7 +39,7 @@ class ChapterClaim:
 
 @dataclass(frozen=True)
 class RecoveryReport:
-    """What `recover` reset. The consumer part is filled by a later task.
+    """What `recover` reset.
 
     `chapters_freed` counts expired `pending` claims (no events) and also removed chapters that
     were downloading, which return to `not_requested` (with events).
@@ -266,18 +266,29 @@ class Work:
     def recover(self) -> RecoveryReport:
         """Reset every lapsed claim of chapters, novels and exports (spec section 4, "Recovery").
 
-        A later task adds the consumer part to the report.
+        Also frees consumers whose claim lapsed (no events).
         """
         now = self._clock()
         requeued, freed = self._recover_chapters(now)
         novels_freed = self._recover_novels(now)
         exports_reset = self._recover_exports(now)
+        consumers_freed = self._recover_consumers(now)
         return RecoveryReport(
             chapters_requeued=requeued,
             chapters_freed=freed,
             novels_freed=novels_freed,
             exports_reset=exports_reset,
+            consumers_freed=consumers_freed,
         )
+
+    def _recover_consumers(self, now: datetime) -> int:
+        """Free consumers whose claim lapsed; their cursor stays where it was."""
+        with db.write(self._engine) as conn:
+            return conn.execute(
+                update(consumers)
+                .where(consumers.c.claimed_by.is_not(None), consumers.c.claimed_until < now)
+                .values(claimed_by=None, claimed_until=None)
+            ).rowcount
 
     def _recover_exports(self, now: datetime) -> int:
         """Return expired `building` exports to `waiting` and append an `EX` event for each."""
