@@ -488,8 +488,13 @@ RETURNING <columns>
   reads that need a lock, e.g. `DELETE … RETURNING`) come first and
   `events.append` comes last; no new row lock is taken after the first
   `append`. Snapshots are built lazily inside `append`, after the clock is
-  taken. This single order (rows, then clock) keeps Postgres free of deadlocks
-  between event writers.
+  taken. Among rows, a transaction that writes any row belonging to a novel
+  (the novel, its chapters, contents, exports) first locks that novel's row with
+  a no-op `UPDATE novels … WHERE id = :id` (no `SELECT … FOR UPDATE`); zero rows
+  matched means the novel was deleted, and the write is abandoned as not found
+  or as a lost claim. This single order (novel row, then child rows, then
+  clock) keeps Postgres free of deadlocks and foreign-key races between event
+  writers, including `DELETE /novels/{id}` against a running sync or download.
 - Readers: the SSE stream (stateless, per connection, from `Last-Event-ID`) and
   durable consumers with a row in `consumers`. The latest seq is
   `events.latest_seq()` (the clock value).

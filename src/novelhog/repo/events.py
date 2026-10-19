@@ -26,7 +26,9 @@ def append(
     by it include every earlier committed change; later appends in the same transaction (the
     clock is already held) may pass plain dicts.
 
-    Lock order (spec section 4): in an event-writing transaction every row write, and every
+    Lock order (spec section 4): a transaction that writes any row of a novel first calls
+    `novels.lock_novel(conn, novel_id)` (and abandons the write if it returns False). Then, in an
+    event-writing transaction, every row write, and every
     locking read such as `DELETE ... RETURNING`, comes first and `append` comes last; no new row
     lock may be taken after the first `append`. Taking the clock first in one transaction and
     last in another deadlocks on Postgres.

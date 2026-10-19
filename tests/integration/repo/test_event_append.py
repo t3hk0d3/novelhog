@@ -116,21 +116,19 @@ class TestAppend__TwoTransactionsCommittingInOppositeOrder:
             writers.finish()
         assert _seqs_after(repo, 0) == [1, 2]
 
-    def test_append__poller_never_skips_an_event(self, repo: Repo) -> None:
+    def test_append__poller_never_sees_a_later_seq_before_an_earlier_one_commits(
+        self, repo: Repo
+    ) -> None:
         writers = _TwoWriters(repo)
         writers.start()
         try:
+            writers.release_second.set()  # the second writer would commit at once if it could
+            assert not writers.second_has_clock.wait(timeout=0.5)
             assert _seqs_after(repo, 0) == []
             writers.release_first.set()
-            assert writers.second_has_clock.wait(timeout=30)
-            cursor = 0
-            first_poll = _seqs_after(repo, cursor)
-            assert first_poll == [1]
-            cursor = first_poll[-1]
-            writers.release_second.set()
         finally:
             writers.finish()
-        assert _seqs_after(repo, cursor) == [2]
+        assert _seqs_after(repo, 0) == [1, 2]
 
 
 class TestLatestSeq:

@@ -93,6 +93,19 @@ def _views(conn: Connection, where: Any, *, now: datetime, static_base_url: str)
     return views
 
 
+def lock_novel(conn: Connection, novel_id: str) -> bool:
+    """Lock the novel's row with a no-op update; return False if the novel no longer exists.
+
+    First statement of every transaction that writes the novel or any of its child rows (spec
+    section 4, "Lock order"); a False result means the novel was deleted and the write is
+    abandoned (`NotFound`, or a lost claim).
+    """
+    statement = (
+        update(novels_table).where(novels_table.c.id == novel_id).values(id=novels_table.c.id)
+    )
+    return conn.execute(statement).rowcount == 1
+
+
 def snapshot(conn: Connection, novel_id: str, *, now: datetime, static_base_url: str) -> NovelView:
     """Return the novel as the API would show it now; raise `NotFound` if it does not exist."""
     views = _views(conn, novels_table.c.id == novel_id, now=now, static_base_url=static_base_url)
@@ -126,10 +139,8 @@ class Novels:
 
     @staticmethod
     def _require(conn: Connection, novel_id: str) -> None:
-        if not ids.is_valid(novel_id, "NV"):
-            raise NotFound("novel", novel_id)
-        found = conn.execute(select(novels_table.c.id).where(novels_table.c.id == novel_id))
-        if found.first() is None:
+        """Lock the novel row (first in the transaction) or raise `NotFound`."""
+        if not ids.is_valid(novel_id, "NV") or not lock_novel(conn, novel_id):
             raise NotFound("novel", novel_id)
 
     def create(self, toc_url: str, followed: bool) -> NovelView:
@@ -240,9 +251,8 @@ class Novels:
         appended last, as the lock order in `events.append` requires.
         """
         now = self._clock()
-        if not ids.is_valid(novel_id, "NV"):
-            raise NotFound("novel", novel_id)
         with db.write(self._engine) as conn:
+            self._require(conn, novel_id)
             chapter_ids = select(chapters.c.id).where(chapters.c.novel_id == novel_id)
             conn.execute(
                 delete(chapter_contents).where(chapter_contents.c.chapter_id.in_(chapter_ids))

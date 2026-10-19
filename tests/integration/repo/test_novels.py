@@ -1,15 +1,17 @@
 """The novels repository (spec sections 4, 5.2 and 5.3)."""
 
 import threading
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import Connection, insert, select, update
 
 from novelhog.domain.errors import Conflict, NotFound, ServiceUnavailable, ValidationFailed
 from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
+from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import (
     chapter_contents,
     chapters,
@@ -442,3 +444,97 @@ class TestDelete:
         assert errors == []
         with db.read(published.engine) as conn:
             assert conn.execute(select(novels)).all() == []
+
+
+class TestDelete__AgainstWritersOfTheNovelsRows:
+    """Writers lock the novel row first (spec section 4, "Lock order"), so delete serialises."""
+
+    @pytest.fixture
+    def novel_id(self, published: Repo) -> str:
+        novel = published.novels.create(URL, followed=True)
+        _add_chapters(published, novel.id, [{}, {}])
+        return novel.id
+
+    def _race(self, repo: Repo, novel_id: str, write: Callable[[Connection], None]) -> list[str]:
+        """Run `write` in a transaction that holds the novel row while `delete` runs into it."""
+        has_row = threading.Event()
+        outcomes: list[str] = []
+
+        def writer() -> None:
+            try:
+                with db.write(repo.engine) as conn:
+                    if not lock_novel(conn, novel_id):
+                        outcomes.append("writer:gone")
+                        return
+                    has_row.set()
+                    threading.Event().wait(1.0)  # let delete run into the held row lock
+                    write(conn)
+                    event_log.append(conn, novel_id, novel_id, {"id": novel_id}, now=repo.clock())
+                outcomes.append("writer:ok")
+            except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
+                outcomes.append(f"writer:{error!r}")
+            finally:
+                has_row.set()
+
+        def deleter() -> None:
+            try:
+                has_row.wait(timeout=30)
+                repo.novels.delete(novel_id)
+                outcomes.append("delete:ok")
+            except NotFound:
+                outcomes.append("delete:not_found")
+            except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
+                outcomes.append(f"delete:{error!r}")
+
+        threads = [threading.Thread(target=f, daemon=True) for f in (writer, deleter)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive()
+        return outcomes
+
+    def _assert_one_winner(self, repo: Repo, outcomes: list[str]) -> None:
+        assert sorted(outcomes) in (["delete:ok", "writer:ok"], ["delete:ok", "writer:gone"])
+        with db.read(repo.engine) as conn:
+            for table in (novels, chapters, chapter_contents):
+                assert conn.execute(select(table)).all() == []
+
+    def test_delete__sync_shaped_writer_does_not_deadlock(
+        self, published: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        def write(conn: Connection) -> None:
+            conn.execute(
+                insert(chapters).values(
+                    **chapter_row(
+                        id="CH000000000003", novel_id=novel_id, url=URL + "/3", position=3
+                    )
+                )
+            )
+            conn.execute(
+                update(chapters).where(chapters.c.id == "CH000000000002").values(title="t")
+            )
+
+        self._assert_one_winner(published, self._race(published, novel_id, write))
+
+    def test_delete__download_shaped_writer_does_not_hit_a_foreign_key_violation(
+        self, published: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        def write(conn: Connection) -> None:
+            conn.execute(
+                update(chapters).where(chapters.c.id == "CH000000000001").values(title="t")
+            )
+            conn.execute(
+                insert(chapter_contents).values(
+                    chapter_id="CH000000000001", markdown="text", fetched_at=clock.current
+                )
+            )
+
+        self._assert_one_winner(published, self._race(published, novel_id, write))
+
+    def test_lock_novel__reports_a_deleted_novel(self, published: Repo, novel_id: str) -> None:
+        with db.write(published.engine) as conn:
+            assert lock_novel(conn, novel_id) is True
+        published.novels.delete(novel_id)
+        with db.write(published.engine) as conn:
+            assert lock_novel(conn, novel_id) is False

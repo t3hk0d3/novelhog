@@ -19,7 +19,9 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - Line length 100.
 - Sub-repositories (`Repo.events`, `.hosts`, `.novels`, ...) take one frozen `RepoContext`
   (engine, clock, config); new shared settings are added there.
-- Lock order in event-writing transactions: all row writes (and locking reads such as
+- Lock order: a transaction that writes any row of a novel first calls `novels.lock_novel`
+  (no-op `UPDATE novels`, never `SELECT ... FOR UPDATE`) and abandons the write if it
+  returns False. In event-writing transactions: all row writes (and locking reads such as
   `DELETE ... RETURNING`) first, `events.append` last, no new row lock after the first
   `append`. Snapshots are built lazily inside `append` (callable payload), after the clock is
   taken (spec section 4, "Lock order").
