@@ -8,16 +8,20 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import requests
-from web_novel_scraper.config_manager import ScraperConfig
-from web_novel_scraper.exceptions import FlaresolverrConnectionError, ScraperError
-from web_novel_scraper.models import Chapter
-from web_novel_scraper.novel_scraper import Novel
 
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import normalize_url
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
 from novelhog.scraper_adapter.guard import page_budget
+from novelhog.scraper_adapter.scraper import (
+    Chapter,
+    FlaresolverrConnectionError,
+    Novel,
+    ScraperConfig,
+    ScraperError,
+    take_over_scraper_logging,
+)
 
 
 @dataclass(frozen=True)
@@ -58,7 +62,7 @@ def _html_language(html: str) -> str | None:
 
 
 def _caused_by_unreachable_flaresolverr(exc: BaseException) -> bool:
-    """True when `exc` or anything it was raised from is a FlareSolverr connection failure."""
+    """True when `exc` or anything it was raised from is a connection failure (refused, DNS)."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -88,6 +92,7 @@ class ScraperAdapter:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        take_over_scraper_logging()
 
     def supported_hosts(self) -> list[str]:
         """Every host of the installed decode guide, without `www.`, in guide order."""
@@ -129,14 +134,13 @@ class ScraperAdapter:
             return FetchedChapter(title=title, body_html=chapter.chapter_content)
 
     def _config(self) -> ScraperConfig:
-        """A scraper config that ignores the user's own config file and uses FlareSolverr."""
+        """The scraper's per-host config, with our FlareSolverr address and no user config file."""
         scraper_dir = self._settings.scraper_dir
         return ScraperConfig(
             [
                 {"config_file": str(scraper_dir / "no-config.json")},
                 {"base_novels_dir": str(scraper_dir)},
                 {"request_config.flaresolver_url": self._settings.flaresolverr_url},
-                {"request_config.force_flaresolver": True},
             ]
         )
 

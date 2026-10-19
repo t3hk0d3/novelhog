@@ -5,9 +5,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from web_novel_scraper.request_helper import RequestHelper
-
 from novelhog.scraper_adapter.errors import TocLoopError
+from novelhog.scraper_adapter.scraper import RequestHelper
 
 
 @dataclass
@@ -26,19 +25,20 @@ class _Budget:
 
 
 _active: ContextVar[_Budget | None] = ContextVar("novelhog_page_budget", default=None)
-_original_get_url_content = RequestHelper.get_url_content
 
 
 def _guarded_get_url_content(self: RequestHelper, url: str) -> str:
     budget = _active.get()
     if budget is not None:
         budget.record(url)
-    result: str = _original_get_url_content(self, url)
+    result: str = RequestHelper.novelhog_original_get_url_content(self, url)
     return result
 
 
-# Installed once at import; it does nothing outside a `page_budget` block.
-RequestHelper.get_url_content = _guarded_get_url_content
+# Installed once, even if this module is imported twice; it does nothing outside `page_budget`.
+if not hasattr(RequestHelper, "novelhog_original_get_url_content"):
+    RequestHelper.novelhog_original_get_url_content = RequestHelper.get_url_content
+    RequestHelper.get_url_content = _guarded_get_url_content
 
 
 @contextmanager

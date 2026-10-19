@@ -14,6 +14,7 @@ from novelhog.config import Settings
 from novelhog.scraper_adapter import ScraperAdapter
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, TocLoopError
 from tests.fixtures.fake_flaresolverr import FakeFlareSolverr, load_html
+from tests.fixtures.fake_site import FakeSite
 
 SH_HOST = "scribblehub.com"
 SH_TOC = "https://scribblehub.com/series/1/lantern/"
@@ -320,3 +321,60 @@ class TestScraperAdapter__FetchChapter__OnUnreachableFlaresolverr:
             ScraperAdapter(make_settings(tmp_path, dead_url)).fetch_chapter(
                 "NV000000000001", SH_HOST, SH_TOC, SH_CH.format(1)
             )
+
+
+# hiraethtranslation.com is a decode-guide host whose scraper config does not force FlareSolverr.
+DIRECT_HOST = "hiraethtranslation.com"
+
+
+def direct_toc(base: str) -> str:
+    return (
+        '<html lang="en"><body><ul>'
+        f'<li class="free-chap"><a href="{base}/c/2">Chapter 2</a></li>'
+        f'<li class="free-chap"><a href="{base}/c/1">Chapter 1</a></li>'
+        "</ul></body></html>"
+    )
+
+
+class TestScraperAdapter__DirectHost:
+    def test_sync_toc__host_without_forced_flaresolverr_requests_the_site_directly(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}) as site:
+            site.pages["/toc"] = direct_toc(site.url)
+            result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+            )
+            assert result.urls == [f"{site.url}/c/1", f"{site.url}/c/2"]
+        assert flaresolverr.commands == []
+
+    def test_sync_toc__http_error_from_the_site_raises_site_error(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}) as site, pytest.raises(SiteError):
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/missing"
+            )
+
+    def test_sync_toc__connection_refused_raises_infrastructure_error(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, dead_url: str
+    ) -> None:
+        with pytest.raises(InfrastructureError):
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{dead_url}/toc"
+            )
+
+    def test_sync_toc__dns_failure_raises_infrastructure_error(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with pytest.raises(InfrastructureError):
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, "http://no-such-host.invalid/toc"
+            )
+
+
+class TestScraperAdapter__SyncToc__OnExactlyBudgetPages:
+    def test_sync_toc__succeeds(self, tmp_path: Path, flaresolverr: FakeFlareSolverr) -> None:
+        flaresolverr.pages.update(hostednovel_pages())
+        settings = make_settings(tmp_path, flaresolverr.url, NOVELHOG_MAX_TOC_PAGES="2")
+        assert len(ScraperAdapter(settings).sync_toc("NV000000000001", HN_HOST, HN_TOC).urls) == 3
