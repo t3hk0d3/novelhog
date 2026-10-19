@@ -61,7 +61,7 @@ flowchart TB
     end
 
     subgraph data["/data volume"]
-        db[("SQLite app.db (WAL)")]
+        db[("Database<br/>SQLite app.db (default) or Postgres")]
         static[["static/<br/>covers, exports"]]
         work[["work/<br/>scraper files"]]
     end
@@ -95,8 +95,8 @@ Responsibilities are split by concern, not by load:
 | API (in `novelhog-web`) | FastAPI app, `/api/v1` only: REST, SSE stream, settings (including generating the VAPID key pair into the database), Web Push subscription registration. Stateless: no local files of its own, no background jobs; every instance is interchangeable. Never serves files and never talks to novel sites, FlareSolverr or the scraper. |
 | `worker` | Everything about novels. Separate container from the same image. The only user of the scraper and FlareSolverr and the only writer of scraper working files. Publishes supported hosts, runs TOC syncs (initial import included), downloads chapters, builds exports, delivers notifications through channels, prunes the event log it writes. |
 | SPA | React app + service worker, built to static files baked into the image at `/srv/web` and served by Caddy (single origin, no CORS). |
-| `novelhog.repo` | The database interface: a standalone package (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
-| SQLite | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, subscriptions, the event log and its consumers. Accessed only through `novelhog.repo`. |
+| `novelhog.repo` | The database interface: a standalone package built on SQLAlchemy Core (no FastAPI, scraper or image imports) used by `api`, `worker` and future services such as a Telegram bot. |
+| Database (SQLite by default, Postgres supported) | Single source of truth: novels, chapters, chapter content (Markdown), exports, hosts, settings, subscriptions, the event log and its consumers. Accessed only through `novelhog.repo`. |
 | Static storage | Covers and export files behind `StaticStorage`; v1 backend is local disk under `/data/static`. |
 
 ### Deployment
@@ -121,7 +121,7 @@ Responsibilities are split by concern, not by load:
   push) and must not buffer `/api/v1/events`. The README includes Caddy and
   nginx snippets. Cache headers come from the built-in Caddy.
 - Scaling: `novelhog-web` (stateless) and `novelhog-worker` can both be scaled on
-  one host; multi-host clustering requires a networked database (§12).
+  one host with SQLite; multi-host clustering needs Postgres (`NOVELHOG_DATABASE_URL`, §4, §12).
 
 ## 3. Identifiers
 
@@ -136,12 +136,21 @@ Responsibilities are split by concern, not by load:
 - An ID with the wrong prefix or format in a path or body is treated as unknown →
   `404`.
 
-## 4. Database schema (SQLite)
+## 4. Database schema
 
-SQLite ≥ 3.45, WAL mode, `foreign_keys = ON`. Timestamps are UTC ISO-8601 TEXT
-(`2026-10-19T08:15:00Z`). Schema version is tracked with `PRAGMA user_version`;
-migrations are numbered SQL files `migrations/NNNN_<name>.sql`, applied at startup
-in one transaction each. This DDL is the contract.
+The database is accessed through **SQLAlchemy Core 2.x** (no ORM) inside
+`novelhog.repo`, so the same code runs on **SQLite ≥ 3.45** (default) and
+**PostgreSQL ≥ 16**. The database is chosen by `NOVELHOG_DATABASE_URL` (§9).
+
+- The schema is defined once as SQLAlchemy `Table` objects in
+  `novelhog/repo/schema.py`; that module is the contract. The DDL below is the
+  logical schema, written in its SQLite form; `schema.py` reproduces every
+  table, column, default, foreign key, unique constraint, check and index,
+  applying the portability mapping after the DDL.
+- Migrations are **Alembic** revisions under `migrations/`, applied by the API
+  and the worker at startup (`alembic upgrade head`, serialised by the
+  database). Each revision must run on both SQLite (batch mode) and Postgres.
+- SQLite connections use WAL, `foreign_keys = ON` and `busy_timeout = 5000`.
 
 ```sql
 CREATE TABLE novels (
@@ -273,6 +282,29 @@ CREATE TABLE consumers (                         -- durable readers of the event
     CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
 ) STRICT;
 ```
+
+**Portability mapping** (SQLite DDL above → `schema.py`):
+
+| SQLite form | Portable form in `schema.py` |
+|---|---|
+| `STRICT` tables | dropped; column types enforced by SQLAlchemy types and the application |
+| ID `CHECK (… GLOB …)` | `CHECK (length(id) = 14 AND substr(id, 1, 2) = '<prefix>')`; full format checked by `ids.is_valid` |
+| `TEXT` timestamps | `DateTime(timezone=True)`; values are timezone-aware UTC (`TEXT` ISO-8601 in SQLite, `timestamptz` in Postgres) |
+| `TEXT … CHECK (json_valid(…))` | `JSON` (`TEXT` in SQLite, `jsonb` in Postgres) |
+| `INTEGER … CHECK (x IN (0, 1))` | `Boolean` |
+| `INTEGER PRIMARY KEY AUTOINCREMENT` (`events.seq`) | `BigInteger` identity / autoincrement primary key |
+| partial indexes (`WHERE …`) | `Index(…, sqlite_where=…, postgresql_where=…)` |
+| `"end"` and other reserved words | avoided (already `chapter_from`/`chapter_to`) |
+
+**Locking** is the one behaviour that differs by database and lives only in
+`repo/locking.py`. Every lease, claim and consumer step uses
+`locking.claim_rows(...)`:
+
+- SQLite: the step runs in a `BEGIN IMMEDIATE` transaction, which serialises
+  writers.
+- Postgres: the candidate rows are selected with `FOR UPDATE SKIP LOCKED`, so
+  several workers claim different novels, chapters, exports or consumers
+  concurrently without blocking each other.
 
 Notes:
 
@@ -621,7 +653,7 @@ loop:
     sleep(IDLE_SLEEP)
 ```
 
-- Each lease/claim step is one atomic transaction.
+- Each lease/claim step is one atomic transaction through `repo/locking.py` (SQLite: `BEGIN IMMEDIATE`; Postgres: `FOR UPDATE SKIP LOCKED`, §4).
 - `publish_hosts()` replaces the `hosts` table with the hosts in the installed
   scraper's decode guide (one transaction). Novels whose host is no longer
   listed keep working until a sync fails.
@@ -732,7 +764,7 @@ crash before the cursor moves causes at most one batch to be delivered again
 ```mermaid
 sequenceDiagram
     participant W as Worker (sync / export build)
-    participant DB as SQLite (novelhog.repo)
+    participant DB as Database (novelhog.repo)
     participant N as Notifier consumer (worker)
     participant C as Channel (WebPush, later Telegram)
     participant S as Subscriber (browser, chat)
@@ -790,7 +822,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `ids` | `new_id(prefix) -> str`, `is_valid(id, prefix) -> bool` |
 | `config` | Reads `NOVELHOG_*` env vars into a typed settings object |
 | `domain` | Chapter state rules, selector validation, refresh interval rule, domain exceptions (`NotFound`, `Conflict`, `ValidationFailed`) |
-| `repo` | The database interface: all SQL, migrations, leases, claiming, event log, consumers, subscriptions, settings. The only module that talks to SQLite. Importable on its own (depends only on the standard library, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
+| `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `locking.py` (dialect-specific claiming), Alembic migrations, leases, claiming, event log, consumers, subscriptions, settings. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (pinned `==2.13.1`). `supported_hosts() -> [Host]`, `sync_toc(novel_id, toc_url) -> {title, cover_url, chapters: [(number, url)]}` (creates the scraper novel, identified by `novel_id`, on first use), `fetch_chapter(novel_id, number)`, `find_cover_url(toc_html, toc_url)`. Builds scraper config from `NOVELHOG_*` (base dir `/data/work`, FlareSolverr URL, force FlareSolverr). Used only by the worker |
 | `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (next-page link written as `&gt;`) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
@@ -916,7 +948,8 @@ the JSON payload; the service worker shows it and opens/focuses `url` on click.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NOVELHOG_DATA_DIR` | `/data` | Holds `app.db`, `work/`, `static/` |
+| `NOVELHOG_DATA_DIR` | `/data` | Holds `work/`, `static/` (and `app.db` with the default database URL) |
+| `NOVELHOG_DATABASE_URL` | `sqlite:////data/app.db` | SQLAlchemy URL; `postgresql+psycopg://…` for Postgres |
 | `NOVELHOG_PUBLIC_URL` | — (required for push) | External HTTPS URL, used in push links and the VAPID claim |
 | `NOVELHOG_VAPID_SUBJECT` | — (required for push) | `mailto:` contact for the VAPID claim |
 | `NOVELHOG_FLARESOLVERR_URL` | `http://flaresolverr:8191` | |
@@ -1196,7 +1229,7 @@ desktop chapters, export dialog, phone normal and select mode).
   `notify()` in the API). First implementation: UDP datagram to every address the
   worker service name resolves to, with the timed sleep kept as fallback; the
   worker always re-checks the database. With Postgres: `LISTEN/NOTIFY`.
-- **Postgres** for multi-host clustering, behind the `repo` layer.
+- **Multi-host clustering** on Postgres: already supported by the code and tested in CI; needs only `NOVELHOG_DATABASE_URL`, shared static storage (S3) and workers on several hosts.
 - **S3 static backend** (`S3StaticStorage`), setting `Content-Type` and
   `Content-Disposition` per object.
 - **Image table**: move inline images of chapters with `has_images` into a
@@ -1224,7 +1257,7 @@ desktop chapters, export dialog, phone normal and select mode).
   relative URLs); `exporter` (order, cover, image extraction, no WebP in EPUB
   output, stored originals unchanged); chapter state rules; selector validation; refresh interval
   rule (reset, doubling, cap, jitter bounds).
-- **Integration (real temporary SQLite):** lease and claim with two competing
+- **Integration (real temporary database; SQLite by default, Postgres in CI, see below):** lease and claim with two competing
   workers; recovery of expired leases; SIGTERM requeue; dequeue during a claimed
   batch; refresh scheduling and priority over downloads; initial import vs later
   release (`released_at`, auto-queue for followed only); `new_pages` vs
@@ -1259,7 +1292,7 @@ desktop chapters, export dialog, phone normal and select mode).
 - **Process boundaries:** the API package imports neither `scraper_adapter`,
   `exporter`, `images` nor `notifications.channels` (import-linter contract);
   `repo` imports nothing beyond the standard library, `ids` and `domain`.
-- **Exports (real temporary SQLite):** `POST` queues `not_requested` and `error`
+- **Exports (real temporary database):** `POST` queues `not_requested` and `error`
   chapters of the range and creates a `waiting` export with the right `waited`;
   an identical waiting export is returned instead of a duplicate; the worker
   builds only when the whole range is `downloaded`; `waiting → building →
@@ -1269,6 +1302,15 @@ desktop chapters, export dialog, phone normal and select mode).
   export, leaves its chapters queued and answers `409` once building; expired
   `building` claims return to `waiting`; every state change emits an `export`
   event.
+- **Database portability:** every repository and integration test takes its
+  database from `NOVELHOG_TEST_DATABASE_URL` (default: a temporary SQLite file).
+  CI runs the suite twice, on SQLite and on PostgreSQL 16 (service container);
+  `scripts/test_pg.sh` does the same locally with Docker. Locking tests check
+  that two workers never claim the same row on either database, and that on
+  Postgres they claim different rows concurrently without waiting.
+- **Migrations:** `alembic upgrade head` on an empty database produces the same
+  schema as `schema.py` (Alembic autogenerate reports no differences) on both
+  databases.
 - **API:** `httpx` against the app with a real temporary database and no
   scraper, network or worker; every route,
   success and each error code, including `503 channel_disabled`.
@@ -1315,7 +1357,7 @@ desktop chapters, export dialog, phone normal and select mode).
   src/novelhog/{api,worker,domain,repo,scraper_adapter,storage,exporter,notifications,
                 html_to_markdown,image_fetcher,images,chapter_store,vapid.py,ids.py,
                 config.py,cli.py}
-  migrations/
+  migrations/        (Alembic: env.py, versions/)
   web/src/{routes,components,api,hooks}   web/public/{sw.js,manifest.webmanifest}
   tests/{unit,integration,api,fixtures}
   docker/{Dockerfile,Caddyfile}   compose.yaml   STYLEGUIDE.md   docs/superpowers/specs/
