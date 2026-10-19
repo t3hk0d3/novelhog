@@ -6,7 +6,7 @@ first (a missing novel means a lost claim), then the child rows, then the events
 the recovery scans) are exempt.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -36,7 +36,11 @@ class ChapterClaim:
 
 @dataclass(frozen=True)
 class RecoveryReport:
-    """What `recover` reset. Export and consumer parts are filled by later tasks."""
+    """What `recover` reset. Export and consumer parts are filled by later tasks.
+
+    `chapters_freed` counts expired `pending` claims (no events) and also removed chapters that
+    were downloading, which return to `not_requested` (with events).
+    """
 
     chapters_requeued: int
     chapters_freed: int
@@ -69,9 +73,16 @@ class Work:
         self._clock = context.clock
         self._static_base_url = context.static_base_url
 
-    def _emit(self, conn: Connection, novel_id: str, changed: Sequence[str], now: datetime) -> None:
+    def _emit(
+        self,
+        conn: Connection,
+        novel_id: str,
+        changed: Sequence[str],
+        now: datetime,
+        errors: Mapping[str, tuple[str, datetime]] | None = None,
+    ) -> None:
         events.emit_novel_change(
-            conn, novel_id, changed, now=now, static_base_url=self._static_base_url
+            conn, novel_id, changed, now=now, static_base_url=self._static_base_url, errors=errors
         )
 
     def claim_batch(self, worker_id: str, size: int, ttl: int) -> list[ChapterClaim]:
@@ -178,14 +189,7 @@ class Work:
             if markdown is not None:
                 contents.put(conn, chapter_id, markdown, now)
             errors = None if error is None else {chapter_id: (error, now)}
-            events.emit_novel_change(
-                conn,
-                novel_id,
-                [chapter_id],
-                now=now,
-                static_base_url=self._static_base_url,
-                errors=errors,
-            )
+            self._emit(conn, novel_id, [chapter_id], now, errors)
             return True
 
     def complete(

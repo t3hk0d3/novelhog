@@ -10,10 +10,10 @@ from sqlalchemy import insert, select, update
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.errors import NotFound
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import chapters, events, novels
+from novelhog.repo.schema import chapters, events, exports, novels
 from novelhog.repo.work import ChapterClaim
 from tests.conftest import FakeClock
-from tests.integration.helpers import chapter_row
+from tests.integration.helpers import chapter_row, export_row, novel_row
 
 URL = "https://example.com/novel"
 TTL = 300
@@ -59,17 +59,6 @@ def chapter_events(repo: Repo, chapter_id: str) -> list[Any]:
                 select(events).where(events.c.entity_id == chapter_id).order_by(events.c.seq)
             ).all()
         )
-
-
-def claim_of(repo: Repo, novel_id: str, position: int, worker: str = ME) -> ChapterClaim:
-    return ChapterClaim(
-        chapter_id=cid(position),
-        novel_id=novel_id,
-        host="example.com",
-        toc_url=URL,
-        position=position,
-        url=f"{URL}/{position}",
-    )
 
 
 def started(repo: Repo, novel_id: str, position: int = 1, worker: str = ME) -> str:
@@ -496,8 +485,6 @@ class TestRecover:
     ) -> None:
         second = "NV000000000002"
         with db.write(repo.engine) as conn:
-            from tests.integration.helpers import novel_row
-
             conn.execute(
                 insert(novels).values(**novel_row(id=second, toc_url="https://example.com/other"))
             )
@@ -554,3 +541,43 @@ class TestRecover:
         assert event_count(repo) == before
         assert row_of(repo, cid(1)).state == "downloading"
         assert row_of(repo, cid(2)).claimed_by == ME
+
+
+class TestEventsWithAWaitingExport:
+    @pytest.fixture
+    def waiting_export(self, repo: Repo, novel_id: str) -> str:
+        add(repo, novel_id, 1)
+        with db.write(repo.engine) as conn:
+            conn.execute(
+                insert(exports).values(
+                    **export_row(novel_id=novel_id, first_chapter_id=cid(1), last_chapter_id=cid(1))
+                )
+            )
+        return str(export_row()["id"])
+
+    def export_events(self, repo: Repo, export_id: str) -> list[Any]:
+        return chapter_events(repo, export_id)
+
+    def test_start__appends_an_ex_event_for_the_waiting_export_covering_the_chapter(
+        self, repo: Repo, novel_id: str, waiting_export: str
+    ) -> None:
+        (claim,) = repo.work.claim_batch(ME, 1, TTL)
+        repo.work.start(claim, ME)
+        assert len(self.export_events(repo, waiting_export)) == 1
+
+    def test_complete__appends_an_ex_event_for_the_waiting_export_covering_the_chapter(
+        self, repo: Repo, novel_id: str, waiting_export: str
+    ) -> None:
+        (claim,) = repo.work.claim_batch(ME, 1, TTL)
+        repo.work.start(claim, ME)
+        repo.work.complete(cid(1), ME, markdown="x", title="t", has_images=False)
+        assert len(self.export_events(repo, waiting_export)) == 2
+
+    def test_recover__appends_an_ex_event_for_the_waiting_export_covering_the_chapter(
+        self, repo: Repo, novel_id: str, waiting_export: str, clock: FakeClock
+    ) -> None:
+        (claim,) = repo.work.claim_batch(ME, 1, TTL)
+        repo.work.start(claim, ME)
+        clock.advance(seconds=TTL + 1)
+        repo.work.recover()
+        assert len(self.export_events(repo, waiting_export)) == 2
