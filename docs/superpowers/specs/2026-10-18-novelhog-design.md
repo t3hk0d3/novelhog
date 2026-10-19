@@ -127,7 +127,7 @@ Responsibilities are split by concern, not by load:
 - `novelhog-web` publishes one port (default `8080`) for the user's HTTPS
   reverse proxy.
 - The API process needs only FastAPI, the repository layer and `py-vapid` for key
-  generation; the scraper, FlareSolverr access, Pillow and `pywebpush` are used
+  generation; the scraper, FlareSolverr access, Pillow, `ebooklib` and `pywebpush` are used
   only by the worker. One image still serves both for simplicity; the
   import-linter contract (§13) keeps the boundary.
 - Both `NOVELHOG_PUBLIC_URL` and `NOVELHOG_VAPID_SUBJECT` are set on both
@@ -1031,7 +1031,7 @@ build(export):                                        # heartbeat running
     if an end chapter has no position: fail(export, "Range changed upstream"); return
     chapters = downloaded chapters with a position between the ends, in position order
     cover = storage.get(novel.cover_key) if any
-    write the book to a temporary file, chapter by chapter (§8.5)
+    write the book to a temporary file (§8.5)
     key = exports/<novel_id>/<export_id>/<filename>
     storage.put_file(key, temp file, mime, download_name = filename)
     finish(export, key, size)                         # fenced → ready; if the claim was lost: trash the key
@@ -1040,8 +1040,6 @@ except: fail(export, '<Type>: <summary>') (fenced; traceback logged)
 
 - Builds read only the database, the cover and static storage; they take no
   novel claim and can run while chapters of the same novel download.
-- A build streams: at most one chapter's content (with its images) is in memory
-  at a time.
 - A `failed` export is final; the UI offers "Try again", which creates a new
   export for the same range.
 - Exports whose range was already complete at request time (`waited = 0`) do
@@ -1204,7 +1202,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `image_fetcher` | Image download through `net`; validation (§8.2) |
 | `chapter_store` | Worker-side read access to stored chapter Markdown (`get(chapter_id)`), over `repo` |
 | `storage` | `StaticStorage`: `put(key, data, mime, download_name=None)`, `put_file(key, path, mime, download_name=None)`, `get(key) -> bytes \| None`, `delete(key)`, `url(key) -> str`. v1: `LocalStaticStorage`; `cover_key(novel_id, data, ext)` |
-| `exporter` | Builders per format. EPUB: a streaming writer over the standard library `zipfile` (§8.5); Markdown → XHTML with `markdown-it-py` (raw HTML disabled); cover; inline images extracted to EPUB items and converted per §8.4 |
+| `exporter` | Builders per format. EPUB: `ebooklib` (§8.5); Markdown → XHTML with `markdown-it-py` (raw HTML disabled); cover; inline images extracted to EPUB items and converted per §8.4 |
 | `images` | Pillow helpers: `sniff`, `downscale(data, mime, max_dimension)`, `convert_for(data, mime, accepted) -> (data, mime)`, pixel-count guard |
 | `notifications.rules` | `match(event, novel) -> NotificationMessage(title, body, url, icon) \| None` (§6.6, §8.6) |
 | `notifications.channels` | `NotificationChannel` protocol: `name: str`, `send(subscription, message) -> Delivered \| Gone \| Failed(reason)`. Registry `name → channel`. v1: `WebPushChannel` (`pywebpush`, VAPID keys from `settings`; `404`/`410` → `Gone`). Later: `TelegramChannel` |
@@ -1321,10 +1319,8 @@ The cover goes through the same conversion.
 
 ### 8.5 EPUB
 
-- EPUB 3, written by novelhog's own streaming writer on `zipfile`: `mimetype`
-  first and uncompressed, then container, package document, navigation document,
-  and one XHTML document per chapter in `position` order, each written as soon as
-  it is rendered.
+- EPUB 3, built with `ebooklib`: one XHTML document per chapter in `position`
+  order, plus a navigation document.
 - Each chapter document is headed by the stored chapter title (or
   "Chapter <position>").
 - The cover, when present, is the book cover.
@@ -1735,7 +1731,7 @@ desktop chapters, export dialog, phone normal and select mode).
   animated → first frame); `find_title`, `find_cover_url` (each heuristic,
   relative URLs); `exporter` (order, cover, image extraction, no WebP in EPUB
   output, stored originals unchanged, well-formed XML with hostile titles,
-  `dc:language`, streaming: memory does not grow with the number of chapters);
+  `dc:language`);
   notification rules.
 - **Integration (real temporary database; SQLite by default, Postgres via
   `NOVELHOG_TEST_DATABASE_URL`):** claims with competing workers; fencing (a
