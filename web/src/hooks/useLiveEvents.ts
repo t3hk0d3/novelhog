@@ -107,6 +107,11 @@ class CacheWriter {
     this.replay.set(hash, entry);
   }
 
+  /** A query removed mid-fetch never settles; forget its buffer so a new query starts clean. */
+  discard(key: QueryKey): void {
+    this.replay.delete(hashKey(key));
+  }
+
   /** Called on every cache update: once a buffered query settles, replay or drop its buffer. */
   settle(key: QueryKey, state: { fetchStatus: string; status: string }): void {
     const hash = hashKey(key);
@@ -170,8 +175,9 @@ export function useLiveEvents(client: QueryClient): void {
   useEffect(() => {
     const writer = new CacheWriter(client);
     const unsubscribe = client.getQueryCache().subscribe((event) => {
-      if (event.type === 'updated')
-        writer.settle(event.query.queryKey as QueryKey, event.query.state);
+      const key = event.query.queryKey as QueryKey;
+      if (event.type === 'updated') writer.settle(key, event.query.state);
+      else if (event.type === 'removed') writer.discard(key);
     });
     let source: EventSource | undefined;
     let batch = emptyPending();

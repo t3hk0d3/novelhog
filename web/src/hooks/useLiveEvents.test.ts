@@ -329,6 +329,26 @@ describe('useLiveEvents', () => {
     });
   });
 
+  describe('When an in-flight query is removed', () => {
+    it('does not leak its buffered events into a later query with the same key', async () => {
+      mount();
+      void client
+        .query({
+          queryKey: ['chapters', 'NV1'],
+          queryFn: () => new Promise<Chapter[]>(() => undefined),
+        })
+        .catch(() => undefined);
+      source.emit('chapter', { ...chapter('CH1', 1, { state: 'error' }), novel_id: 'NV1' });
+      runFrame();
+      client.removeQueries({ queryKey: ['chapters', 'NV1'] });
+      await client.query({
+        queryKey: ['chapters', 'NV1'],
+        queryFn: () => [chapter('CH1', 1, { state: 'downloaded' })],
+      });
+      expect(client.getQueryData<Chapter[]>(['chapters', 'NV1'])?.[0]?.state).toBe('downloaded');
+    });
+  });
+
   describe('When the connection closes for good', () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -368,6 +388,18 @@ describe('useLiveEvents', () => {
       });
       expect(FakeEventSource.instances).toHaveLength(2);
       act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(FakeEventSource.instances).toHaveLength(3);
+    });
+
+    it('resets the backoff once a connection opens', () => {
+      mount();
+      act(() => {
+        source.fail();
+        vi.advanceTimersByTime(1000);
+        FakeEventSource.instances[1]?.emit('open');
+        FakeEventSource.instances[1]?.fail();
         vi.advanceTimersByTime(1000);
       });
       expect(FakeEventSource.instances).toHaveLength(3);
@@ -453,7 +485,7 @@ describe('useLiveEvents', () => {
 
     it('does not swallow errors thrown while handling a valid payload', () => {
       mount();
-      // a chapter payload without novel_id is valid JSON but breaks the handler's assumptions
+      // a null export payload is valid JSON but breaks the handler's assumptions
       expect(() => {
         source.emit('export', null);
       }).toThrow();
