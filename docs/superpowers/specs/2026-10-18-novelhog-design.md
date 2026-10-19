@@ -1295,7 +1295,9 @@ Package `novelhog`, under `src/novelhog/`.
   - Character classes are defined by Unicode general category so the Python
     and TypeScript implementations agree: *whitespace* is tab, LF, CR and
     category `Zs`; *control characters* are the rest of categories `Cc` and `Cf`
-    (this includes U+0085, U+FEFF and bidi controls such as U+202E).
+    (this includes U+0085, U+FEFF and bidi controls such as U+202E), except
+    U+200C and U+200D (zero-width non-joiner and joiner), which are kept so
+    emoji sequences and scripts that use them survive.
   - The suffix is always complete, so the whole name stays below 255 bytes.
   - Emoji and non-Latin letters are kept.
 - URLs: `domain.urls.static_url(base, key)` joins `STATIC_BASE_URL` and the key

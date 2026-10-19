@@ -52,15 +52,19 @@ def format_for_mime(mime: str) -> Format:
 
 _UNSAFE = re.compile(r'[/\\:*?"<>|]')
 _WHITESPACE_CONTROLS = "\t\n\r"
+_KEPT_FORMAT_CHARS = "\u200c\u200d"  # ZWNJ and ZWJ are part of emoji and Persian text
 _MAX_TITLE_BYTES = 150
 
 
 def _classify(char: str) -> str:
-    """Map whitespace (tab, LF, CR, Zs) to a space and other Cc/Cf controls to `_`."""
+    """Map whitespace (tab, LF, CR, Zs) to a space and other Cc/Cf controls to `_`.
+
+    ZWNJ and ZWJ are kept: they are part of emoji sequences and Persian text.
+    """
     category = unicodedata.category(char)
     if char in _WHITESPACE_CONTROLS or category == "Zs":
         return " "
-    if category in {"Cc", "Cf"}:
+    if category in {"Cc", "Cf"} and char not in _KEPT_FORMAT_CHARS:
         return "_"
     return char
 
