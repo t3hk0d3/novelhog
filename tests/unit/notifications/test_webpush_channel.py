@@ -10,7 +10,7 @@ import requests
 from py_vapid import Vapid
 from pywebpush import WebPushException
 
-from novelhog import vapid
+from novelhog import log, vapid
 from novelhog.domain.types import Subscription
 from novelhog.net import Refused
 from novelhog.notifications import channels
@@ -132,3 +132,26 @@ class TestSend__OnFailure:
         data = sent[0]["data"]
         assert len(data.encode()) < 2000
         assert json.loads(data)["title"].endswith("\u2026")
+
+
+class TestSend__LoggingUnexpectedErrors:
+    def test_send__logs_type_and_frames_but_never_the_message(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        log.setup("worker")
+        secret = "SECRET-MARKER-9f3a"  # noqa: S105
+
+        def explode(**_kwargs: Any) -> None:
+            raise ValueError(secret)
+
+        monkeypatch.setattr(channels, "webpush", explode)
+
+        result = _channel().send(SUBSCRIPTION, MESSAGE)
+
+        out = capsys.readouterr().out
+        assert secret not in out
+        assert secret not in result.reason  # type: ignore[union-attr]
+        (line,) = [json.loads(x) for x in out.splitlines() if x.startswith("{")]
+        assert line["event"] == "webpush_unexpected_error"
+        assert line["error_type"] == "ValueError"
+        assert "in explode" in line["frames"]
