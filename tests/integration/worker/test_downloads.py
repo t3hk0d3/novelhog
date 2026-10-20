@@ -17,6 +17,7 @@ from novelhog.worker import downloads
 from novelhog.worker.downloads import BatchReport, download
 from tests.integration.worker.conftest import (
     DELAY,
+    HOST,
     ME,
     URL,
     FakeAdapter,
@@ -303,3 +304,101 @@ class TestDownload__WhenTheClaimWasLost:
 
         assert report == BatchReport(downloaded=1, failed=0, skipped=0, released=0, lost=1)
         assert chapter_of(repo, batch[0].chapter_id).state == "downloading"
+
+
+class TestDownload__HostPoliteness:
+    def test_download__waits_the_larger_of_request_delay_and_the_hosts_delay(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 3)
+        adapter.delays[HOST] = 10.0
+        stop = RecordingStop()
+
+        run(repo, adapter, fetcher, batch, settings, stop)
+
+        assert stop.waits == [10.0, 10.0]
+
+    def test_download__keeps_request_delay_when_the_hosts_delay_is_smaller(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 2)
+        adapter.delays[HOST] = DELAY / 2
+        stop = RecordingStop()
+
+        run(repo, adapter, fetcher, batch, settings, stop)
+
+        assert stop.waits == [DELAY]
+
+
+class TestDownload__HeartbeatClaimRules:
+    def test_download__a_dequeued_sibling_neither_stops_renewals_nor_aborts_the_batch(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings, heartbeat: type[StubHeartbeat],
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 3)
+        results: list[bool] = []
+
+        def hook(url: str) -> None:
+            if url == f"{URL}/1":
+                with db.write(repo.engine) as conn:
+                    conn.execute(
+                        update(chapters)
+                        .where(chapters.c.id == batch[2].chapter_id)
+                        .values(
+                            state="not_requested", queued_at=None, claimed_by=None,
+                            claimed_until=None,
+                        )
+                    )  # fmt: skip
+                results.append(heartbeat.instances[0].renew())
+                results.append(heartbeat.instances[0].renew())
+
+        adapter.hook = hook
+
+        report = run(repo, adapter, fetcher, batch, settings, RecordingStop())
+
+        assert results == [True, True]
+        assert report == BatchReport(downloaded=2, failed=0, skipped=1, released=0, lost=0)
+
+    def test_download__losing_the_current_chapters_claim_sets_lost(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings, heartbeat: type[StubHeartbeat],
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 1)
+        results: list[bool] = []
+
+        def hook(url: str) -> None:
+            with db.write(repo.engine) as conn:
+                conn.execute(update(chapters).values(claimed_by="someone-else"))
+            results.append(heartbeat.instances[0].renew())
+
+        adapter.hook = hook
+
+        run(repo, adapter, fetcher, batch, settings, RecordingStop())
+
+        assert results == [False]
+
+    def test_download__a_finished_chapter_is_never_renewed(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings, heartbeat: type[StubHeartbeat], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 2)
+        renewed: list[list[str]] = []
+        original = repo.work.renew_chapters
+
+        def spy(ids: list[str], worker_id: str, ttl: int) -> list[str]:
+            renewed.append(list(ids))
+            return original(ids, worker_id, ttl)
+
+        monkeypatch.setattr(repo.work, "renew_chapters", spy)
+
+        def hook(url: str) -> None:
+            if url == f"{URL}/2":
+                assert heartbeat.instances[0].renew() is True
+
+        adapter.hook = hook
+
+        run(repo, adapter, fetcher, batch, settings, RecordingStop())
+
+        assert renewed == [[batch[1].chapter_id]]

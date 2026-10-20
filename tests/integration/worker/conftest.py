@@ -50,9 +50,13 @@ class FakeAdapter:
         self.toc_error: Exception | None = None
         self.hook: Any = None
         self.fetched: list[str] = []
+        self.delays: dict[str, float] = {}
 
     def supported_hosts(self) -> list[str]:
         return [HOST]
+
+    def request_delay(self, host: str) -> float:
+        return self.delays.get(host, 0.0)
 
     def sync_toc(self, novel_id: str, host: str, toc_url: str) -> TocResult:
         if self.toc_error is not None:
