@@ -31,3 +31,17 @@ class TestTrash:
         clock.advance(seconds=5)
         put(repo, ["b", "a", "b"])
         assert repo.trash.take() == ["a", "b"]
+
+
+class TestDiscard:
+    def test_discard__trashes_the_keys_in_its_own_transaction(
+        self, repo: Repo, clock: FakeClock
+    ) -> None:
+        repo.trash.discard(["b", "a", "b"])
+        assert repo.trash.take() == ["a", "b"]
+
+    def test_discard__existing_key_and_empty_list_are_no_ops(self, repo: Repo) -> None:
+        put(repo, ["a"])
+        repo.trash.discard(["a"])
+        repo.trash.discard([])
+        assert repo.trash.take() == ["a"]

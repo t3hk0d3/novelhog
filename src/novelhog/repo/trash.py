@@ -25,6 +25,14 @@ class Trash:
 
     def __init__(self, context: RepoContext) -> None:
         self._engine = context.engine
+        self._clock = context.clock
+
+    def discard(self, keys: list[str]) -> None:
+        """Trash the keys in their own transaction (a file uploaded but never published)."""
+        if not keys:
+            return
+        with db.write(self._engine) as conn:
+            add(conn, keys, self._clock())
 
     def take(self, limit: int = 100) -> list[str]:
         """Return up to `limit` trashed keys, oldest first; they stay until `remove`."""
