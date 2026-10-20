@@ -136,6 +136,13 @@ class ScraperAdapter:
                     novel.novel_data_helper.delete_chapter_html(chapter.chapter_html_filename)
             return FetchedChapter(title=title, body_html=chapter.chapter_content)
 
+    def request_delay(self, host: str) -> float:
+        """The host's own `request_time_between_requests` in seconds (0 when it sets none)."""
+        config = self._config()
+        config.set_host(host)
+        delay = config.config_options["request_config"].get("request_time_between_requests")
+        return float(delay or 0)
+
     def _config(self) -> ScraperConfig:
         """The scraper's per-host config, with our FlareSolverr address and no user config file."""
         scraper_dir = self._settings.scraper_dir

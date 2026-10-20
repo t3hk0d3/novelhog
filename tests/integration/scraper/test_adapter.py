@@ -103,6 +103,22 @@ class TestScraperAdapter__SupportedHosts:
         assert not any(h.startswith("www.") for h in hosts)
 
 
+class TestScraperAdapter__RequestDelay:
+    def test_request_delay__returns_the_hosts_configured_seconds(
+        self, tmp_path: Path, dead_url: str
+    ) -> None:
+        adapter = ScraperAdapter(make_settings(tmp_path, dead_url))
+
+        assert adapter.request_delay("fucknovelpia.com") == 10.0
+
+    def test_request_delay__is_zero_for_a_host_without_one(
+        self, tmp_path: Path, dead_url: str
+    ) -> None:
+        adapter = ScraperAdapter(make_settings(tmp_path, dead_url))
+
+        assert adapter.request_delay(SH_HOST) == 0.0
+
+
 class TestScraperAdapter__SyncToc:
     def test_sync_toc__uses_novel_id_as_scraper_title_in_scraper_dir(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr
