@@ -2,9 +2,11 @@
 
 from contextlib import suppress
 
+import pytest
+
 from novelhog.domain.errors import NotFound
 from novelhog.domain.types import Subscription
-from novelhog.notifications import dispatcher
+from novelhog.notifications import channels, dispatcher
 from novelhog.notifications.channels import (
     Delivered,
     Failed,
@@ -236,3 +238,65 @@ class TestDispatch__WhenTheClaimIsLost:
         assert (report.advanced, report.lost) == (False, True)
         assert repo.consumers.release("notifier", "thief") is True
         assert repo.consumers.claim("notifier", "w3", 60) == before
+
+
+class TestDispatch__WithABadSubscription:
+    def test_dispatch__carries_on_and_advances_when_a_channel_reports_failed(
+        self, repo: Repo
+    ) -> None:
+        import requests
+
+        from novelhog import vapid
+        from novelhog.notifications.channels import WebPushChannel
+
+        novel = _start(repo)
+        bad = repo.subscriptions.upsert(
+            "webpush",
+            {"endpoint": "https://push.example/a", "keys": {"p256dh": "p", "auth": "a"}},
+            "bad",
+            None,
+        )[0].id
+        good = _subscribe(repo, "good", channel="fake")
+        seq = _release(repo, novel, [1])
+        fake = FakeChannel()
+        fake.name = "fake"
+        real = WebPushChannel(vapid._generate(), "mailto:a@b.c", requests.Session())  # noqa: SLF001
+
+        report = dispatcher.dispatch(
+            repo, {"webpush": real, "fake": fake}, owner="w1", ttl=60, public_url=PUBLIC
+        )
+
+        assert [sid for sid, _ in fake.sent] == [good]
+        assert (report.failed, report.advanced) == (1, True)
+        assert bad in {s.id for s in repo.subscriptions.all_with_address()}
+        assert repo.consumers.claim("notifier", "w2", 60) == seq
+
+
+class TestDispatch__WithARegistryHolder:
+    def test_dispatch__sends_once_keys_appear_after_a_pass_without_webpush(
+        self, repo: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import requests
+
+        from novelhog import config, vapid
+        from novelhog.notifications.channels import RegistryHolder
+
+        settings = config.load(
+            {"NOVELHOG_PUBLIC_URL": PUBLIC, "NOVELHOG_VAPID_SUBJECT": "mailto:a@b.c"}
+        )
+        holder = RegistryHolder(settings, repo, requests.Session())
+        novel = _start(repo)
+        _subscribe(repo, "a")
+        _release(repo, novel, [1])
+
+        first = dispatcher.dispatch(repo, holder.get, owner="w1", ttl=60, public_url=PUBLIC)
+        assert (first.skipped, first.delivered) == (1, 0)
+
+        vapid.ensure_keys(repo)
+        calls: list[object] = []
+        monkeypatch.setattr(channels, "webpush", lambda **kw: calls.append(kw))
+        _release(repo, novel, [2])
+
+        second = dispatcher.dispatch(repo, holder.get, owner="w1", ttl=60, public_url=PUBLIC)
+
+        assert (second.delivered, len(calls)) == (1, 1)

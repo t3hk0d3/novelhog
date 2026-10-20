@@ -18,6 +18,8 @@ from novelhog.vapid import VapidKeys
 
 TTL_S = 86400
 TIMEOUT_S = 10
+MAX_TITLE_CHARS = 100
+MAX_BODY_CHARS = 200
 _GONE = (404, 410)
 
 
@@ -49,6 +51,11 @@ class NotificationChannel(Protocol):
     def send(self, subscription: Subscription, message: NotificationMessage) -> SendResult: ...
 
 
+def _clip(text: str, limit: int) -> str:
+    """Shorten `text` to `limit` characters so the encrypted payload stays below 4 KB."""
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
 class WebPushChannel:
     """Sends the message as a JSON Web Push payload signed with the stored VAPID key pair."""
 
@@ -62,7 +69,13 @@ class WebPushChannel:
     def send(self, subscription: Subscription, message: NotificationMessage) -> SendResult:
         """Deliver `message`; 404 and 410 mean the subscription is gone."""
         payload = json.dumps(
-            {"title": message.title, "body": message.body, "url": message.url, "icon": message.icon}
+            {
+                "title": _clip(message.title, MAX_TITLE_CHARS),
+                "body": _clip(message.body, MAX_BODY_CHARS),
+                "url": message.url,
+                "icon": message.icon,
+            },
+            ensure_ascii=False,
         )
         try:
             webpush(
@@ -80,8 +93,12 @@ class WebPushChannel:
             if status in _GONE:
                 return Gone()
             return Failed(f"push service answered {status}" if status else str(error.message))
-        except (requests.RequestException, Refused) as error:
-            return Failed(f"{type(error).__name__}: {error}")
+        except Refused as error:
+            return Failed(f"Refused: {error}")
+        except Exception as error:  # noqa: BLE001 - one bad subscription must not stop the rest
+            # Only the type is reported: messages of request errors carry the endpoint URL and
+            # messages of key-decoding errors may carry key material.
+            return Failed(f"{type(error).__name__} while sending")
         return Delivered()
 
 
@@ -94,7 +111,27 @@ def build_registry(
         return registry
     keys = vapid.load(repo)
     if keys is None:
-        log.get().warning("webpush_keys_missing")
+        log.get().info("webpush_keys_missing")
         return registry
     registry["webpush"] = WebPushChannel(keys, settings.vapid_subject, session)
     return registry
+
+
+class RegistryHolder:
+    """Hands out the channel registry, rebuilding it while push is configured but not registered.
+
+    The worker may start before the API has created the VAPID keys; checking again on each
+    `get()` (one `settings` SELECT while `webpush` is missing) picks the keys up without a restart.
+    """
+
+    def __init__(self, settings: Settings, repo: Repo, session: requests.Session) -> None:
+        self._settings = settings
+        self._repo = repo
+        self._session = session
+        self._registry: dict[str, NotificationChannel] = build_registry(settings, repo, session)
+
+    def get(self) -> dict[str, NotificationChannel]:
+        """Return the current registry."""
+        if self._settings.webpush_enabled and "webpush" not in self._registry:
+            self._registry = build_registry(self._settings, self._repo, self._session)
+        return self._registry

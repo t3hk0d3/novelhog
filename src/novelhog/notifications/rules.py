@@ -24,7 +24,7 @@ def _icon(novel: NovelView, public_url: str) -> str:
     cover = novel.cover_url
     if cover is None:
         return f"{base}{_DEFAULT_ICON}"
-    if "://" in cover:
+    if "://" in cover or cover.startswith("//"):
         return cover
     return f"{base}/{cover.lstrip('/')}"
 

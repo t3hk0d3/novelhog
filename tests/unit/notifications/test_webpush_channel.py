@@ -1,6 +1,7 @@
 """The Web Push channel (pywebpush monkeypatched)."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -115,3 +116,19 @@ class TestSend__OnFailure:
     ) -> None:
         _raising(monkeypatch, Refused("private"))
         assert _channel().send(SUBSCRIPTION, MESSAGE) == Failed("Refused: private")
+
+    def test_send__returns_failed_without_details_for_malformed_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _raising(monkeypatch, ValueError("bad key SECRET"))
+        result = _channel().send(SUBSCRIPTION, MESSAGE)
+        assert result == Failed("ValueError while sending")
+
+    def test_send__bounds_the_payload_of_a_very_long_title(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        long = replace(MESSAGE, title="\u6f22" * 5000, body="x" * 5000)
+        _channel().send(SUBSCRIPTION, long)
+        data = sent[0]["data"]
+        assert len(data.encode()) < 2000
+        assert json.loads(data)["title"].endswith("\u2026")

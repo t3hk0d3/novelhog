@@ -135,3 +135,9 @@ class TestMatch__Icon:
         message = match(_nv(), _novel(), public_url=PUBLIC + "/")
         assert message is not None
         assert message.icon == f"{PUBLIC}/icons/192.png"
+
+    def test_match__keeps_a_protocol_relative_cover(self) -> None:
+        novel = _novel(cover_url="//cdn.example/a.jpg")
+        message = match(_nv(), novel, public_url=PUBLIC)
+        assert message is not None
+        assert message.icon == "//cdn.example/a.jpg"

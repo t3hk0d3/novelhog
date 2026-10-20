@@ -1,5 +1,6 @@
 """The `notifier` consumer: reads the event log and delivers notifications (spec 6.6)."""
 
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -11,6 +12,8 @@ from novelhog.notifications.channels import Delivered, Failed, Gone, Notificatio
 from novelhog.repo import Repo
 from novelhog.repo.events import EventRow
 from novelhog.worker.runtime import Heartbeat
+
+Registry = Mapping[str, NotificationChannel] | Callable[[], Mapping[str, NotificationChannel]]
 
 CONSUMER = "notifier"
 _HEARTBEAT_DIVISOR = 3
@@ -39,7 +42,7 @@ def _novel(repo: Repo, event: EventRow) -> NovelView | None:
 
 def dispatch(
     repo: Repo,
-    registry: dict[str, NotificationChannel],
+    registry: Registry,
     *,
     owner: str,
     ttl: int,
@@ -47,6 +50,9 @@ def dispatch(
     batch: int = 100,
 ) -> DispatchReport:
     """Deliver the notifications of the next `batch` events, then advance the cursor.
+
+    `registry` is a mapping or a callable returning one (`RegistryHolder.get`), read once per
+    call.
 
     Does nothing when another live process holds the consumer. Delivery is at least once: a crash
     before the cursor moves repeats that batch. When the claim is lost the cursor is not moved.
@@ -56,6 +62,7 @@ def dispatch(
         return DispatchReport()
     logger = log.get(consumer=CONSUMER)
     try:
+        channels = registry() if callable(registry) else registry
         events = repo.events.since(last_seq, limit=batch)
         if not events:
             repo.consumers.release(CONSUMER, owner)
@@ -71,7 +78,9 @@ def dispatch(
                 if message is None:
                     continue
                 for subscription in repo.subscriptions.all_with_address():
-                    channel = registry.get(subscription.channel)
+                    if beat.lost:
+                        break
+                    channel = channels.get(subscription.channel)
                     if channel is None:
                         skipped += 1
                         logger.info(
