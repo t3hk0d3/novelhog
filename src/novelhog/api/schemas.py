@@ -7,9 +7,11 @@ OpenAPI document holds exactly one schema per name (request models are named `..
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
+from novelhog.domain import webpush
 from novelhog.domain.chapters import ChapterState
+from novelhog.domain.exports import ExportState
 
 
 class ErrorDetail(BaseModel):
@@ -159,3 +161,91 @@ class ChapterPatchResult(BaseModel):
 
     updated: list[int]
     skipped: list[ChapterSkipped]
+
+
+class ExportProgress(BaseModel):
+    """Chapters of an export's range that are downloaded, out of the range size."""
+
+    downloaded: int
+    total: int
+
+
+class ExportBlocked(BaseModel):
+    """Positions holding a waiting export back."""
+
+    errors: list[int]
+    not_queued: list[int]
+
+
+class Export(BaseModel):
+    """The `Export` object (spec section 5.2); timestamps are RFC 3339 strings."""
+
+    id: str
+    novel_id: str
+    filename: str
+    chapter_from: int | None
+    chapter_to: int | None
+    skip_missing: bool
+    format: Literal["epub"]
+    mime: str
+    state: ExportState
+    progress: ExportProgress
+    blocked: ExportBlocked
+    error: str | None
+    waited: bool
+    size_bytes: int | None
+    url: str | None
+    created_at: str
+    ready_at: str | None
+
+
+class ExportCreate(BaseModel):
+    """`POST /api/v1/novels/{id}/exports` request.
+
+    `chapters` accepts the general selector and `format` any string so that a list selector and an
+    unknown format get their own domain error codes (`invalid_selector`, `unsupported_format`)
+    instead of `validation_error`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapters: ChapterSelector
+    format: str = "epub"
+    skip_missing: bool = False
+
+
+class Subscription(BaseModel):
+    """The `Subscription` object of any channel; the address is never included."""
+
+    id: str
+    channel: str
+    label: str | None
+    created_at: str
+
+
+class WebpushKeys(BaseModel):
+    """The `keys` of a browser push subscription."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    p256dh: str
+    auth: str
+
+    @field_validator("p256dh")
+    @classmethod
+    def _p256dh(cls, value: str) -> str:
+        return webpush.check_p256dh(value)
+
+    @field_validator("auth")
+    @classmethod
+    def _auth(cls, value: str) -> str:
+        return webpush.check_auth(value)
+
+
+class WebpushSubscriptionCreate(BaseModel):
+    """`POST /api/v1/webpush/subscriptions` request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str
+    keys: WebpushKeys

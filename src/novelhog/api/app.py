@@ -12,7 +12,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from novelhog import log, vapid
-from novelhog.api import routes_chapters, routes_novels, routes_settings
+from novelhog.api import (
+    routes_chapters,
+    routes_exports,
+    routes_novels,
+    routes_settings,
+    routes_subscriptions,
+)
 from novelhog.api.checks import OriginChecks
 from novelhog.config import Settings
 from novelhog.domain.errors import (
@@ -170,4 +176,6 @@ def create_app(
     app.include_router(routes_settings.router, prefix=API_PREFIX)
     app.include_router(routes_novels.router, prefix=API_PREFIX)
     app.include_router(routes_chapters.router, prefix=API_PREFIX)
+    app.include_router(routes_exports.router, prefix=API_PREFIX)
+    app.include_router(routes_subscriptions.router, prefix=API_PREFIX)
     return app
