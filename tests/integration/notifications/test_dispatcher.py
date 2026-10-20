@@ -300,3 +300,43 @@ class TestDispatch__WithARegistryHolder:
         second = dispatcher.dispatch(repo, holder.get, owner="w1", ttl=60, public_url=PUBLIC)
 
         assert (second.delivered, len(calls)) == (1, 1)
+
+
+class TestDispatch__WhenTheHeartbeatReportsALostClaim:
+    def test_dispatch__stops_sending_and_does_not_advance(
+        self, repo: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        novel = _start(repo)
+        _subscribe(repo, "a")
+        _subscribe(repo, "b")
+        before = repo.events.since(0)[-1].seq
+        _release(repo, novel, [1])
+        _release(repo, novel, [2])
+
+        class Beat:
+            lost = False
+
+            def __init__(self, *_args: object) -> None:
+                beats.append(self)
+
+            def __enter__(self) -> Beat:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        beats: list[Beat] = []
+        monkeypatch.setattr(dispatcher, "Heartbeat", Beat)
+
+        class Losing(FakeChannel):
+            def send(self, subscription: Subscription, message: NotificationMessage) -> SendResult:
+                beats[0].lost = True
+                return super().send(subscription, message)
+
+        channel = Losing()
+        report = _run(repo, channel)
+
+        assert len(channel.sent) == 1
+        assert (report.advanced, report.lost) == (False, True)
+        assert repo.consumers.release("notifier", "w1") is True
+        assert repo.consumers.claim("notifier", "w2", 60) == before

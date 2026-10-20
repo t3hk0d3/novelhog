@@ -4,7 +4,7 @@
 when it did work:
 
 1. recover expired claims (always),
-2. `_dispatch_notifications` (extension point for Task 27; always runs, never returns early),
+2. `_dispatch_notifications` (always runs, never returns early; a failure is logged),
 3. refresh a due novel,
 4. `_build_export` (extension point for Task 26),
 5. download a batch of pending chapters,
@@ -13,12 +13,13 @@ when it did work:
 
 import random
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
 from novelhog import log
 from novelhog.config import Settings
+from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
 from novelhog.worker import downloads, refresh, runtime
@@ -41,8 +42,8 @@ class Worker:
         adapter: WorkerAdapter,
         fetcher: ImageSource,
         storage: StaticStorage,
-        # TODO(Task 27): type as Mapping[str, NotificationChannel] once channels.py exists.
-        channels: Mapping[str, Any],
+        # A channel mapping, or a callable returning one (production passes `RegistryHolder.get`).
+        channels: dispatcher.Registry,
         settings: Settings,
         *,
         stop: threading.Event | None = None,
@@ -102,7 +103,22 @@ class Worker:
         return "idle"
 
     def _dispatch_notifications(self) -> None:
-        """Extension point (Task 27): deliver the event log to the channels. No-op until then."""
+        """Deliver the event log to the channels; a failure is logged and never stops the step."""
+        settings = self._settings
+        try:
+            dispatcher.dispatch(
+                self._repo,
+                self._channels,
+                owner=settings.worker_id,
+                ttl=settings.claim_ttl,
+                public_url=settings.public_url or "",
+            )
+        except Exception as error:  # noqa: BLE001 - notifications must not block novel work
+            log.get(worker_id=settings.worker_id).error(
+                "notification_dispatch_failed",
+                error=f"{type(error).__name__}: {error}",
+                exc_info=True,
+            )
 
     def _build_export(self) -> bool:
         """Extension point (Task 26): claim and build a ready export; True if one was built."""

@@ -1,6 +1,7 @@
 """Notification channels: Web Push over the outbound guard (spec 6.6, 8.6)."""
 
 import json
+import traceback
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -98,6 +99,12 @@ class WebPushChannel:
         except Exception as error:  # noqa: BLE001 - one bad subscription must not stop the rest
             # Only the type is reported: messages of request errors carry the endpoint URL and
             # messages of key-decoding errors may carry key material.
+            # The traceback frames are logged without the message, which may hold key material.
+            log.get().warning(
+                "webpush_unexpected_error",
+                error_type=type(error).__name__,
+                frames="".join(traceback.format_tb(error.__traceback__)),
+            )
             return Failed(f"{type(error).__name__} while sending")
         return Delivered()
 
