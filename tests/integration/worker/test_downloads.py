@@ -12,9 +12,10 @@ from novelhog.config import Settings
 from novelhog.repo import Repo, db
 from novelhog.repo.schema import chapters
 from novelhog.repo.work import ChapterClaim
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.worker import downloads
 from novelhog.worker.downloads import BatchReport, download
+from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from tests.integration.worker.conftest import (
     DELAY,
     HOST,
@@ -71,8 +72,17 @@ def run(
     batch: list[ChapterClaim],
     settings: Settings,
     stop: threading.Event,
+    reachability: Reachability | None = None,
 ) -> BatchReport:
-    return download(repo, adapter, fetcher, batch, settings=settings, stop=stop)
+    return download(
+        repo,
+        adapter,
+        fetcher,
+        batch,
+        settings=settings,
+        stop=stop,
+        reachability=reachability or Reachability(),
+    )
 
 
 class TestDownload__ForEachClaimedChapter:
@@ -249,6 +259,91 @@ class TestDownload__WhenFetchingRaisesInfrastructureError:
             row = chapter_of(repo, item.chapter_id)
             assert (row.state, row.claimed_by, row.queued_at) == ("pending", None, queued_at)
         assert adapter.fetched == [f"{URL}/1"]
+
+
+class TestDownload__WhenTheSiteIsUnreachable:
+    def test_download__below_the_threshold_requeues_releases_the_rest_and_reraises(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 2)
+        queued_at = chapter_of(repo, batch[0].chapter_id).queued_at
+        adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
+        reachability = Reachability()
+
+        for attempt in range(SITE_UNREACHABLE_RETRIES - 1):
+            if attempt:
+                batch = repo.work.claim_batch(ME, 10, TTL)
+            with pytest.raises(SiteUnreachable):
+                run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
+            for item in batch:
+                row = chapter_of(repo, item.chapter_id)
+                assert (row.state, row.claimed_by, row.queued_at) == ("pending", None, queued_at)
+
+    def test_download__at_the_threshold_fails_the_chapter_and_goes_on_with_the_rest(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 3)
+        for url in (f"{URL}/1", f"{URL}/2", f"{URL}/3"):
+            adapter.errors[url] = SiteUnreachable("refused")
+        reachability = Reachability()
+        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
+            reachability.failed(HOST)
+
+        report = run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
+
+        assert report == BatchReport(downloaded=0, failed=3, skipped=0, released=0, lost=0)
+        for item in batch:
+            assert chapter_of(repo, item.chapter_id).state == "error"
+            assert repo.chapters.get(item.chapter_id).error == ("Site unreachable: refused")
+
+    def test_download__a_success_resets_the_count(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 1)
+        reachability = Reachability()
+        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
+            reachability.failed(HOST)
+        run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
+        add_chapter(repo, novel_id, 2)
+        batch = repo.work.claim_batch(ME, 10, TTL)
+        adapter.errors[f"{URL}/2"] = SiteUnreachable("refused")
+
+        with pytest.raises(SiteUnreachable):
+            run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
+
+        assert chapter_of(repo, batch[0].chapter_id).state == "pending"
+
+    def test_download__a_site_error_means_the_host_answered_and_resets_the_count(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 2)
+        adapter.errors[f"{URL}/1"] = SiteError("no content")
+        adapter.errors[f"{URL}/2"] = SiteUnreachable("refused")
+        reachability = Reachability()
+        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
+            reachability.failed(HOST)
+
+        with pytest.raises(SiteUnreachable):
+            run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
+
+        assert chapter_of(repo, batch[1].chapter_id).state == "pending"
+
+    def test_download__counts_hosts_independently(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
+        settings: Settings,
+    ) -> None:  # fmt: skip
+        batch = claim(repo, novel_id, 1)
+        adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
+        reachability = Reachability()
+        for _ in range(SITE_UNREACHABLE_RETRIES):
+            reachability.failed("other.com")
+
+        with pytest.raises(SiteUnreachable):
+            run(repo, adapter, fetcher, batch, settings, RecordingStop(), reachability)
 
 
 class TestDownload__WhenStopIsSetMidBatch:

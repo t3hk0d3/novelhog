@@ -8,14 +8,16 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import requests
+from urllib3.exceptions import NameResolutionError, NewConnectionError
 
 from novelhog import log
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import UrlTooLong, normalize_url
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.scraper_adapter.finders import find_cover_url, find_title
-from novelhog.scraper_adapter.guard import page_budget
+from novelhog.scraper_adapter.guard import flaresolverr_fallback, page_budget
+from novelhog.scraper_adapter.overrides import FORCE_FLARESOLVERR_HOSTS
 from novelhog.scraper_adapter.scraper import (
     Chapter,
     FlaresolverrConnectionError,
@@ -63,25 +65,51 @@ def _html_language(html: str) -> str | None:
     return parser.lang
 
 
-def _caused_by_unreachable_flaresolverr(exc: BaseException) -> bool:
-    """True when `exc` or anything it was raised from is a connection failure (refused, DNS)."""
+def _unreachable_reason(exc: requests.exceptions.RequestException) -> str | None:
+    """A short reason when `exc` is a refused connection, failed name lookup or connect timeout."""
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return "connection timed out"
+    if isinstance(exc, requests.exceptions.ConnectionError) and exc.args:
+        reason = getattr(exc.args[0], "reason", None)
+        if isinstance(reason, NameResolutionError):
+            return "name resolution failed"
+        if isinstance(reason, NewConnectionError):
+            return "connection refused"
+    return None
+
+
+def _connection_failure(exc: BaseException) -> tuple[type[Exception], str] | None:
+    """Classify a scraper failure caused by a connection problem, looking through its causes.
+
+    Returns `InfrastructureError` for FlareSolverr's own failure (which wins over the plain
+    `requests` one it was raised from) and `SiteUnreachable` with a reason for a direct request
+    that was refused, failed name resolution or timed out connecting. Other failures (TLS, proxy,
+    reset, read timeout) give None.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
+    unreachable: str | None = None
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, FlaresolverrConnectionError | requests.exceptions.ConnectionError):
-            return True
+        if isinstance(current, FlaresolverrConnectionError):
+            return InfrastructureError, ""
+        if unreachable is None and isinstance(current, requests.exceptions.RequestException):
+            unreachable = _unreachable_reason(current)
         current = current.__cause__ or current.__context__
-    return False
+    return (SiteUnreachable, unreachable) if unreachable else None
 
 
 @contextmanager
-def _translated_errors() -> Iterator[None]:
-    """Turn scraper failures into `InfrastructureError` or `SiteError`."""
+def _translated_errors(host: str) -> Iterator[None]:
+    """Turn scraper failures into `InfrastructureError`, `SiteUnreachable` or `SiteError`."""
     try:
         yield
     except ScraperError as exc:
-        if _caused_by_unreachable_flaresolverr(exc):
+        failure = _connection_failure(exc)
+        if failure is not None and failure[0] is SiteUnreachable:
+            msg = f"Cannot reach {host}: {failure[1]}"
+            raise SiteUnreachable(msg) from exc
+        if failure is not None:
             raise InfrastructureError(str(exc)) from exc
         raise SiteError(str(exc)) from exc
     except requests.exceptions.RequestException as exc:
@@ -104,7 +132,10 @@ class ScraperAdapter:
 
     def sync_toc(self, novel_id: str, host: str, toc_url: str) -> TocResult:
         """Fetch every TOC page and return the chapter URLs in reading order."""
-        with _translated_errors():
+        with (
+            _translated_errors(host),
+            flaresolverr_fallback(self._settings.flaresolverr_url),
+        ):
             novel = self._open(novel_id, host, toc_url)
             with page_budget(self._settings.max_toc_pages):
                 novel.sync_toc()
@@ -124,7 +155,10 @@ class ScraperAdapter:
 
     def fetch_chapter(self, novel_id: str, host: str, toc_url: str, url: str) -> FetchedChapter:
         """Download one chapter and return its title and content HTML."""
-        with _translated_errors():
+        with (
+            _translated_errors(host),
+            flaresolverr_fallback(self._settings.flaresolverr_url),
+        ):
             novel = self._open(novel_id, host, toc_url)
             chapter = Chapter(chapter_url=url)
             try:
@@ -162,7 +196,10 @@ class ScraperAdapter:
             title=novel_id, scraper_config=config, toc_main_url=toc_url, host=host
         ).save_novel()
         novel = Novel.load(title=novel_id, scraper_config=config)
-        novel.set_scraper_behavior(title_in_content="NO")
+        novel.set_scraper_behavior(
+            title_in_content="NO",
+            force_flaresolver=True if host in FORCE_FLARESOLVERR_HOSTS else None,
+        )
         request_config = dict(config.config_options["request_config"])
         request_config["request_retries"] = max(1, request_config["request_retries"])
         config.config_options["request_config"] = request_config

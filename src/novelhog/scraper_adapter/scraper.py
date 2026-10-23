@@ -49,7 +49,11 @@ with warnings.catch_warnings():
         CustomProcessor,
         ProcessorRegistry,
     )
-    from web_novel_scraper.exceptions import FlaresolverrConnectionError, ScraperError
+    from web_novel_scraper.exceptions import (
+        CommonGetRequestError,
+        FlaresolverrConnectionError,
+        ScraperError,
+    )
     from web_novel_scraper.models import Chapter
     from web_novel_scraper.novel_scraper import Novel
     from web_novel_scraper.request_helper import RequestHelper
@@ -58,6 +62,7 @@ take_over_scraper_logging()
 
 __all__ = [
     "Chapter",
+    "CommonGetRequestError",
     "CustomProcessor",
     "FlaresolverrConnectionError",
     "Novel",
