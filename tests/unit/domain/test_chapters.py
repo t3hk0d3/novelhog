@@ -98,8 +98,8 @@ class TestResolveSelector__OnReversedRange:
 
 class TestResolveSelector__OnNoChapters:
     @pytest.mark.parametrize("selector", [[1], ChapterRange(1, 1), []])
-    def test_resolve_selector__raises_no_chapters(self, selector: object) -> None:
+    def test_resolve_selector__raises_invalid_selector(self, selector: object) -> None:
         assert isinstance(selector, list | ChapterRange)
         with pytest.raises(ValidationFailed) as info:
             resolve_selector(selector, 0)
-        assert info.value.code == "no_chapters"
+        assert info.value.code == "invalid_selector"

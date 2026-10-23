@@ -267,12 +267,7 @@ class Exports:
             total = conn.execute(
                 select(func.count()).select_from(chapters).where(chapters_repo.positioned(novel_id))
             ).scalar_one()
-            try:
-                resolve_selector(ChapterRange(start, end), total)
-            except ValidationFailed as error:
-                if error.code == "no_chapters":
-                    raise ValidationFailed("invalid_selector", error.message) from None
-                raise
+            resolve_selector(ChapterRange(start, end), total)
             rows = conn.execute(
                 select(chapters.c.id, chapters.c.position, chapters.c.state)
                 .where(

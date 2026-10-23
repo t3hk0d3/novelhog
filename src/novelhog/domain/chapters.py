@@ -49,7 +49,7 @@ Selector = list[int] | ChapterRange
 def resolve_selector(selector: Selector, total: int) -> list[int]:
     """Return the sorted, unique positions a selector names; every one must be in 1..total."""
     if total < 1:
-        raise ValidationFailed("no_chapters", "The novel has no chapters")
+        raise ValidationFailed("invalid_selector", "The novel has no chapters")
     if isinstance(selector, ChapterRange):
         if selector.start > selector.end:
             raise ValidationFailed("invalid_selector", "Range start is after its end")

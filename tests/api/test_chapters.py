@@ -203,6 +203,14 @@ class TestPatchChapters__OutOfRange:
         assert error["details"] == {"out_of_range": [6]}
 
 
+class TestPatchChapters__OnNovelWithNoChapters:
+    def test_patch_chapters__returns_invalid_selector(self, client: TestClient, repo: Repo) -> None:
+        repo.hosts.publish(["example.org"])
+        novel_id = repo.novels.create(BASE, followed=False).id
+        response = client.patch(_url(novel_id), json={"state": "pending", "chapters": [1]})
+        _assert_error(response, 422, "invalid_selector")
+
+
 class TestPatchChapters__OnUnknownNovel:
     def test_patch_chapters__returns_404(self, client: TestClient) -> None:
         response = client.patch(_url(UNKNOWN), json={"state": "pending", "chapters": [1]})
