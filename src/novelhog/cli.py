@@ -10,10 +10,10 @@ from collections.abc import Sequence
 from types import FrameType
 from typing import Literal
 
-import uvicorn
 from fastapi import FastAPI
 
 from novelhog import log, net
+from novelhog.api import serve
 from novelhog.api.app import create_app
 from novelhog.config import Settings, load
 from novelhog.image_fetcher import ImageFetcher
@@ -84,8 +84,7 @@ def _db_status(settings: Settings) -> int:
 
 def _serve(app: FastAPI, host: str, port: int) -> int:
     """Run `app` under uvicorn until it is stopped. The only place uvicorn is started."""
-    # TODO(Task 18 serve helper): switch to novelhog.api.serve.run(app, host=, port=, graceful_s=)
-    uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S)
+    serve.run(app, host=host, port=port, graceful_s=GRACEFUL_SHUTDOWN_S)
     return 0
 
 
