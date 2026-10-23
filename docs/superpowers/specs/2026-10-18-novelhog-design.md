@@ -956,10 +956,11 @@ loop until stop requested:
   raised by the adapter as `SiteUnreachable`, a subclass of
   `InfrastructureError`) is retried like an infrastructure error, but the
   worker counts consecutive failures per host (in memory, reset by any
-  successful request to that host). After `SITE_UNREACHABLE_RETRIES` (3)
-  consecutive failures, further unreachable errors for that host are treated
-  as site errors: chapters go to `error` ("Site unreachable: <summary>"),
-  syncs back off as for any site error (an initial import sets
+  request that reaches the host, including one that ends in a site error).
+  After `SITE_UNREACHABLE_RETRIES` (3) consecutive failures, further
+  unreachable errors for that host are treated as site errors: chapters go to
+  `error` ("Site unreachable: <message>", the exception message without its
+  type name), syncs back off as for any site error (an initial import sets
   `import_error`). The counter is per worker process and is lost on restart.
 - **Infrastructure errors** (FlareSolverr unreachable, or a site-unreachable
   error below the retry threshold; raised by the adapter as
