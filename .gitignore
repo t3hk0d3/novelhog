@@ -18,3 +18,5 @@ web/coverage/
 *.sqlite
 *.sqlite3
 .env
+test-results/
+playwright-report/

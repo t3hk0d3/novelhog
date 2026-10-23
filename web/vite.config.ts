@@ -1,7 +1,7 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import { prepaintScript } from './src/theme/prepaint.ts';
 
 /** Replaces the `<!-- prepaint -->` marker in index.html with the inline theme script. */
@@ -20,5 +20,6 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     restoreMocks: true,
+    exclude: [...configDefaults.exclude, 'e2e/**'], // Playwright runs those (npm run e2e)
   },
 });

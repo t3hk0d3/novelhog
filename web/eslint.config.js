@@ -6,7 +6,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  { ignores: ['dist', 'coverage', 'src/api/schema.d.ts'] },
+  { ignores: ['dist', 'coverage', 'test-results', 'playwright-report', 'src/api/schema.d.ts'] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   reactHooks.configs.flat.recommended,
