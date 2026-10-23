@@ -38,7 +38,8 @@ FAILURE_MESSAGE = "chapter 2 is unreadable"
 COVER_URL = f"https://{HOST}/cover.png"
 SSE_POLL_S = 0.2
 GRACEFUL_S = 3
-STEP_DELAY_S = 0.4  # keeps the "Importing…" and "Pending" states on screen long enough to see
+STEP_DELAY_S = 0.5  # keeps the "Pending" and waiting-export states on screen long enough to see
+IMPORT_DELAY_S = 2.0  # keeps "Importing…" on screen long enough to see
 READY_TIMEOUT_S = 15.0
 
 
@@ -68,7 +69,7 @@ class FakeAdapter:
         return [HOST]
 
     def sync_toc(self, novel_id: str, host: str, toc_url: str) -> TocResult:
-        time.sleep(STEP_DELAY_S)
+        time.sleep(IMPORT_DELAY_S)
         urls = [chapter_url(toc_url, n) for n in range(1, CHAPTER_COUNT + 1)]
         return TocResult(
             title=TITLE, language="en", cover_url=COVER_URL, urls=urls, toc_html="<html></html>"

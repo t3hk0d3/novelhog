@@ -11,3 +11,5 @@ web/dist
 .design
 docs
 tests
+web/test-results
+web/playwright-report

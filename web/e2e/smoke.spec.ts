@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const TITLE = 'The Fake Chronicle';
 // The fake backend's chapter 2 always fails (tests/fixtures/fake_backend.py).
@@ -11,6 +11,16 @@ interface NovelSummary {
 /** Row of chapter `n` in the chapter table (normal or select mode). */
 const chapter = (page: Page, n: number) =>
   page.locator('[data-chapter-id]').filter({ hasText: new RegExp(`^${String(n)}`) });
+
+/** Holds the primary button down on `row` until the page shows `selected` (a long press), then releases. */
+async function longPress(page: Page, row: Locator, selected: string) {
+  const box = await row.boundingBox();
+  if (!box) throw new Error('row is not visible');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect(page.getByText(selected).first()).toBeVisible();
+  await page.mouse.up();
+}
 
 test.beforeEach(async ({ request }) => {
   // One backend serves every project: start each test from an empty library.
@@ -28,6 +38,12 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
     scheme === 'dark',
   );
   await expect(page.getByText('Your library is empty.')).toBeVisible();
+  // The theme really applies: the page background is light or dark, not just the media query.
+  const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const [red = 0, green = 0, blue = 0] = (background.match(/\d+/g) ?? []).map(Number);
+  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+  if (scheme === 'dark') expect(luminance).toBeLessThan(0.3);
+  else expect(luminance).toBeGreaterThan(0.7);
 
   await test.step('add a novel; the card shows Importing… then the imported title', async () => {
     await page.getByRole('banner').getByRole('button', { name: 'Add novel' }).click();
@@ -50,9 +66,15 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
   });
 
   await test.step('select a range and Download; states go queued, then downloaded', async () => {
-    await page.getByRole('button', { name: 'Select', exact: true }).click();
-    await chapter(page, 1).click();
-    await chapter(page, 3).click({ modifiers: ['Shift'] });
+    if (testInfo.project.use.isMobile) {
+      // Touch: press and hold a row to enter select mode, hold another to extend the range.
+      await longPress(page, chapter(page, 1), '1 selected');
+      await longPress(page, chapter(page, 3), '3 selected');
+    } else {
+      await page.getByRole('button', { name: 'Select', exact: true }).click();
+      await chapter(page, 1).click();
+      await chapter(page, 3).click({ modifiers: ['Shift'] });
+    }
     await expect(page.getByText('3 selected').first()).toBeVisible();
     await page
       .getByRole('region', { name: 'Selection actions' })
@@ -85,6 +107,9 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
 
     const exports = page.getByRole('region', { name: 'Exports' });
     await expect(exports.getByText('Chapters 3–5')).toBeVisible();
+    // It waits for the missing chapters (3 is downloaded, 4 and 5 are not) and is not ready yet.
+    await expect(exports.getByText('1 / 3 downloaded')).toBeVisible();
+    await expect(exports.getByRole('link', { name: 'Download' })).toBeHidden();
     const link = exports.getByRole('link', { name: 'Download' });
     await expect(link).toBeVisible();
     const [download] = await Promise.all([page.waitForEvent('download'), link.click()]);

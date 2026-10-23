@@ -25,10 +25,14 @@ export NOVELHOG_DATA_DIR="${scraper_dir}/data"
 
 uv run python - "$1" <<'PY'
 import sys
+import time
+import traceback
 
 from novelhog import config, html_to_markdown
+from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import host_of, normalize_toc_url
 from novelhog.scraper_adapter import ScraperAdapter
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
 
 NOVEL_ID = "NVsmokelive00"
 
@@ -44,6 +48,7 @@ def main(toc_url: str) -> int:
     if not toc.urls:
         print("FAIL: the table of contents has no chapters", file=sys.stderr)
         return 1
+    time.sleep(adapter.request_delay(host))  # be as polite as the worker is
     chapter = adapter.fetch_chapter(NOVEL_ID, host, url, toc.urls[0])
     markdown = html_to_markdown.convert(chapter.body_html, lambda _src: None).markdown
     if not markdown.strip():
@@ -57,7 +62,10 @@ def main(toc_url: str) -> int:
 
 try:
     sys.exit(main(sys.argv[1]))
-except Exception as error:  # noqa: BLE001 - any failure is a failed smoke test
+except (SiteError, InfrastructureError, ValidationFailed) as error:
     print(f"FAIL: {type(error).__name__}: {str(error)[:300]}", file=sys.stderr)
+    sys.exit(1)
+except Exception:  # noqa: BLE001 - unexpected: show where, but never the page content
+    traceback.print_exc()
     sys.exit(1)
 PY
