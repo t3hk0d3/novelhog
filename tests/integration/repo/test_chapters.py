@@ -286,6 +286,120 @@ class TestPatch__ToNotRequested:
         assert (row.state, row.claimed_by, row.claimed_until) == ("not_requested", None, None)
 
 
+def add_export(
+    repo: Repo, novel_id: str, export_id: str, first: int, last: int, **values: Any
+) -> None:
+    with db.write(repo.engine) as conn:
+        conn.execute(
+            insert(exports).values(
+                **export_row(
+                    id=export_id,
+                    novel_id=novel_id,
+                    first_chapter_id=chapter_id(first),
+                    last_chapter_id=chapter_id(last),
+                )
+                | values
+            )
+        )
+
+
+def export_of(repo: Repo, export_id: str) -> Any:
+    with db.read(repo.engine) as conn:
+        return conn.execute(select(exports).where(exports.c.id == export_id)).one()
+
+
+PENDING = {"state": "pending", "queued_at": export_row()["created_at"]}
+
+
+class TestPatch__DequeueNeededByAWaitingExport:
+    def test_patch__fails_the_export_with_the_chapter_number(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [{}, PENDING, {}])
+        add_export(repo, novel_id, "EX000000000001", 1, 3)
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [2])
+        row = export_of(repo, "EX000000000001")
+        assert (row.state, row.error) == ("failed", "Chapter 2 was cancelled")
+        assert row_of(repo, 2).state == "not_requested"
+
+    def test_patch__lists_several_cancelled_positions_ascending(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [{}, PENDING, PENDING, PENDING])
+        add_export(repo, novel_id, "EX000000000001", 1, 4)
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [4, 2, 3])
+        assert export_of(repo, "EX000000000001").error == "Chapters 2, 3, 4 were cancelled"
+
+    def test_patch__appends_the_failed_ex_event_after_the_ch_and_nv_events(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [PENDING, {}])
+        add_export(repo, novel_id, "EX000000000001", 1, 2)
+        before = len(all_events(repo))
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+        new = all_events(repo)[before:]
+        assert [e.entity_id for e in new] == [chapter_id(1), novel_id, "EX000000000001"]
+        assert new[2].payload["state"] == "failed"
+        assert new[2].payload["error"] == "Chapter 1 was cancelled"
+
+    def test_patch__fails_every_waiting_export_covering_the_chapter_with_one_event_each(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [PENDING, {}])
+        add_export(repo, novel_id, "EX000000000001", 1, 2)
+        add_export(repo, novel_id, "EX000000000002", 1, 1)
+        before = len(all_events(repo))
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+        assert export_of(repo, "EX000000000001").state == "failed"
+        assert export_of(repo, "EX000000000002").state == "failed"
+        ex = [e.entity_id for e in all_events(repo)[before:] if e.entity_id.startswith("EX")]
+        assert sorted(ex) == ["EX000000000001", "EX000000000002"]
+
+    def test_patch__keeps_a_skip_missing_export_waiting(self, repo: Repo, novel_id: str) -> None:
+        add_chapters(repo, novel_id, [PENDING, {}])
+        add_export(repo, novel_id, "EX000000000001", 1, 2, skip_missing=True)
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+        assert export_of(repo, "EX000000000001").state == "waiting"
+
+    def test_patch__leaves_exports_outside_the_range_alone(self, repo: Repo, novel_id: str) -> None:
+        add_chapters(repo, novel_id, [{}, {}, PENDING])
+        add_export(repo, novel_id, "EX000000000001", 1, 2)
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [3])
+        assert export_of(repo, "EX000000000001").state == "waiting"
+
+    def test_patch__leaves_building_ready_and_failed_exports_alone(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [PENDING])
+        add_export(
+            repo,
+            novel_id,
+            "EX000000000001",
+            1,
+            1,
+            state="building",
+            claimed_by="w1",
+            claimed_until=repo.clock() + timedelta(minutes=5),
+        )
+        add_export(
+            repo, novel_id, "EX000000000002", 1, 1, state="ready", storage_key="k", size_bytes=1
+        )
+        add_export(repo, novel_id, "EX000000000003", 1, 1, state="failed", error="boom")
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+        assert export_of(repo, "EX000000000001").state == "building"
+        assert export_of(repo, "EX000000000002").state == "ready"
+        row = export_of(repo, "EX000000000003")
+        assert (row.state, row.error) == ("failed", "boom")
+
+    def test_patch__download_does_not_fail_a_waiting_export(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [{}])
+        add_export(repo, novel_id, "EX000000000001", 1, 1)
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [1])
+        assert export_of(repo, "EX000000000001").state == "waiting"
+
+
 class TestPatch__OnOtherStates:
     def test_patch__reports_unchanged_chapters_in_skipped_with_their_state(
         self, repo: Repo, novel_id: str, clock: FakeClock

@@ -65,6 +65,7 @@ def emit_novel_change(
     static_base_url: str,
     released: list[int] | None = None,
     errors: Mapping[str, tuple[str, datetime]] | None = None,
+    failed_export_ids: Sequence[str] = (),
 ) -> None:
     """Append the events of a chapter change: one `CH` per chapter, one `NV`, then the `EX`s.
 
@@ -73,7 +74,9 @@ def emit_novel_change(
     released positions to the `NV` payload; `errors` gives the message and time of chapters that
     just failed (other chapters in `error` carry their previous error forward). Call it last in
     the transaction, after `novels.lock_novel` and every row write; snapshots are built lazily
-    inside `append`.
+    inside `append`. `failed_export_ids` are exports the same transaction just moved to `failed`
+    (a user dequeue, spec section 5.5); they are no longer waiting, so they get their `EX` event
+    here, once, after the others.
     """
     # Imported here: novels, chapters and exports import this module.
     from novelhog.repo import chapters, exports, novels  # noqa: PLC0415
@@ -94,6 +97,8 @@ def emit_novel_change(
         append(conn, novel_id, chapter_id, chapter_payload(chapter_id), now=now)
     append(conn, novel_id, novel_id, novel_payload, now=now)
     for export_id in exports.affected_waiting(conn, novel_id, changed_chapter_ids):
+        append(conn, novel_id, export_id, export_payload(export_id), now=now)
+    for export_id in failed_export_ids:
         append(conn, novel_id, export_id, export_payload(export_id), now=now)
 
 

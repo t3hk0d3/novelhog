@@ -378,6 +378,9 @@ class Chapters:
 
         Chapters whose current state does not allow it are left alone and reported as skipped.
         Appends one `CH` event per updated chapter, one `NV` and the affected `EX` events.
+
+        Dequeuing (`not_requested`) fails the novel's waiting, non-`skip_missing` exports whose
+        range contains a dequeued chapter (spec section 5.5); the TOC sync never does.
         """
         if target not in CLIENT_TARGETS:
             raise ValidationFailed(  # noqa: TRY003
@@ -392,6 +395,12 @@ class Chapters:
             ).scalar_one()
             positions = resolve_selector(selector, total)
             result = _transition(conn, novel_id, positions, target, now=now)
+            failed: list[str] = []
+            if target is ChapterState.NOT_REQUESTED and result.changed_ids:
+                # Imported here: exports imports this module.
+                from novelhog.repo import exports  # noqa: PLC0415
+
+                failed = exports.fail_cancelled(conn, novel_id, result.changed_ids)
             if result.changed_ids:
                 events.emit_novel_change(
                     conn,
@@ -399,5 +408,6 @@ class Chapters:
                     result.changed_ids,
                     now=now,
                     static_base_url=self._static_base_url,
+                    failed_export_ids=failed,
                 )
             return PatchResult(updated=result.updated, skipped=result.skipped)

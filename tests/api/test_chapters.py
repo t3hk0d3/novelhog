@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from novelhog.domain.exports import Format
 from novelhog.repo import Repo, db
 from novelhog.repo.chapters import apply_toc
 from novelhog.repo.novels import lock_novel
@@ -130,6 +131,18 @@ class TestPatchChapters__WithRangeSelector:
             _url(novel_id), json={"state": "pending", "chapters": [1], "extra": 1}
         )
         _assert_error(response, 422, "validation_error")
+
+
+class TestPatchChapters__CancellingANeededChapter:
+    def test_patch_chapters__fails_the_waiting_export(self, client: TestClient, repo: Repo) -> None:
+        novel_id = _seed(repo)
+        client.patch(_url(novel_id), json={"state": "pending", "chapters": [2]})
+        export_id = repo.exports.create(novel_id, 1, 3, Format.EPUB)[0].id
+        response = client.patch(_url(novel_id), json={"state": "not_requested", "chapters": [2]})
+        assert response.status_code == 200
+        exports = client.get(f"/api/v1/novels/{novel_id}/exports").json()
+        failed = next(e for e in exports if e["id"] == export_id)
+        assert (failed["state"], failed["error"]) == ("failed", "Chapter 2 was cancelled")
 
 
 class TestPatchChapters__WithTargetState:

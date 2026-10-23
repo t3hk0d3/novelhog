@@ -1,9 +1,12 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { api, type Chapter, type ChapterState } from '../api/client';
+import { useLiveReady } from '../hooks/useLiveEvents';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { errorMessage } from '../lib/errors';
+import { exportsNeeding } from '../lib/exportsNeeding';
 import { dateOnly, dateTime, relative } from '../lib/time';
+import { CancelFailsExportDialog } from './CancelFailsExportDialog';
 import { Dialog } from './Dialog';
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, ExternalLinkIcon } from './icons';
 import { StatusIcon, STATE_LABELS } from './StatusIcon';
@@ -142,6 +145,12 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   const wide = useMediaQuery(DESKTOP);
   // Results belong to the chapter they were sent for; stepping away hides them (no remount).
   const [skippedPosition, setSkippedPosition] = useState<number | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const exports = useQuery({
+    queryKey: ['exports', novelId],
+    queryFn: () => api.listExports(novelId),
+    enabled: useLiveReady(),
+  });
   const patch = useMutation({
     mutationFn: ({ state, position }: { state: ChapterState; position: number }) =>
       api.patchChapters(novelId, state, [position]),
@@ -165,6 +174,9 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   const next = order[index + 1];
   const title = chapter.title ?? `Chapter ${String(chapter.position)}`;
   const action = ACTIONS[chapter.state];
+  // Cancelling a queued chapter fails the waiting exports that need it (spec section 5.5).
+  const needed =
+    chapter.state === 'pending' ? exportsNeeding(exports.data, [chapter.position]) : [];
 
   const field = (label: string, value: React.ReactNode) => (
     <div className="flex gap-4">
@@ -174,103 +186,120 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   );
 
   return (
-    <Dialog
-      title={`Chapter ${String(chapter.position)} of ${String(chapters.length)}`}
-      sheet={!wide}
-      onClose={onClose}
-    >
-      {!wide && <SheetHandle onClose={onClose} />}
-      <div className="mt-2 flex items-start justify-between gap-3">
-        <h3 className="min-w-0 text-lg font-semibold break-words">{title}</h3>
-        <div className="flex shrink-0 gap-2">
-          <button
-            type="button"
-            aria-label="Previous chapter"
-            aria-disabled={previous === undefined}
-            onClick={() => {
-              if (previous) onStep(previous.id);
-            }}
-            className={iconButton}
-          >
-            <ChevronLeftIcon />
-          </button>
-          <button
-            type="button"
-            aria-label="Next chapter"
-            aria-disabled={next === undefined}
-            onClick={() => {
-              if (next) onStep(next.id);
-            }}
-            className={iconButton}
-          >
-            <ChevronRightIcon />
-          </button>
+    <>
+      <Dialog
+        title={`Chapter ${String(chapter.position)} of ${String(chapters.length)}`}
+        sheet={!wide}
+        onClose={onClose}
+      >
+        {!wide && <SheetHandle onClose={onClose} />}
+        <div className="mt-2 flex items-start justify-between gap-3">
+          <h3 className="min-w-0 text-lg font-semibold break-words">{title}</h3>
+          <div className="flex shrink-0 gap-2">
+            <button
+              type="button"
+              aria-label="Previous chapter"
+              aria-disabled={previous === undefined}
+              onClick={() => {
+                if (previous) onStep(previous.id);
+              }}
+              className={iconButton}
+            >
+              <ChevronLeftIcon />
+            </button>
+            <button
+              type="button"
+              aria-label="Next chapter"
+              aria-disabled={next === undefined}
+              onClick={() => {
+                if (next) onStep(next.id);
+              }}
+              className={iconButton}
+            >
+              <ChevronRightIcon />
+            </button>
+          </div>
         </div>
-      </div>
-      {chapter.state === 'error' && <ErrorBox chapter={chapter} />}
-      <dl className="mt-4 flex flex-col gap-2 text-sm">
-        {field(
-          'Status',
-          <span
-            className={`inline-flex items-center gap-2 ${chapter.state === 'error' ? 'text-danger' : ''}`}
-          >
-            <StatusIcon state={chapter.state} />
-            <span aria-hidden="true">{STATE_LABELS[chapter.state]}</span>
-          </span>,
+        {chapter.state === 'error' && <ErrorBox chapter={chapter} />}
+        <dl className="mt-4 flex flex-col gap-2 text-sm">
+          {field(
+            'Status',
+            <span
+              className={`inline-flex items-center gap-2 ${chapter.state === 'error' ? 'text-danger' : ''}`}
+            >
+              <StatusIcon state={chapter.state} />
+              <span aria-hidden="true">{STATE_LABELS[chapter.state]}</span>
+            </span>,
+          )}
+          {field(
+            'Source',
+            <a
+              href={chapter.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="break-all font-mono text-accent underline"
+            >
+              {chapter.url.replace(/^https?:\/\//, '')}
+            </a>,
+          )}
+          {field('Added', chapter.released_at === null ? '—' : dateOnly(chapter.released_at))}
+          {chapter.state === 'pending' &&
+            chapter.queued_at !== null &&
+            field('Queued', <span className="text-gold-ink">{dateTime(chapter.queued_at)}</span>)}
+          {field('Last change', dateTime(chapter.updated_at))}
+          {field('Images', <span className="text-ink-muted">{imagesText(chapter)}</span>)}
+        </dl>
+        {patch.isError && mine && (
+          <p role="alert" className="mt-3 text-sm font-semibold text-danger">
+            {errorMessage(patch.error)}
+          </p>
         )}
-        {field(
-          'Source',
+        {skipped && (
+          <p role="alert" className="mt-3 text-sm font-semibold text-danger">
+            The chapter changed before this applied; nothing was changed.
+          </p>
+        )}
+        <div className="mt-4 flex gap-2 border-t border-line pt-4 max-[719px]:[&>*]:flex-1 min-[720px]:justify-end">
           <a
             href={chapter.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="break-all font-mono text-accent underline"
+            className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-line px-4 text-sm font-semibold"
           >
-            {chapter.url.replace(/^https?:\/\//, '')}
-          </a>,
-        )}
-        {field('Added', chapter.released_at === null ? '—' : dateOnly(chapter.released_at))}
-        {chapter.state === 'pending' &&
-          chapter.queued_at !== null &&
-          field('Queued', <span className="text-gold-ink">{dateTime(chapter.queued_at)}</span>)}
-        {field('Last change', dateTime(chapter.updated_at))}
-        {field('Images', <span className="text-ink-muted">{imagesText(chapter)}</span>)}
-      </dl>
-      {patch.isError && mine && (
-        <p role="alert" className="mt-3 text-sm font-semibold text-danger">
-          {errorMessage(patch.error)}
-        </p>
+            <ExternalLinkIcon />
+            Open on site
+          </a>
+          {action && (
+            <button
+              type="button"
+              disabled={patch.isPending && mine}
+              onClick={() => {
+                if (needed.length > 0) setConfirmCancel(true);
+                else patch.mutate({ state: action.next, position: chapter.position });
+              }}
+              className={`min-h-11 rounded-lg px-4 text-sm font-semibold disabled:opacity-40 ${
+                chapter.state === 'downloaded' ? 'border border-line' : 'bg-accent text-accent-ink'
+              }`}
+            >
+              {action.label}
+            </button>
+          )}
+        </div>
+      </Dialog>
+      {confirmCancel && needed.length > 0 && (
+        <CancelFailsExportDialog
+          title="Cancel queued chapter?"
+          needed={needed}
+          subject="this chapter"
+          onKeep={() => {
+            setConfirmCancel(false);
+          }}
+          onConfirm={() => {
+            setConfirmCancel(false);
+            patch.mutate({ state: 'not_requested', position: chapter.position });
+          }}
+        />
       )}
-      {skipped && (
-        <p role="alert" className="mt-3 text-sm font-semibold text-danger">
-          The chapter changed before this applied; nothing was changed.
-        </p>
-      )}
-      <div className="mt-4 flex gap-2 border-t border-line pt-4 max-[719px]:[&>*]:flex-1 min-[720px]:justify-end">
-        <a
-          href={chapter.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-line px-4 text-sm font-semibold"
-        >
-          <ExternalLinkIcon />
-          Open on site
-        </a>
-        {action && (
-          <button
-            type="button"
-            disabled={patch.isPending && mine}
-            onClick={() => {
-              patch.mutate({ state: action.next, position: chapter.position });
-            }}
-            className={`min-h-11 rounded-lg px-4 text-sm font-semibold disabled:opacity-40 ${
-              chapter.state === 'downloaded' ? 'border border-line' : 'bg-accent text-accent-ink'
-            }`}
-          >
-            {action.label}
-          </button>
-        )}
-      </div>
-    </Dialog>
+    </>
   );
 }

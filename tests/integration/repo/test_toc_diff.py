@@ -210,6 +210,30 @@ class TestApplyToc__WithAUrlRemoved:  # RF-4
         assert payload["state"] == "not_requested"
         assert payload["position"] is None
 
+    def test_apply_toc__dequeuing_a_needed_chapter_does_not_fail_a_waiting_export(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2)], initial=True)
+        before = rows(repo, novel_id)
+        with db.write(repo.engine) as conn:
+            conn.execute(
+                update(chapters)
+                .where(chapters.c.id == before[u(2)].id)
+                .values(state="pending", queued_at=clock.current)
+            )
+            conn.execute(
+                insert(exports).values(
+                    **export_row(
+                        novel_id=novel_id,
+                        first_chapter_id=before[u(1)].id,
+                        last_chapter_id=before[u(2)].id,
+                    )
+                )
+            )
+        sync(repo, novel_id, [u(1)])
+        with db.read(repo.engine) as conn:
+            assert conn.execute(select(exports.c.state)).scalar_one() == "waiting"
+
     def test_apply_toc__removed_downloading_chapter_keeps_state_and_claim(
         self, repo: Repo, novel_id: str, clock: FakeClock
     ) -> None:

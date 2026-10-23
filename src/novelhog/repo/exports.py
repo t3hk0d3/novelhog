@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Connection, and_, delete, exists, func, insert, or_, select
+from sqlalchemy import Connection, and_, delete, exists, func, insert, or_, select, update
 from sqlalchemy.orm import aliased
 
 from novelhog import ids
@@ -131,6 +131,60 @@ def affected_waiting(
         if any(low <= p <= high for p in changed):
             affected.append(row.id)
     return affected
+
+
+def fail_cancelled(
+    conn: Connection, novel_id: str, cancelled_chapter_ids: Sequence[str]
+) -> list[str]:
+    """Fail the novel's waiting exports that need a chapter the user just dequeued.
+
+    An export needs a cancelled chapter when it is waiting, not `skip_missing` and the chapter
+    lies in its range. It moves to `failed` with "Chapter <N> was cancelled" ("Chapters <N>,
+    <M>, … were cancelled", positions ascending). Returns the failed export ids; writes rows
+    only: the caller holds `lock_novel` and appends the `EX` events last (`emit_novel_change`
+    takes them as `failed_export_ids`). Not for the TOC sync, which never fails exports.
+    """
+    candidates = affected_waiting(conn, novel_id, cancelled_chapter_ids)
+    if not candidates:
+        return []
+    rows = conn.execute(
+        select(exports.c.id, exports.c.first_chapter_id, exports.c.last_chapter_id)
+        .where(exports.c.id.in_(candidates), exports.c.skip_missing.is_(False))
+        .order_by(exports.c.created_at, exports.c.id)
+    ).all()
+    wanted = {i for row in rows for i in (row.first_chapter_id, row.last_chapter_id)}
+    wanted.update(cancelled_chapter_ids)
+    positions = {
+        r.id: r.position
+        for r in conn.execute(
+            select(chapters.c.id, chapters.c.position).where(chapters.c.id.in_(wanted))
+        )
+    }
+    cancelled = sorted(
+        {positions[i] for i in cancelled_chapter_ids if positions.get(i) is not None}
+    )
+    failed: list[str] = []
+    for row in rows:
+        first, last = positions.get(row.first_chapter_id), positions.get(row.last_chapter_id)
+        if first is None or last is None:
+            continue
+        low, high = sorted((first, last))
+        needed = [p for p in cancelled if low <= p <= high]
+        if not needed:
+            continue
+        numbers = ", ".join(str(p) for p in needed)
+        message = (
+            f"Chapter {numbers} was cancelled"
+            if len(needed) == 1
+            else f"Chapters {numbers} were cancelled"
+        )
+        conn.execute(
+            update(exports)
+            .where(exports.c.id == row.id, exports.c.state == _WAITING)
+            .values(state=ExportState.FAILED.value, error=message)
+        )
+        failed.append(row.id)
+    return failed
 
 
 @dataclass(frozen=True)

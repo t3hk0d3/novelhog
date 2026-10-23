@@ -108,6 +108,19 @@ class TestMatch__OnExportEvents:
         assert match(event, _novel(), public_url=PUBLIC) is None
 
 
+class TestMatch__OnFailedExport:
+    def test_match__returns_the_failed_message_with_the_exports_url(self) -> None:
+        event = _ex(state="failed", waited=False, error="Chapter 2 was cancelled")
+        message = match(event, _novel(), public_url=PUBLIC)
+        assert message is not None
+        assert message.body == "tale.epub failed: Chapter 2 was cancelled"
+        assert message.url == f"{PUBLIC}/novels/{NOVEL_ID}#exports"
+
+    def test_match__returns_none_for_a_deleted_novel(self) -> None:
+        event = _ex(state="failed", error="boom")
+        assert match(event, None, public_url=PUBLIC) is None
+
+
 class TestMatch__OnOtherEvents:
     def test_match__returns_none_for_chapter_events(self) -> None:
         event = _event("CH000000000001", {"state": "downloaded", "released": [1]})

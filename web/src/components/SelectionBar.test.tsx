@@ -196,6 +196,12 @@ describe('SelectionBar', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it('says the named export will fail', async () => {
+      mount(chapters, { exports: [makeExport()] });
+      await userEvent.click(screen.getByRole('button', { name: 'Cancel queued' }));
+      expect(screen.getByRole('dialog')).toHaveTextContent(/will fail the export/);
+    });
+
     it('Keep queued closes it without a request', async () => {
       const { fetchMock, onDone } = mount(chapters, { exports: [makeExport()] });
       await userEvent.click(screen.getByRole('button', { name: 'Cancel queued' }));

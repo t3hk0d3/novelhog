@@ -4,6 +4,8 @@ import { api, type Chapter, type ChapterState } from '../api/client';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { errorMessage } from '../lib/errors';
+import { exportsNeeding } from '../lib/exportsNeeding';
+import { CancelFailsExportDialog } from './CancelFailsExportDialog';
 import { Dialog } from './Dialog';
 import { useToast } from './Toast';
 
@@ -85,13 +87,9 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
   const fresh = selected.filter((c) => c.state === 'not_requested');
   const failed = selected.filter((c) => c.state === 'error');
   // Waiting exports that cannot finish without the chapters this would dequeue.
-  const needed = (exports.data ?? []).filter(
-    (e) =>
-      e.state === 'waiting' &&
-      !e.skip_missing &&
-      e.chapter_from !== null &&
-      e.chapter_to !== null &&
-      queued.some((c) => c.position >= (e.chapter_from ?? 0) && c.position <= (e.chapter_to ?? 0)),
+  const needed = exportsNeeding(
+    exports.data,
+    queued.map((c) => c.position),
   );
   const none = selected.length === 0;
   const busy = patch.isPending;
@@ -220,42 +218,18 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
         </Dialog>
       )}
       {confirmCancel && (
-        <Dialog
+        <CancelFailsExportDialog
           title="Cancel queued chapters?"
-          onClose={() => {
+          needed={needed}
+          subject="some of these chapters"
+          onKeep={() => {
             setConfirmCancel(false);
           }}
-        >
-          <p className="mt-4 text-sm">
-            {needed.map((e) => `“${e.filename}”`).join(', ')}{' '}
-            {needed.length === 1
-              ? 'is a waiting export that needs'
-              : 'are waiting exports that need'}{' '}
-            some of these chapters. It will stay blocked until they are queued again.
-          </p>
-          <div className="mt-6 flex justify-end gap-2">
-            <button
-              type="button"
-              data-autofocus
-              onClick={() => {
-                setConfirmCancel(false);
-              }}
-              className="min-h-11 rounded-lg border border-line px-4 text-sm font-semibold"
-            >
-              Keep queued
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setConfirmCancel(false);
-                patch.mutate({ state: 'not_requested', chapters: selected, unsent: 0 });
-              }}
-              className="min-h-11 rounded-lg bg-danger px-4 text-sm font-semibold text-page"
-            >
-              Cancel queued
-            </button>
-          </div>
-        </Dialog>
+          onConfirm={() => {
+            setConfirmCancel(false);
+            patch.mutate({ state: 'not_requested', chapters: selected, unsent: 0 });
+          }}
+        />
       )}
     </>
   );

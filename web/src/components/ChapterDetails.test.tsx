@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Chapter } from '../api/client';
+import type { Chapter, Export } from '../api/client';
 import { makeChapter, makeChapters } from '../test/fixtures';
 import { renderWithProviders, testClient } from '../test/render';
 import { useChapters } from '../hooks/useChapters';
@@ -317,6 +317,75 @@ describe('ChapterDetails', () => {
         expect(JSON.parse(init.body as string)).toEqual({ state: next, chapters: [2] });
       },
     );
+
+    describe('Cancel on a pending chapter', () => {
+      const waiting = {
+        id: 'EX000000000001',
+        filename: 'tale-1-5.epub',
+        chapter_from: 1,
+        chapter_to: 5,
+        skip_missing: false,
+        state: 'waiting',
+      } as unknown as Export;
+
+      function showWith(exports: Export[]) {
+        const fetchMock = stubPatch();
+        const client = testClient();
+        client.setQueryData(['exports', NOVEL], exports);
+        const chapter = makeChapter(2, { state: 'pending' });
+        const all = makeChapters(5).map((c) => (c.id === chapter.id ? chapter : c));
+        renderWithProviders(
+          <ChapterDetails
+            novelId={NOVEL}
+            chapterId={chapter.id}
+            chapters={all}
+            rows={all}
+            onStep={vi.fn()}
+            onClose={vi.fn()}
+          />,
+          { client },
+        );
+        return fetchMock;
+      }
+
+      it('asks first, naming the export and saying it will fail', async () => {
+        const fetchMock = showWith([waiting]);
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        const dialogs = screen.getAllByRole('dialog');
+        const confirm = dialogs[dialogs.length - 1] as HTMLElement;
+        expect(confirm).toHaveTextContent('tale-1-5.epub');
+        expect(confirm).toHaveTextContent(/will fail the export/);
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('confirming sends the PATCH', async () => {
+        const fetchMock = showWith([waiting]);
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel queued' }));
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+        const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+        expect(JSON.parse(init.body as string)).toEqual({ state: 'not_requested', chapters: [2] });
+      });
+
+      it('dismissing sends nothing', async () => {
+        const fetchMock = showWith([waiting]);
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Keep queued' }));
+        expect(screen.queryByRole('button', { name: 'Keep queued' })).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('sends the PATCH without asking when no waiting export needs the chapter', async () => {
+        const fetchMock = showWith([{ ...waiting, skip_missing: true }]);
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+        expect(screen.queryByRole('button', { name: 'Keep queued' })).toBeNull();
+      });
+    });
 
     it('has no primary action while downloading', () => {
       show(makeChapter(2, { state: 'downloading' }));

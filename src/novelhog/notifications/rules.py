@@ -68,6 +68,14 @@ def match(
         )
     if kind == "export":
         filename = event.payload.get("filename")
+        if event.payload.get("state") == "failed" and isinstance(filename, str):
+            return NotificationMessage(
+                title=title,
+                body=f"{filename} failed: {event.payload.get('error')}",
+                url=f"{base}/novels/{novel.id}#exports",
+                icon=_icon(novel, public_url),
+                topic=novel.id,
+            )
         if (
             event.payload.get("state") != "ready"
             or event.payload.get("waited") is not True
