@@ -1,5 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Chapter, Export } from '../api/client';
@@ -65,7 +65,7 @@ function mount(selected: Chapter[], { wide = true, exports = [], response }: Opt
     <SelectionBar novelId={NOVEL} selected={selected} onDone={onDone} onExport={onExport} />,
     { client },
   );
-  return { fetchMock, onDone, onExport };
+  return { fetchMock, onDone, onExport, client };
 }
 
 const sent = (fetchMock: ReturnType<typeof vi.fn>) => {
@@ -200,6 +200,17 @@ describe('SelectionBar', () => {
       mount(chapters, { exports: [makeExport()] });
       await userEvent.click(screen.getByRole('button', { name: 'Cancel queued' }));
       expect(screen.getByRole('dialog')).toHaveTextContent(/will fail the export/);
+    });
+
+    it('closes without an empty name list when no export needs the chapters any more', async () => {
+      const { client } = mount(chapters, { exports: [makeExport()] });
+      await userEvent.click(screen.getByRole('button', { name: 'Cancel queued' }));
+      act(() => {
+        client.setQueryData(['exports', NOVEL], [makeExport({ state: 'ready' })]);
+      });
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
     });
 
     it('Keep queued closes it without a request', async () => {

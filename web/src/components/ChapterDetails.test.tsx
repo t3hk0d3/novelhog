@@ -369,6 +369,47 @@ describe('ChapterDetails', () => {
         expect(JSON.parse(init.body as string)).toEqual({ state: 'not_requested', chapters: [2] });
       });
 
+      it('does not carry a confirmation over to another chapter', async () => {
+        const fetchMock = stubPatch();
+        const client = testClient();
+        client.setQueryData(['exports', NOVEL], [waiting]);
+        let setSecond: (state: Chapter['state']) => void = () => undefined;
+        const Host = () => {
+          const [id, setId] = useState(makeChapter(2).id);
+          const [second, set] = useState<Chapter['state']>('pending');
+          setSecond = set;
+          const all = [
+            makeChapter(1),
+            makeChapter(2, { state: second }),
+            makeChapter(3, { state: 'pending' }),
+            makeChapter(4),
+            makeChapter(5),
+          ];
+          return (
+            <ChapterDetails
+              novelId={NOVEL}
+              chapterId={id}
+              chapters={all}
+              rows={all}
+              onStep={setId}
+              onClose={vi.fn()}
+            />
+          );
+        };
+        renderWithProviders(<Host />, { client });
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        expect(screen.getByRole('button', { name: 'Keep queued' })).toBeInTheDocument();
+        // A live update starts chapter 2: the need goes away and the confirmation with it.
+        act(() => {
+          setSecond('downloading');
+        });
+        expect(screen.queryByRole('button', { name: 'Keep queued' })).toBeNull();
+        await userEvent.click(screen.getByRole('button', { name: 'Next chapter' }));
+        expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Keep queued' })).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
       it('dismissing sends nothing', async () => {
         const fetchMock = showWith([waiting]);
         await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));

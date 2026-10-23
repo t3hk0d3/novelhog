@@ -145,7 +145,8 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   const wide = useMediaQuery(DESKTOP);
   // Results belong to the chapter they were sent for; stepping away hides them (no remount).
   const [skippedPosition, setSkippedPosition] = useState<number | null>(null);
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  // The position Cancel was pressed on; the confirmation belongs to that chapter only.
+  const [confirmFor, setConfirmFor] = useState<number | null>(null);
   const exports = useQuery({
     queryKey: ['exports', novelId],
     queryFn: () => api.listExports(novelId),
@@ -177,6 +178,10 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   // Cancelling a queued chapter fails the waiting exports that need it (spec section 5.5).
   const needed =
     chapter.state === 'pending' ? exportsNeeding(exports.data, [chapter.position]) : [];
+  // Never carry a confirmation over: it ends with the need or with the chapter it was asked for.
+  if (confirmFor !== null && (needed.length === 0 || confirmFor !== chapter.position)) {
+    setConfirmFor(null);
+  }
 
   const field = (label: string, value: React.ReactNode) => (
     <div className="flex gap-4">
@@ -274,7 +279,7 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
               type="button"
               disabled={patch.isPending && mine}
               onClick={() => {
-                if (needed.length > 0) setConfirmCancel(true);
+                if (needed.length > 0) setConfirmFor(chapter.position);
                 else patch.mutate({ state: action.next, position: chapter.position });
               }}
               className={`min-h-11 rounded-lg px-4 text-sm font-semibold disabled:opacity-40 ${
@@ -286,16 +291,16 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
           )}
         </div>
       </Dialog>
-      {confirmCancel && needed.length > 0 && (
+      {confirmFor === chapter.position && needed.length > 0 && (
         <CancelFailsExportDialog
           title="Cancel queued chapter?"
           needed={needed}
           subject="this chapter"
           onKeep={() => {
-            setConfirmCancel(false);
+            setConfirmFor(null);
           }}
           onConfirm={() => {
-            setConfirmCancel(false);
+            setConfirmFor(null);
             patch.mutate({ state: 'not_requested', position: chapter.position });
           }}
         />

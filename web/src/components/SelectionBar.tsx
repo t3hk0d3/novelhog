@@ -91,6 +91,8 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
     exports.data,
     queued.map((c) => c.position),
   );
+  // The exports may be built, deleted or failed while the confirmation is open: nothing to ask.
+  if (confirmCancel && needed.length === 0) setConfirmCancel(false);
   const none = selected.length === 0;
   const busy = patch.isPending;
 
@@ -217,7 +219,7 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
           </div>
         </Dialog>
       )}
-      {confirmCancel && (
+      {confirmCancel && needed.length > 0 && (
         <CancelFailsExportDialog
           title="Cancel queued chapters?"
           needed={needed}
