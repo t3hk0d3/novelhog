@@ -470,7 +470,7 @@ class TestRefresh__OnSiteUnreachable:
         run.run()
 
         error = run.novel(novel_id).import_error
-        assert error == "Site unreachable: SiteUnreachable: refused"
+        assert error == "Site unreachable: refused"
 
     def test_refresh__at_the_threshold_a_later_sync_backs_off_like_a_site_error(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
@@ -493,6 +493,20 @@ class TestRefresh__OnSiteUnreachable:
         run.adapter.error = SiteUnreachable("refused")
         self.fail_below_threshold(run, clock)
         run.adapter.error = None
+        run.run()
+        clock.advance(days=40)
+        run.adapter.error = SiteUnreachable("refused")
+
+        with pytest.raises(SiteUnreachable):
+            run.run()
+
+    def test_refresh__a_site_error_means_the_host_answered_and_resets_the_count(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteUnreachable("refused")
+        self.fail_below_threshold(run, clock)
+        run.adapter.error = SiteError("no chapters")
         run.run()
         clock.advance(days=40)
         run.adapter.error = SiteUnreachable("refused")

@@ -11,12 +11,19 @@ class FakeSite:
 
     Every requested path is kept in `requests`. With `challenge` set, every request gets a
     Cloudflare challenge instead: `"header"` is a 403 with `cf-mitigated: challenge`, `"body"` a
-    503 from `Server: cloudflare` with a "Just a moment..." page.
+    503 from `Server: cloudflare` with a "Just a moment..." page. `reply` (status, headers, body)
+    answers every request with exactly that, for responses that are not challenges.
     """
 
-    def __init__(self, pages: dict[str, str], challenge: str | None = None) -> None:
+    def __init__(
+        self,
+        pages: dict[str, str],
+        challenge: str | None = None,
+        reply: tuple[int, dict[str, str], str] | None = None,
+    ) -> None:
         self.pages = pages
         self.challenge = challenge
+        self.reply = reply
         self.requests: list[str] = []
         site = self
 
@@ -31,6 +38,8 @@ class FakeSite:
                 elif site.challenge == "body":
                     status, html = 503, "<html><title>Just a moment...</title></html>"
                     headers = {}
+                if site.reply is not None:
+                    status, headers, html = site.reply
                 payload = (html or "not found").encode("utf-8")
                 self.send_response(status)
                 for name, value in headers.items():

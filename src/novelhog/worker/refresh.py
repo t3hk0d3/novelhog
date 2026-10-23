@@ -13,7 +13,7 @@ from novelhog.repo.novels import NovelClaim, SyncFailed, SyncOutcome, SyncSuccee
 from novelhog.scraper_adapter.adapter import TocResult
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import StaticStorage, cover_key
-from novelhog.worker.errors import summarize
+from novelhog.worker.errors import summarize, unreachable_message
 from novelhog.worker.reachability import Reachability
 from novelhog.worker.runtime import Heartbeat
 
@@ -116,9 +116,11 @@ def refresh(  # noqa: PLR0913
             outcome = SyncSucceeded(toc.urls, toc.title, toc.language, cover, min_s, max_s, rng)
         except Exception as error:  # noqa: BLE001 - any other failure counts as a site error
             message = summarize(error)
+            if isinstance(error, SiteError):
+                reachability.succeeded(claim.host)  # the host answered
             gave_up = isinstance(error, SiteUnreachable) and reachability.failed(claim.host)
             if gave_up:
-                message = f"Site unreachable: {message}"
+                message = unreachable_message(error)
             if isinstance(error, InfrastructureError) and not gave_up:
                 logger.warning("refresh_infrastructure_error", error=message)
                 infrastructure = error

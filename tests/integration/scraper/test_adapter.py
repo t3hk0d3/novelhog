@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import requests
 from structlog.testing import capture_logs
 
 from novelhog import config
@@ -70,14 +71,6 @@ def make_settings(tmp_path: Path, flaresolverr_url: str, **overrides: str) -> Se
 def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """The scraper sleeps between retries; skip that so failure tests stay fast."""
     monkeypatch.setattr("web_novel_scraper.request_helper.time.sleep", lambda _seconds: None)
-
-
-@pytest.fixture(autouse=True)
-def _no_sticky_hosts() -> Iterator[None]:
-    """The Cloudflare fallback is remembered per process; every test starts without it."""
-    guard._sticky_hosts.clear()
-    yield
-    guard._sticky_hosts.clear()
 
 
 @pytest.fixture
@@ -521,7 +514,7 @@ class TestScraperAdapter__OnCloudflareChallenge:
             adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
             with pytest.raises(SiteError):
                 adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
-            assert guard._sticky_hosts == set()
+            assert guard.fallback_hosts() == frozenset()
             with pytest.raises(SiteError):
                 adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
             assert site.requests == ["/toc", "/toc"]
@@ -535,16 +528,70 @@ class TestScraperAdapter__OnCloudflareChallenge:
                     "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
                 )
         assert not isinstance(raised.value, SiteUnreachable)
-        assert guard._sticky_hosts == set()
+        assert guard.fallback_hosts() == frozenset()
 
-    def test_sync_toc__a_plain_403_is_a_site_error_without_flaresolverr(
-        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
-    ) -> None:
-        with FakeSite({}) as site, pytest.raises(SiteError):
+
+NOT_CHALLENGES = {
+    "plain 403": (403, {}, "forbidden"),
+    "plain 503": (503, {}, "maintenance"),
+    "403 from cloudflare with an ordinary body": (403, {"Server": "cloudflare"}, "blocked"),
+    "503 from cloudflare with an ordinary body": (503, {"Server": "cloudflare"}, "overloaded"),
+    "challenge body without cloudflare": (503, {}, "<title>Just a moment...</title>"),
+    "other cf-mitigated value": (403, {"cf-mitigated": "block"}, "blocked"),
+    "challenge header on a 200": (200, {"cf-mitigated": "challenge"}, "<html></html>"),
+}
+
+
+class TestScraperAdapter__OnResponseThatIsNotAChallenge:
+    @pytest.mark.parametrize("reply", NOT_CHALLENGES.values(), ids=NOT_CHALLENGES.keys())
+    def test_sync_toc__goes_direct_without_flaresolverr_and_marks_no_host(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr,
+        reply: tuple[int, dict[str, str], str],
+    ) -> None:  # fmt: skip
+        with FakeSite({}, reply=reply) as site, pytest.raises(SiteError):
             ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
-                "NV000000000001", DIRECT_HOST, f"{site.url}/missing"
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
             )
         assert flaresolverr.commands == []
+        assert guard.fallback_hosts() == frozenset()
+
+
+class TestScraperAdapter__OnConnectionProblems:
+    def patch_get(self, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+        def get(*_args: object, **_kwargs: object) -> None:
+            raise error
+
+        monkeypatch.setattr("web_novel_scraper.request_helper.requests.get", get)
+
+    def sync(self, tmp_path: Path, flaresolverr: FakeFlareSolverr) -> None:
+        ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+            "NV000000000001", DIRECT_HOST, "http://site.example/toc"
+        )
+
+    def test_sync_toc__connect_timeout_raises_site_unreachable(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.patch_get(monkeypatch, requests.exceptions.ConnectTimeout("timed out"))
+        with pytest.raises(SiteUnreachable, match=f"{DIRECT_HOST}: connection timed out"):
+            self.sync(tmp_path, flaresolverr)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            requests.exceptions.SSLError("bad certificate"),
+            requests.exceptions.ProxyError("proxy"),
+            requests.exceptions.ConnectionError("Connection aborted"),
+        ],
+        ids=["read timeout", "tls", "proxy", "reset"],
+    )
+    def test_sync_toc__other_connection_problems_are_site_errors(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:  # fmt: skip
+        self.patch_get(monkeypatch, error)
+        with pytest.raises(SiteError):
+            self.sync(tmp_path, flaresolverr)
 
 
 class TestScraperAdapter__SyncToc__OnExactlyBudgetPages:

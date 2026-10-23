@@ -11,8 +11,8 @@ from novelhog.images import FetchedImage
 from novelhog.repo import Repo
 from novelhog.repo.work import ChapterClaim
 from novelhog.scraper_adapter.adapter import FetchedChapter
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteUnreachable
-from novelhog.worker.errors import summarize
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
+from novelhog.worker.errors import summarize, unreachable_message
 from novelhog.worker.reachability import Reachability
 from novelhog.worker.runtime import Heartbeat
 
@@ -182,8 +182,10 @@ def _download_one(  # noqa: PLR0913
     except Exception as error:  # noqa: BLE001 - any failure is recorded on the chapter
         held.end()
         message = summarize(error)
+        if isinstance(error, SiteError):
+            reachability.succeeded(claim.host)  # the host answered
         if isinstance(error, SiteUnreachable) and reachability.failed(claim.host):
-            message = f"Site unreachable: {message}"
+            message = unreachable_message(error)
         elif isinstance(error, InfrastructureError):
             chapter_log.warning("download_infrastructure_error", error=message)
             repo.work.requeue(claim.chapter_id, worker_id)

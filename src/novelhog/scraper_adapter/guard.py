@@ -114,6 +114,18 @@ if not hasattr(RequestHelper, "novelhog_original_get_url_content"):
     RequestHelper._get_url_common_request = _guarded_common_request
 
 
+def reset_fallback() -> None:
+    """Forget every host routed through FlareSolverr (tests start each case without any)."""
+    with _sticky_lock:
+        _sticky_hosts.clear()
+
+
+def fallback_hosts() -> frozenset[str]:
+    """The hosts currently routed through FlareSolverr."""
+    with _sticky_lock:
+        return frozenset(_sticky_hosts)
+
+
 @contextmanager
 def page_budget(max_pages: int) -> Iterator[None]:
     """Count the scraper's page requests in this block; raise `TocLoopError` on a loop or overrun.
