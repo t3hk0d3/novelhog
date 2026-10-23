@@ -7,12 +7,14 @@ builds an image.
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess  # noqa: S404 - the tests drive the docker CLI
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,12 @@ pytestmark = [
         reason="set NOVELHOG_CONTAINER_TESTS=1 and install Docker to run the container tests",
     ),
 ]
+
+
+def _parse_time(value: str | int) -> datetime:
+    """Parse Docker's RFC 3339 nanosecond timestamp (fromisoformat takes at most microseconds)."""
+    text = re.sub(r"(\.\d{6})\d*", r"\1", str(value))
+    return datetime.fromisoformat(text)
 
 
 class Stack:
@@ -130,6 +138,8 @@ class Stack:
         """Start migrate, web and worker, then wait until Caddy answers."""
         self.compose("up", "-d", "--build", "--no-color", timeout=CMD_TIMEOUT_S * 2)
         self.wait_until("web to serve /", lambda: self.get("/")[0] == 200)
+        # Caddy serves / from disk while uvicorn is still starting; wait for the API too.
+        self.wait_until("the API behind Caddy", lambda: self.get("/api/v1/settings")[0] == 200)
 
     def down(self) -> None:
         """Remove containers and volumes; never raises."""
@@ -151,7 +161,7 @@ def test_migrate__runs_once_and_exits_0_before_web_and_worker_start(stack: Stack
     assert migrate["Status"] == "exited"
     assert migrate["ExitCode"] == 0
     for service in (WEB, WORKER):
-        assert str(migrate["FinishedAt"]) <= str(stack.state(service)["StartedAt"])
+        assert _parse_time(migrate["FinishedAt"]) <= _parse_time(stack.state(service)["StartedAt"])
 
 
 def test_migrate__works_with_working_directory_root(stack: Stack) -> None:
@@ -168,8 +178,9 @@ def test_caddy__serves_index_for_root_and_unknown_routes_without_caching(stack: 
 
 
 def test_caddy__404_for_missing_static_file_and_unknown_api_path(stack: Stack) -> None:
-    status, _, body = stack.get("/static/covers/missing.jpg")
+    status, headers, body = stack.get("/static/covers/missing.jpg")
     assert status == 404
+    assert "immutable" not in headers.get("cache-control", "")
     assert b'<div id="root">' not in body
     status, _, body = stack.get("/api/v1/nope")
     assert status == 404
@@ -256,7 +267,8 @@ def test_shared_database__api_write_succeeds(stack: Stack) -> None:
     assert status in (200, 201), body
 
 
-def test_supervision__killing_the_api_process_stops_the_web_container() -> None:
+@pytest.mark.parametrize("child", ["api", "caddy"])
+def test_supervision__killing_either_process_stops_the_web_container(child: str) -> None:
     s = Stack()
     try:
         s.up()
@@ -264,15 +276,20 @@ def test_supervision__killing_the_api_process_stops_the_web_container() -> None:
             WEB,
             "python",
             "-c",
-            "import os, signal\n"
+            "import os, signal, sys\n"
             "for p in os.listdir('/proc'):\n"
             "    if p.isdigit():\n"
             "        try:\n"
             "            c = open(f'/proc/{p}/cmdline').read().split('\\0')\n"
             "        except OSError:\n"
             "            continue\n"
-            "        if 'novelhog.cli' in c and 'api' in c:\n"
+            "        if sys.argv[1] == 'api':\n"
+            "            hit = 'novelhog.cli' in c and 'api' in c\n"
+            "        else:\n"
+            "            hit = os.path.basename(c[0]) == 'caddy'\n"
+            "        if hit:\n"
             "            os.kill(int(p), signal.SIGKILL)\n",
+            child,
         )
         s.wait_until("web container to stop", lambda: s.state(WEB)["Status"] == "exited")
         assert s.state(WEB)["ExitCode"] != 0

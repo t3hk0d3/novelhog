@@ -68,7 +68,10 @@ server {
 
     location /api/v1/events {
         proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 1h;
@@ -86,6 +89,12 @@ non-default port.
 | `/data/db` | `novelhog-db` | read-write for all three services (SQLite creates `app.db-wal` and `app.db-shm` next to the database); unused with Postgres |
 | `/data/static` | `novelhog-static` | read-write for `novelhog-worker`, read-only for `novelhog-web`; covers and exports |
 | `/var/lib/novelhog/scraper` | none | worker-local scraper cache; safe to delete at any time |
+
+Bind-mounted host directories (instead of the named volumes) must be writable by uid 10001, for example
+`chown 10001 ./data`.
+
+There is no login. `compose.yaml` publishes the port on all interfaces; when the reverse proxy runs on the same
+host, change the mapping to `127.0.0.1:8080:8080` in an override file so only the proxy can reach it.
 
 ## Backups
 

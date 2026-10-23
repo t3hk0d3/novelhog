@@ -27,9 +27,15 @@
 	# Files written by the worker under /data/static; a missing file is a plain 404.
 	handle /static/* {
 		root * /data
-		@covers path /static/covers/*
+		@covers {
+			path /static/covers/*
+			file
+		}
 		header @covers Cache-Control "public, max-age=31536000, immutable"
-		@exports path /static/exports/*
+		@exports {
+			path /static/exports/*
+			file
+		}
 		header @exports Content-Disposition attachment
 		@epub path /static/exports/*.epub
 		header @epub Content-Type application/epub+zip
@@ -56,7 +62,8 @@
 	# Vite output is content-hashed; a missing asset is a 404, not the SPA.
 	handle /assets/* {
 		root * /srv/web
-		header Cache-Control "public, max-age=31536000, immutable"
+		@present file
+		header @present Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 
