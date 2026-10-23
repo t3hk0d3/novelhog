@@ -4,14 +4,14 @@ import importlib.resources
 import json
 import shutil
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 import requests
 from structlog.testing import capture_logs
 
-from novelhog import config
+from novelhog import config, net
 from novelhog.config import Settings
 from novelhog.scraper_adapter import ScraperAdapter, guard
 from novelhog.scraper_adapter.errors import (
@@ -59,9 +59,11 @@ def fanmtl_pages() -> dict[str, str]:
 
 
 def make_settings(tmp_path: Path, flaresolverr_url: str, **overrides: str) -> Settings:
+    """Settings for the fake sites and FlareSolverr, which run on 127.0.0.1."""
     env = {
         "NOVELHOG_SCRAPER_DIR": str(tmp_path / "scraper"),
         "NOVELHOG_FLARESOLVERR_URL": flaresolverr_url,
+        "NOVELHOG_ALLOW_PRIVATE_FETCH": "true",
         **overrides,
     }
     return config.load(env)
@@ -561,7 +563,7 @@ class TestScraperAdapter__OnConnectionProblems:
         def get(*_args: object, **_kwargs: object) -> None:
             raise error
 
-        monkeypatch.setattr("web_novel_scraper.request_helper.requests.get", get)
+        monkeypatch.setattr(net.GuardedSession, "get", get)
 
     def sync(self, tmp_path: Path, flaresolverr: FakeFlareSolverr) -> None:
         ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
@@ -599,3 +601,134 @@ class TestScraperAdapter__SyncToc__OnExactlyBudgetPages:
         flaresolverr.pages.update(hostednovel_pages())
         settings = make_settings(tmp_path, flaresolverr.url, NOVELHOG_MAX_TOC_PAGES="2")
         assert len(ScraperAdapter(settings).sync_toc("NV000000000001", HN_HOST, HN_TOC).urls) == 3
+
+
+def guarded_settings(tmp_path: Path, flaresolverr_url: str) -> Settings:
+    """Settings with the outbound guard on (no `ALLOW_PRIVATE_FETCH`)."""
+    return make_settings(tmp_path, flaresolverr_url, NOVELHOG_ALLOW_PRIVATE_FETCH="false")
+
+
+def resolver(table: dict[str, str]) -> Callable[[str], list[str]]:
+    """A resolver that answers from `table` and fails for any other host."""
+
+    def resolve(host: str) -> list[str]:
+        if host not in table:
+            msg = f"cannot resolve {host}"
+            raise net.Unresolvable(msg)
+        return [table[host]]
+
+    return resolve
+
+
+@pytest.fixture
+def loopback_is_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat 127.0.0.1 as public so a fake site can stand in for a public host."""
+    real = net.is_public
+    monkeypatch.setattr(net, "is_public", lambda address: address == "127.0.0.1" or real(address))
+
+
+CHAPTER_HTML = (
+    '<html><body><ul><li class="active">One</li></ul>'
+    '<div class="reading-content"><p>Hello there.</p></div></body></html>'
+)
+
+
+class TestScraperAdapter__OutboundGuard__DirectFetchOfNonPublicHost:
+    def test_sync_toc__raises_site_error_naming_the_host_without_requesting(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}) as site:
+            site.pages["/toc"] = direct_toc(site.url)
+            with pytest.raises(SiteError, match=r"^Blocked non-public address: 127\.0\.0\.1$"):
+                ScraperAdapter(guarded_settings(tmp_path, flaresolverr.url)).sync_toc(
+                    "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+                )
+            assert site.requests == []
+
+    def test_fetch_chapter__raises_site_error_naming_the_host_without_requesting(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({"/c/1": CHAPTER_HTML}) as site:
+            with pytest.raises(SiteError, match=r"^Blocked non-public address: 127\.0\.0\.1$"):
+                ScraperAdapter(guarded_settings(tmp_path, flaresolverr.url)).fetch_chapter(
+                    "NV000000000001", DIRECT_HOST, f"{site.url}/toc", f"{site.url}/c/1"
+                )
+            assert site.requests == []
+
+    def test_fetch_chapter__is_allowed_with_allow_private_fetch(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({"/c/1": CHAPTER_HTML}) as site:
+            chapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).fetch_chapter(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc", f"{site.url}/c/1"
+            )
+        assert chapter.body_html == "<p>Hello there.</p>"
+
+
+@pytest.mark.usefixtures("loopback_is_public")
+class TestScraperAdapter__OutboundGuard__DirectFetchRedirectedToNonPublicHost:
+    def test_sync_toc__raises_site_error_naming_the_redirect_host(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        reply = (302, {"Location": "http://private.test/toc"}, "")
+        table = {"site.test": "127.0.0.1", "private.test": "10.0.0.1"}
+        with FakeSite({}, reply=reply) as site:
+            port = site.url.rsplit(":", 1)[1]
+            adapter = ScraperAdapter(guarded_settings(tmp_path, flaresolverr.url), resolver(table))
+            with pytest.raises(SiteError, match=r"^Blocked non-public address: private\.test$"):
+                adapter.sync_toc("NV000000000001", DIRECT_HOST, f"http://site.test:{port}/toc")
+            assert site.requests == ["/toc"]
+
+
+@pytest.mark.usefixtures("loopback_is_public")
+class TestScraperAdapter__OutboundGuard__DirectFetchOfPublicHostOtherThanTheNovels:
+    def test_fetch_chapter__returns_the_chapter(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        table = {"site.test": "127.0.0.1", "api.site.test": "127.0.0.1"}
+        with FakeSite({"/c/1": CHAPTER_HTML}) as site:
+            port = site.url.rsplit(":", 1)[1]
+            adapter = ScraperAdapter(guarded_settings(tmp_path, flaresolverr.url), resolver(table))
+            chapter = adapter.fetch_chapter(
+                "NV000000000001",
+                DIRECT_HOST,
+                f"http://site.test:{port}/toc",
+                f"http://api.site.test:{port}/c/1",
+            )
+        assert chapter.body_html == "<p>Hello there.</p>"
+
+
+class TestScraperAdapter__OutboundGuard__ViaFlareSolverr:
+    def test_fetch_chapter__non_public_host_raises_site_error_before_flaresolverr_is_asked(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        flaresolverr.pages[SH_CH.format(1)] = load_html("scribblehub_chapter.html")
+        adapter = ScraperAdapter(
+            guarded_settings(tmp_path, flaresolverr.url),
+            resolver({"www.scribblehub.com": "192.168.1.1"}),
+        )
+        with pytest.raises(SiteError, match=r"^Blocked non-public address: www\.scribblehub\.com$"):
+            adapter.fetch_chapter("NV000000000001", SH_HOST, SH_TOC, SH_CH.format(1))
+        assert flaresolverr.requested_urls == []
+
+    def test_fetch_chapter__public_host_other_than_the_novels_is_fetched(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        url = "https://api.mystorywave.com/chapter/1"
+        flaresolverr.pages[url] = load_html("scribblehub_chapter.html")
+        adapter = ScraperAdapter(
+            guarded_settings(tmp_path, flaresolverr.url),
+            resolver({"api.mystorywave.com": "93.184.216.34"}),
+        )
+        chapter = adapter.fetch_chapter("NV000000000001", SH_HOST, SH_TOC, url)
+        assert chapter.title == "Chapter 1: The Lamp Goes Out"
+        assert flaresolverr.requested_urls == [url]
+
+    def test_sync_toc__unresolvable_host_raises_site_unreachable(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        flaresolverr.pages.update(scribblehub_pages())
+        adapter = ScraperAdapter(guarded_settings(tmp_path, flaresolverr.url), resolver({}))
+        with pytest.raises(SiteUnreachable, match=f"{SH_HOST}: name resolution failed"):
+            adapter.sync_toc("NV000000000001", SH_HOST, SH_TOC)
+        assert flaresolverr.requested_urls == []

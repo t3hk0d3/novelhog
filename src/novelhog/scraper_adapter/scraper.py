@@ -52,6 +52,7 @@ with warnings.catch_warnings():
     from web_novel_scraper.exceptions import (
         CommonGetRequestError,
         FlaresolverrConnectionError,
+        ResponseIsEmptyError,
         ScraperError,
     )
     from web_novel_scraper.models import Chapter
@@ -68,6 +69,7 @@ __all__ = [
     "Novel",
     "ProcessorRegistry",
     "RequestHelper",
+    "ResponseIsEmptyError",
     "ScraperConfig",
     "ScraperError",
     "take_over_scraper_logging",

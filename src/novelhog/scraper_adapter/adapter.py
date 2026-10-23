@@ -1,7 +1,7 @@
 """The only wrapper around `web_novel_scraper`: TOC sync and chapter fetch (spec section 6.7)."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -10,13 +10,13 @@ from pathlib import Path
 import requests
 from urllib3.exceptions import NameResolutionError, NewConnectionError
 
-from novelhog import log
+from novelhog import log, net
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import UrlTooLong, normalize_url
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.scraper_adapter.finders import find_cover_url, find_title
-from novelhog.scraper_adapter.guard import flaresolverr_fallback, page_budget
+from novelhog.scraper_adapter.guard import flaresolverr_fallback, outbound_guard, page_budget
 from novelhog.scraper_adapter.overrides import FORCE_FLARESOLVERR_HOSTS
 from novelhog.scraper_adapter.scraper import (
     Chapter,
@@ -93,6 +93,8 @@ def _connection_failure(exc: BaseException) -> tuple[type[Exception], str] | Non
         seen.add(id(current))
         if isinstance(current, FlaresolverrConnectionError):
             return InfrastructureError, ""
+        if unreachable is None and isinstance(current, net.Unresolvable):
+            unreachable = "name resolution failed"
         if unreachable is None and isinstance(current, requests.exceptions.RequestException):
             unreachable = _unreachable_reason(current)
         current = current.__cause__ or current.__context__
@@ -120,8 +122,11 @@ def _translated_errors(host: str) -> Iterator[None]:
 class ScraperAdapter:
     """Syncs tables of contents and fetches chapters through the scraper's `Novel` API."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, resolver: Callable[[str], list[str]] = net.default_resolver
+    ) -> None:
         self._settings = settings
+        self._resolver = resolver
         take_over_scraper_logging()
 
     def supported_hosts(self) -> list[str]:
@@ -134,6 +139,9 @@ class ScraperAdapter:
         """Fetch every TOC page and return the chapter URLs in reading order."""
         with (
             _translated_errors(host),
+            outbound_guard(
+                allow_private=self._settings.allow_private_fetch, resolver=self._resolver
+            ),
             flaresolverr_fallback(self._settings.flaresolverr_url),
         ):
             novel = self._open(novel_id, host, toc_url)
@@ -157,6 +165,9 @@ class ScraperAdapter:
         """Download one chapter and return its title and content HTML."""
         with (
             _translated_errors(host),
+            outbound_guard(
+                allow_private=self._settings.allow_private_fetch, resolver=self._resolver
+            ),
             flaresolverr_fallback(self._settings.flaresolverr_url),
         ):
             novel = self._open(novel_id, host, toc_url)

@@ -60,6 +60,41 @@ class TestIsPublic__Addresses:
         assert net.is_public("::ffff:8.8.8.8") is True
 
 
+class TestCheckHost__OnPublicHost:
+    def test_check_host__returns_the_resolved_addresses(self) -> None:
+        assert net.check_host("a.test", allow_private=False, resolver=fixed("8.8.8.8")) == [
+            "8.8.8.8"
+        ]
+
+
+class TestCheckHost__OnNonPublicHost:
+    def test_check_host__raises_non_public_naming_the_host(self) -> None:
+        with pytest.raises(net.NonPublic) as raised:
+            net.check_host("a.test", allow_private=False, resolver=fixed("10.0.0.1"))
+        assert raised.value.host == "a.test"
+
+    def test_check_host__non_public_is_refused(self) -> None:
+        assert issubclass(net.NonPublic, net.Refused)
+
+    def test_check_host__returns_the_addresses_when_private_is_allowed(self) -> None:
+        assert net.check_host("a.test", allow_private=True, resolver=fixed("10.0.0.1")) == [
+            "10.0.0.1"
+        ]
+
+
+class TestCheckHost__OnUnresolvableHost:
+    def test_check_host__default_resolver_raises_unresolvable(self) -> None:
+        with pytest.raises(net.Unresolvable):
+            net.check_host("no-such-host.invalid", allow_private=True)
+
+    def test_check_host__no_address_raises_unresolvable(self) -> None:
+        with pytest.raises(net.Unresolvable):
+            net.check_host("a.test", allow_private=True, resolver=fixed())
+
+    def test_check_host__unresolvable_is_refused(self) -> None:
+        assert issubclass(net.Unresolvable, net.Refused)
+
+
 class TestGuardedSession__PrivateHost:
     def test_get__raises_refused_before_connecting(self, http_server: Server) -> None:
         session = net.GuardedSession(allow_private=False, resolver=fixed("127.0.0.1"))

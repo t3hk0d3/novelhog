@@ -37,6 +37,18 @@ class Refused(Exception):  # noqa: N818 - name fixed by the task contract
     """The guard refused an outbound request (private address or bad scheme)."""
 
 
+class Unresolvable(Refused):
+    """The host name resolved to no address."""
+
+
+class NonPublic(Refused):
+    """The host resolves to a non-public address; `host` names it."""
+
+    def __init__(self, host: str) -> None:
+        super().__init__(f"{host} resolves to a non-public address")
+        self.host = host
+
+
 def _embedded_v4(address: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
     """IPv4 addresses hidden inside an IPv6 address (mapped, NAT64, 6to4, Teredo)."""
     found: list[ipaddress.IPv4Address] = []
@@ -70,11 +82,16 @@ def default_resolver(host: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise Refused(f"cannot resolve {host}") from exc  # noqa: TRY003
+        raise Unresolvable(f"cannot resolve {host}") from exc  # noqa: TRY003
     return list(dict.fromkeys(str(info[4][0]) for info in infos))
 
 
-def _check(host: str, resolver: Callable[[str], list[str]], allow_private: bool) -> list[str]:
+def check_host(
+    host: str,
+    *,
+    allow_private: bool,
+    resolver: Callable[[str], list[str]] = default_resolver,
+) -> list[str]:
     """Resolve once and return the checked addresses; refuse if any is not public."""
     bare = host.strip("[]")
     try:
@@ -83,11 +100,11 @@ def _check(host: str, resolver: Callable[[str], list[str]], allow_private: bool)
     except ValueError:
         addresses = resolver(bare)
     if not addresses:
-        raise Refused(f"{host} resolved to no address")  # noqa: TRY003
+        raise Unresolvable(f"{host} resolved to no address")  # noqa: TRY003
     if not allow_private:
         for address in addresses:
             if not is_public(address):
-                raise Refused(f"{host} resolves to a non-public address")  # noqa: TRY003
+                raise NonPublic(bare)
     return addresses
 
 
@@ -100,7 +117,7 @@ class _GuardMixin:
     def _new_conn(self) -> socket.socket:
         conn: Any = self
         original = conn._dns_host
-        addresses = _check(original, self._resolver, self._allow_private)
+        addresses = check_host(original, allow_private=self._allow_private, resolver=self._resolver)
         last: Exception | None = None
         for address in addresses:
             conn._dns_host = address

@@ -1,12 +1,14 @@
-"""Request hooks on the scraper's `RequestHelper` (spec section 6.7).
+"""Request hooks on the scraper's `RequestHelper` (spec sections 6.7 and 6.8).
 
 Two jobs share the one patched `get_url_content`: the TOC loop guard (a per-operation page
 budget) and the Cloudflare fallback (a direct request that meets a challenge is retried through
-FlareSolverr, and later requests for that host go through it too).
+FlareSolverr, and later requests for that host go through it too). The patched request methods
+add the outbound guard: a direct request goes through `net.GuardedSession` (every redirect hop is
+checked), and a URL's host is checked before the URL is handed to FlareSolverr.
 """
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -14,9 +16,14 @@ from urllib.parse import urlparse
 
 import requests
 
-from novelhog import log
-from novelhog.scraper_adapter.errors import TocLoopError
-from novelhog.scraper_adapter.scraper import CommonGetRequestError, RequestHelper, ScraperError
+from novelhog import log, net
+from novelhog.scraper_adapter.errors import SiteError, TocLoopError
+from novelhog.scraper_adapter.scraper import (
+    CommonGetRequestError,
+    RequestHelper,
+    ResponseIsEmptyError,
+    ScraperError,
+)
 
 _CHALLENGE_STATUSES = (403, 503)
 _CHALLENGE_MARKERS = ("just a moment", "cf-chl")
@@ -41,7 +48,15 @@ class CloudflareChallengeError(ScraperError):  # type: ignore[misc]
     """A direct request got a Cloudflare challenge page. Not retried directly (it would repeat)."""
 
 
+@dataclass(frozen=True)
+class _Outbound:
+    allow_private: bool
+    resolver: Callable[[str], list[str]]
+
+
 _active: ContextVar[_Budget | None] = ContextVar("novelhog_page_budget", default=None)
+_GUARDED = _Outbound(allow_private=False, resolver=net.default_resolver)
+_outbound: ContextVar[_Outbound] = ContextVar("novelhog_outbound", default=_GUARDED)
 _flaresolverr_url: ContextVar[str | None] = ContextVar("novelhog_flaresolverr_url", default=None)
 _sticky_hosts: set[str] = set()  # hosts routed through FlareSolverr for the rest of the process
 _sticky_lock = threading.Lock()
@@ -62,15 +77,59 @@ def _is_challenge(response: requests.Response) -> bool:
     return any(marker in body for marker in _CHALLENGE_MARKERS)
 
 
+def _blocked(host: str) -> SiteError:
+    return SiteError(f"Blocked non-public address: {host}")
+
+
+def _unresolvable(url: str, error: net.Unresolvable) -> CommonGetRequestError:
+    """A failed name lookup, raised like the scraper's own request failures (so it is retried)."""
+    return CommonGetRequestError(f'Request Failed for URL "{url}": {error}')
+
+
 def _guarded_common_request(self: RequestHelper, url: str) -> str:
-    """The direct request; a challenge response raises `CloudflareChallengeError` at once."""
-    try:
-        content: str = RequestHelper.novelhog_original_common_request(self, url)
-    except CommonGetRequestError as error:
-        cause = error.__context__
-        if isinstance(cause, requests.HTTPError) and _is_challenge(cause.response):
-            raise CloudflareChallengeError(str(error)) from error
-        raise
+    """The direct request through the outbound guard; a challenge raises at once.
+
+    Mirrors the scraper's own direct request (any status but 200 or an empty body fails).
+    """
+    outbound = _outbound.get()
+    with net.GuardedSession(
+        allow_private=outbound.allow_private, resolver=outbound.resolver
+    ) as session:
+        try:
+            response = session.get(url, timeout=self.request_timeout, cookies=self.request_cookies)
+        except net.NonPublic as error:
+            raise _blocked(error.host) from error
+        except net.Unresolvable as error:
+            raise _unresolvable(url, error) from error
+        except net.Refused as error:
+            raise SiteError(str(error)) from error
+        except requests.exceptions.RequestException as error:
+            msg = f'Request Failed for URL "{url}": {error}'
+            raise CommonGetRequestError(msg) from error
+    if response.status_code != 200:
+        msg = f'Request Failed for URL "{url}", Status Code is {response.status_code}.'
+        if _is_challenge(response):
+            raise CloudflareChallengeError(msg)
+        raise CommonGetRequestError(msg)
+    content = response.text
+    if content == "":
+        msg = f'Request for URL "{url}" returned no content.'
+        raise ResponseIsEmptyError(msg)
+    return content
+
+
+def _guarded_flaresolverr_request(self: RequestHelper, url: str) -> str:
+    """Check the URL's host before FlareSolverr fetches it, then send the request."""
+    outbound = _outbound.get()
+    if not outbound.allow_private:
+        host = urlparse(url).hostname or ""
+        try:
+            net.check_host(host, allow_private=False, resolver=outbound.resolver)
+        except net.NonPublic as error:
+            raise _blocked(error.host) from error
+        except net.Unresolvable as error:
+            raise _unresolvable(url, error) from error
+    content: str = RequestHelper.novelhog_original_flaresolverr_request(self, url)
     return content
 
 
@@ -110,8 +169,11 @@ def _guarded_get_url_content(self: RequestHelper, url: str) -> str:
 if not hasattr(RequestHelper, "novelhog_original_get_url_content"):
     RequestHelper.novelhog_original_get_url_content = RequestHelper.get_url_content
     RequestHelper.get_url_content = _guarded_get_url_content
-    RequestHelper.novelhog_original_common_request = RequestHelper._get_url_common_request
     RequestHelper._get_url_common_request = _guarded_common_request
+    RequestHelper.novelhog_original_flaresolverr_request = (
+        RequestHelper._get_url_flaresolverr_request
+    )
+    RequestHelper._get_url_flaresolverr_request = _guarded_flaresolverr_request
 
 
 def reset_fallback() -> None:
@@ -138,6 +200,18 @@ def page_budget(max_pages: int) -> Iterator[None]:
         yield
     finally:
         _active.reset(token)
+
+
+@contextmanager
+def outbound_guard(
+    *, allow_private: bool, resolver: Callable[[str], list[str]] = net.default_resolver
+) -> Iterator[None]:
+    """Check chapter and TOC hosts in this block with `resolver`; `allow_private` skips it."""
+    token = _outbound.set(_Outbound(allow_private=allow_private, resolver=resolver))
+    try:
+        yield
+    finally:
+        _outbound.reset(token)
 
 
 @contextmanager
