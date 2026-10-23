@@ -12,9 +12,8 @@ from novelhog.repo import Repo
 from novelhog.repo.work import ChapterClaim
 from novelhog.scraper_adapter.adapter import FetchedChapter
 from novelhog.scraper_adapter.errors import InfrastructureError
+from novelhog.worker.errors import summarize
 from novelhog.worker.runtime import Heartbeat
-
-_SUMMARY_LIMIT = 300
 
 
 class ChapterAdapter(Protocol):
@@ -42,11 +41,6 @@ class BatchReport:
     skipped: int
     released: int
     lost: int
-
-
-def _summary(error: Exception) -> str:
-    text = " ".join(str(error).split())[:_SUMMARY_LIMIT]
-    return f"{type(error).__name__}: {text}"
 
 
 class _Claims:
@@ -171,15 +165,15 @@ def _download_one(  # noqa: PLR0913
         )
     except InfrastructureError as error:
         held.end()
-        chapter_log.warning("download_infrastructure_error", error=_summary(error))
+        chapter_log.warning("download_infrastructure_error", error=summarize(error))
         repo.work.requeue(claim.chapter_id, worker_id)
         release_rest()
         raise
     except Exception as error:  # noqa: BLE001 - any failure is recorded on the chapter
         held.end()
-        chapter_log.warning("download_failed", error=_summary(error), exc_info=True)
+        chapter_log.warning("download_failed", error=summarize(error), exc_info=True)
         counts[
-            "failed" if repo.work.fail(claim.chapter_id, worker_id, _summary(error)) else "lost"
+            "failed" if repo.work.fail(claim.chapter_id, worker_id, summarize(error)) else "lost"
         ] += 1
     else:
         if done:

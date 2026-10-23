@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Connection, and_, exists, func, insert, or_, select
+from sqlalchemy import Connection, and_, delete, exists, func, insert, or_, select
 from sqlalchemy.orm import aliased
 
 from novelhog import ids
@@ -24,7 +24,7 @@ from novelhog.repo import chapters as chapters_repo
 from novelhog.repo import claims, db, events, trash
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapters, exports, novels
+from novelhog.repo.schema import chapters, exports, novels, storage_trash
 
 _WAITING = ExportState.WAITING.value
 _BUILDING = ExportState.BUILDING.value
@@ -446,7 +446,13 @@ class Exports:
             )
 
     def _end_build(
-        self, export_id: str, worker_id: str, values: dict[str, object], now: datetime
+        self,
+        export_id: str,
+        worker_id: str,
+        values: dict[str, object],
+        now: datetime,
+        *,
+        published_key: str | None = None,
     ) -> bool:
         """Fenced end of a build: apply `values`, clear the claim and append the EX event."""
         with db.write(self._engine) as conn:
@@ -466,6 +472,9 @@ class Exports:
             )
             if released != 1:
                 return False
+            if published_key is not None:
+                # An earlier owner that lost its claim may have trashed this (deterministic) key.
+                conn.execute(delete(storage_trash).where(storage_trash.c.key == published_key))
             self._append(conn, novel_id, export_id, now)
             return True
 
@@ -482,6 +491,7 @@ class Exports:
                 "ready_at": now,
             },
             now,
+            published_key=storage_key,
         )
 
     def fail(self, export_id: str, worker_id: str, message: str) -> bool:

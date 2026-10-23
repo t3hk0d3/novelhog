@@ -7,7 +7,7 @@ when it did work:
 2. `_dispatch_notifications` (always runs, never returns early; a failure is logged),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
 4. refresh a due novel,
-5. `_build_export` (extension point for Task 26),
+5. `_build_export` (claim and build a ready export),
 6. download a batch of pending chapters,
 7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle".
 """
@@ -19,11 +19,12 @@ from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
 from novelhog import log
+from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
 from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
-from novelhog.worker import downloads, maintenance, refresh, runtime
+from novelhog.worker import builds, downloads, maintenance, refresh, runtime
 from novelhog.worker.downloads import ChapterAdapter, ImageSource
 from novelhog.worker.refresh import TocAdapter
 
@@ -150,8 +151,20 @@ class Worker:
             )
 
     def _build_export(self) -> bool:
-        """Extension point (Task 26): claim and build a ready export; True if one was built."""
-        return False
+        """Claim and build a ready export; True if one was built."""
+        settings = self._settings
+        claim = self._repo.exports.claim_ready(settings.worker_id, settings.claim_ttl)
+        if claim is None:
+            return False
+        builds.build(
+            self._repo,
+            ChapterStore(self._repo),
+            self._storage,
+            claim,
+            settings=settings,
+            tmp_dir=settings.data_dir / "tmp",
+        )
+        return True
 
     def _refresh_due(self) -> bool:
         settings = self._settings

@@ -13,7 +13,7 @@ from novelhog.domain.exports import ExportState, Format
 from novelhog.repo import Repo, db
 from novelhog.repo.schema import chapters, events, exports, novels
 from tests.conftest import FakeClock
-from tests.integration.helpers import chapter_row
+from tests.integration.helpers import chapter_row, trash_keys
 
 URL = "https://example.com/novel"
 TTL = 300
@@ -394,7 +394,7 @@ class TestDelete:
             "novel_id": novel_id,
             "deleted": True,
         }
-        assert repo.trash.take() == []
+        assert trash_keys(repo.engine) == []
 
     def test_delete__ready_export_adds_its_key_to_the_trash(
         self, repo: Repo, novel_id: str
@@ -402,7 +402,7 @@ class TestDelete:
         export_id = build_claim(repo, novel_id)
         assert repo.exports.finish(export_id, ME, storage_key="exports/k.epub", size_bytes=1)
         repo.exports.delete(novel_id, export_id)
-        assert repo.trash.take() == ["exports/k.epub"]
+        assert trash_keys(repo.engine) == ["exports/k.epub"]
 
     def test_delete__building_export_raises_conflict(self, repo: Repo, novel_id: str) -> None:
         export_id = build_claim(repo, novel_id)
@@ -550,6 +550,22 @@ class TestFinish:
         )
         assert row.ready_at == clock.current
         assert (row.claimed_by, row.claimed_until) == (None, None)
+
+    def test_finish__removes_a_trash_row_for_its_key(self, repo: Repo, novel_id: str) -> None:
+        export_id = build_claim(repo, novel_id)
+        repo.trash.discard(["exports/a.epub"])  # an earlier owner that lost its claim
+
+        assert repo.exports.finish(export_id, ME, storage_key="exports/a.epub", size_bytes=1)
+
+        assert trash_keys(repo.engine) == []
+
+    def test_finish__lost_claim_leaves_the_trash_alone(self, repo: Repo, novel_id: str) -> None:
+        export_id = build_claim(repo, novel_id)
+        repo.trash.discard(["exports/a.epub"])
+
+        assert not repo.exports.finish(export_id, OTHER, storage_key="exports/a.epub", size_bytes=1)
+
+        assert trash_keys(repo.engine) == ["exports/a.epub"]
 
     def test_finish__appends_an_ex_event(self, repo: Repo, novel_id: str) -> None:
         export_id = build_claim(repo, novel_id)

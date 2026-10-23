@@ -14,6 +14,7 @@ from novelhog.repo import events as event_log
 from novelhog.repo import trash as trash_table
 from novelhog.repo.schema import consumers
 from novelhog.repo.schema import events as events_table
+from novelhog.repo.trash import TRASH_GRACE_S
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import maintenance
 from novelhog.worker.loop import MAINTENANCE_INTERVAL, Worker
@@ -30,8 +31,9 @@ def storage(tmp_path: Path) -> LocalStaticStorage:
 
 
 def _trash(repo: Repo, keys: list[str]) -> None:
+    """Trash the keys as if they had been discarded `TRASH_GRACE_S` ago (so `take` returns them)."""
     with db.write(repo.engine) as conn:
-        trash_table.add(conn, keys, repo.clock())
+        trash_table.add(conn, keys, repo.clock() - timedelta(seconds=TRASH_GRACE_S))
 
 
 def _put(storage: LocalStaticStorage, key: str) -> None:
