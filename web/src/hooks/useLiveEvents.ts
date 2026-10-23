@@ -13,29 +13,41 @@ import {
 
 const EVENTS_URL = '/api/v1/events';
 
-// Whether the stream said `ready`; REST queries wait for it (spec 10) so nothing committed
-// between the first connect and the first load is lost. One flag for the one app-wide stream,
-// driven only by useLiveEvents.
-let ready = false;
+/** Before the first `ready`, a stream that errors or stays silent this long is reported stalled. */
+export const STALL_MS = 4000;
+
+/**
+ * `connecting` until the stream's first `ready`, then `ready`. `stalled` means the stream failed
+ * or stayed silent before its first `ready` (it keeps reconnecting and may still become ready).
+ */
+export type LiveStatus = 'connecting' | 'stalled' | 'ready';
+
+// REST queries wait for `ready` (spec 10) so nothing committed between the first connect and the
+// first load is lost. One status for the one app-wide stream, driven only by useLiveEvents.
+let status: LiveStatus = 'connecting';
 const listeners = new Set<() => void>();
 
-function setLiveReady(value: boolean): void {
-  if (ready === value) return;
-  ready = value;
+function setLiveStatus(value: LiveStatus): void {
+  if (status === value) return;
+  status = value;
   listeners.forEach((listener) => {
     listener();
   });
 }
 
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** The stream's status; the page shows "Connecting…" or the cause while it is not `ready`. */
+export function useLiveStatus(): LiveStatus {
+  return useSyncExternalStore(subscribe, () => status);
+}
+
 /** True once the stream's `ready` event arrived. Gate REST queries with `enabled: useLiveReady()`. */
 export function useLiveReady(): boolean {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => ready,
-  );
+  return useSyncExternalStore(subscribe, () => status === 'ready');
 }
 
 type Entity = { id: string };
@@ -184,6 +196,9 @@ export function useLiveEvents(client: QueryClient): void {
     let frame: number | undefined;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let backoff = RECONNECT_MIN_MS;
+    const stallTimer = setTimeout(() => {
+      if (status === 'connecting') setLiveStatus('stalled');
+    }, STALL_MS);
 
     const schedule = () => {
       frame ??= requestAnimationFrame(() => {
@@ -227,13 +242,14 @@ export function useLiveEvents(client: QueryClient): void {
       });
       current.addEventListener('ready', () => {
         // A repeated ready (not a replay) means the stream restarted: reload like a resync.
-        if (ready) void client.invalidateQueries();
-        setLiveReady(true);
+        if (status === 'ready') void client.invalidateQueries();
+        setLiveStatus('ready');
       });
       current.addEventListener('resync', () => {
         void client.invalidateQueries();
       });
       current.addEventListener('error', () => {
+        if (status === 'connecting') setLiveStatus('stalled');
         // While readyState is CONNECTING the browser retries by itself, with Last-Event-ID.
         if (current.readyState !== EventSource.CLOSED || retryTimer !== undefined) return;
         retryTimer = setTimeout(() => {
@@ -248,9 +264,10 @@ export function useLiveEvents(client: QueryClient): void {
     return () => {
       source?.close();
       clearTimeout(retryTimer);
+      clearTimeout(stallTimer);
       unsubscribe();
       if (frame !== undefined) cancelAnimationFrame(frame);
-      setLiveReady(false);
+      setLiveStatus('connecting');
     };
   }, [client]);
 }

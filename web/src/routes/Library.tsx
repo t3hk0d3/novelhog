@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { ConnectionStatus } from '../components/ConnectionStatus';
 import { NovelCard } from '../components/NovelCard';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { errorMessage } from '../lib/errors';
@@ -15,6 +16,7 @@ export function Library({ onAddNovel }: { onAddNovel: () => void }) {
   return (
     <section>
       <h1 className="mb-4 text-2xl font-bold">Library</h1>
+      <ConnectionStatus />
       {novels.isError && (
         <p role="alert" className="text-danger">
           {errorMessage(novels.error)}

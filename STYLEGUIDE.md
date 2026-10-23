@@ -32,7 +32,7 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - Components are `PascalCase.tsx`, hooks are `useX.ts`, tests are colocated as `*.test.tsx`
   (`*.test.ts` for files without JSX).
 - Query keys: `['novels']`, `['novel', id]`, `['chapters', novelId]`, `['exports', novelId]`,
-  `['settings']`.
+  `['settings']`, `['live-probe']` (the unguarded settings probe while the stream is stalled).
 
 ## Layout
 

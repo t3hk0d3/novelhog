@@ -5,6 +5,7 @@ import { api, type Novel as NovelData } from '../api/client';
 import { isDeletedNovel, type DeletedNovel } from '../api/events';
 import { ChapterDetails } from '../components/ChapterDetails';
 import { ChapterTable } from '../components/ChapterTable';
+import { ConnectionStatus } from '../components/ConnectionStatus';
 import { ChapterFilters } from '../components/ChapterFilters';
 import { ExportDialog } from '../components/ExportDialog';
 import { ExportsPanel } from '../components/ExportsPanel';
@@ -233,10 +234,11 @@ function Deleted() {
 /** The novel page (`/novels/:id`, spec section 10, screen 3). */
 export function Novel() {
   const { id = '' } = useParams();
+  const ready = useLiveReady();
   const novel = useQuery<NovelData | DeletedNovel>({
     queryKey: ['novel', id],
     queryFn: () => api.getNovel(id),
-    enabled: useLiveReady(),
+    enabled: ready,
   });
 
   // Check for the deleted marker before NovelPage mounts the chapter query: a removed active
@@ -249,6 +251,7 @@ export function Novel() {
       </p>
     );
   }
+  if (!ready && novel.data === undefined) return <ConnectionStatus />;
   if (novel.data === undefined) return <p className="text-ink-muted">Loading…</p>;
   return <NovelPage key={novel.data.id} novel={novel.data} />;
 }

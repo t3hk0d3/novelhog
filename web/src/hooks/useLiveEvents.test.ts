@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Chapter, Export, Novel } from '../api/client';
 import { isDeletedNovel } from '../api/events';
 import { FakeEventSource } from '../test/FakeEventSource';
-import { useLiveEvents, useLiveReady } from './useLiveEvents';
+import { STALL_MS, useLiveEvents, useLiveReady, useLiveStatus } from './useLiveEvents';
 
 let frames = new Map<number, FrameRequestCallback>();
 let nextFrame = 1;
@@ -541,6 +541,68 @@ describe('useLiveEvents', () => {
       expect(result.current).toBe(true);
       unmount();
       expect(renderHook(() => useLiveReady()).result.current).toBe(false);
+    });
+  });
+
+  describe('Status before the first ready', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function mountStatus() {
+      const hook = renderHook(() => {
+        useLiveEvents(client);
+        return useLiveStatus();
+      });
+      source = FakeEventSource.instances[0] as FakeEventSource;
+      return hook;
+    }
+
+    it('is connecting until the stall timeout', () => {
+      const { result } = mountStatus();
+      act(() => {
+        vi.advanceTimersByTime(STALL_MS - 1);
+      });
+      expect(result.current).toBe('connecting');
+    });
+
+    it('is stalled when no ready arrived within the stall timeout', () => {
+      const { result } = mountStatus();
+      act(() => {
+        vi.advanceTimersByTime(STALL_MS);
+      });
+      expect(result.current).toBe('stalled');
+    });
+
+    it('is stalled at once when the stream errors', () => {
+      const { result } = mountStatus();
+      act(() => {
+        source.fail();
+      });
+      expect(result.current).toBe('stalled');
+    });
+
+    it('is ready when ready arrives after a stall', () => {
+      const { result } = mountStatus();
+      act(() => {
+        source.fail();
+        vi.advanceTimersByTime(1000);
+        FakeEventSource.instances[1]?.emit('ready');
+      });
+      expect(result.current).toBe('ready');
+    });
+
+    it('stays ready when the stream errors after ready', () => {
+      const { result } = mountStatus();
+      act(() => {
+        source.emit('ready');
+        source.fail();
+        vi.advanceTimersByTime(STALL_MS);
+      });
+      expect(result.current).toBe('ready');
     });
   });
 });

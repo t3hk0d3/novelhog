@@ -36,7 +36,7 @@ describe('App', () => {
         <App />
       </MemoryRouter>,
     );
-    expect(screen.getByRole('main')).toHaveTextContent('Loading…');
+    expect(screen.getByRole('main')).toHaveTextContent('Connecting…');
   });
 });
 
