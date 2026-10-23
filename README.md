@@ -35,6 +35,11 @@ Settings are environment variables prefixed `NOVELHOG_`. The common ones:
 | `NOVELHOG_ALLOWED_HOSTS` | unset | Extra comma-separated host names the API accepts |
 | `NOVELHOG_DATABASE_URL` | `sqlite:////data/db/app.db` | Use `postgresql+psycopg://...` for Postgres |
 
+The API answers only requests addressed to an IP address, `localhost`, the host of `NOVELHOG_PUBLIC_URL` or a
+name in `NOVELHOG_ALLOWED_HOSTS`. To open novelhog on your LAN by a host name, for example
+`http://homeserver:8080`, add that name: `NOVELHOG_ALLOWED_HOSTS=homeserver`. Otherwise the page shows
+"This host name is not allowed".
+
 The image runs as a non-root user (uid 10001).
 
 ### Reverse proxy
@@ -98,7 +103,14 @@ host, change the mapping to `127.0.0.1:8080:8080` in an override file so only th
 
 ## Backups
 
-- SQLite: while running, `docker compose exec novelhog-web python -c "import sqlite3; s = sqlite3.connect('/data/db/app.db'); s.execute(\"VACUUM INTO '/data/db/backup.db'\")"`, then copy `backup.db` out and delete it.
+- SQLite: while running, write a consistent copy, copy it out of the container and delete it:
+
+  ```sh
+  docker compose exec novelhog-web python -c "import sqlite3; s = sqlite3.connect('/data/db/app.db'); s.execute(\"VACUUM INTO '/data/db/backup.db'\")"
+  docker compose cp novelhog-web:/data/db/backup.db .
+  docker compose exec novelhog-web rm /data/db/backup.db
+  ```
+
   Never copy `app.db` while the WAL is live.
 - Postgres: `pg_dump` your database.
 - Static files: copy the `novelhog-static` volume (`/data/static`).
@@ -114,7 +126,16 @@ docker compose up -d --build
 ```
 
 `novelhog-migrate` runs `novelhog db migrate` first. To run it by hand: `docker compose run --rm novelhog-migrate`.
-`VACUUM` is a manual operation if the database file has grown after large deletions.
+`VACUUM` is a manual operation if the database file has grown after large deletions. On SQLite, stop the worker
+while it runs:
+
+```sh
+docker compose stop novelhog-worker
+docker compose exec novelhog-web python -c "import sqlite3; sqlite3.connect('/data/db/app.db').execute('VACUUM')"
+docker compose start novelhog-worker
+```
+
+On Postgres, autovacuum reclaims space; run `VACUUM FULL` with `psql` only if you need the disk space back.
 
 ## Development
 
