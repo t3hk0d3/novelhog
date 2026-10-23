@@ -24,20 +24,22 @@
 		}
 	}
 
-	# Files written by the worker under /data/static; a missing file is a plain 404.
-	handle /static/* {
-		root * /data
+	# Files written by the worker under /data/static; a missing file is a plain 404. The root is
+	# /data/static itself (the prefix is stripped), so no path can reach /data/db.
+	handle_path /static/* {
+		root * /data/static
 		@covers {
-			path /static/covers/*
+			path /covers/*
 			file
 		}
 		header @covers Cache-Control "public, max-age=31536000, immutable"
 		@exports {
-			path /static/exports/*
+			path /exports/*
 			file
 		}
 		header @exports Content-Disposition attachment
-		@epub path /static/exports/*.epub
+		# Suffix match: export keys are nested (exports/<novel>/<export>/<name>.epub).
+		@epub path *.epub
 		header @epub Content-Type application/epub+zip
 		file_server
 	}

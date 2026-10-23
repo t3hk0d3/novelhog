@@ -54,7 +54,7 @@ services:
 
   # No depends_on from the worker: while this is down the worker reports an infrastructure error.
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
     restart: unless-stopped
     networks:
       - worker-pair

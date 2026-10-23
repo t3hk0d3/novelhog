@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # SPA build: web/dist
-FROM node:26-slim AS web
+FROM node:26.12-slim AS web
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # Caddy binary only; the official image is the supported source of a static build.
-FROM caddy:2 AS caddy
+FROM caddy:2.11 AS caddy
 
 # Python environment
 FROM python:3.14-slim AS python

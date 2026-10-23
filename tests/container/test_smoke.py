@@ -198,19 +198,34 @@ def test_caddy__serves_service_worker_and_manifest_at_the_root(stack: Stack) -> 
     assert status == 200
 
 
-def test_caddy__serves_export_file_as_an_epub_attachment(stack: Stack) -> None:
+EXPORT_DIR = "/data/static/exports/NVabcdefabcdef/EXabcdefabcdef"
+EXPORT_PATH = "/static/exports/NVabcdefabcdef/EXabcdefabcdef/A%20Title%20Chapters%201-2.epub"
+
+
+def test_caddy__serves_a_nested_export_file_as_an_epub_attachment(stack: Stack) -> None:
     stack.exec(
         WORKER,
         "python",
         "-c",
-        "import pathlib; d = pathlib.Path('/data/static/exports'); d.mkdir(parents=True, "
-        "exist_ok=True); (d / 'book.epub').write_bytes(b'PK-epub')",
+        f"import pathlib; d = pathlib.Path({EXPORT_DIR!r}); d.mkdir(parents=True, "
+        "exist_ok=True); (d / 'A Title Chapters 1-2.epub').write_bytes(b'PK-epub')",
     )
-    status, headers, body = stack.get("/static/exports/book.epub")
+    status, headers, body = stack.get(EXPORT_PATH)
     assert status == 200
     assert body == b"PK-epub"
     assert headers["content-disposition"] == "attachment"
     assert headers["content-type"] == "application/epub+zip"
+
+
+@pytest.mark.parametrize(
+    "path", ["/static/../db/app.db", "/static/%2e%2e/db/app.db", "/static/..%2fdb/app.db"]
+)
+def test_caddy__never_serves_the_database_through_static(stack: Stack, path: str) -> None:
+    exists = stack.compose("exec", "-T", WEB, "test", "-f", "/data/db/app.db", check=False)
+    assert exists.returncode == 0  # the file is there to be leaked
+    status, _, body = stack.get(path)
+    assert not body.startswith(b"SQLite format 3")
+    assert status == 404 or b'<div id="root">' in body
 
 
 def test_caddy__serves_covers_with_immutable_caching(stack: Stack) -> None:
