@@ -1,7 +1,7 @@
 """Engine, transaction helpers and migrations (spec section 4).
 
-The `PRAGMA` and `BEGIN IMMEDIATE` statements in the SQLite connection events below are the only
-raw SQL in the code base.
+The `PRAGMA` and `BEGIN IMMEDIATE` statements in the SQLite connection events below and in
+`optimize` are the only raw SQL in the code base.
 """
 
 from collections.abc import Iterator
@@ -112,6 +112,23 @@ def write(engine: Engine) -> Iterator[Connection]:
         if _is_busy(error):
             raise Busy(str(error.orig)) from error
         raise
+
+
+def optimize(engine: Engine) -> None:
+    """Run SQLite's `PRAGMA optimize` and truncate the WAL; a no-op on Postgres."""
+    if engine.dialect.name != "sqlite":
+        return
+    # The checkpoint cannot run inside a transaction, so bypass the "begin" event's BEGIN by using
+    # the driver connection, which is in autocommit mode (see `_configure_sqlite`).
+    connection = engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA optimize")
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        cursor.fetchall()
+        cursor.close()
+    finally:
+        connection.close()
 
 
 @contextmanager

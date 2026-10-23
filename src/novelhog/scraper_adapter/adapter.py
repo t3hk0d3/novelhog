@@ -9,9 +9,10 @@ from pathlib import Path
 
 import requests
 
+from novelhog import log
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
-from novelhog.domain.urls import normalize_url
+from novelhog.domain.urls import UrlTooLong, normalize_url
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
 from novelhog.scraper_adapter.finders import find_cover_url, find_title
 from novelhog.scraper_adapter.guard import page_budget
@@ -169,7 +170,13 @@ class ScraperAdapter:
 
     @staticmethod
     def _normalised(urls: list[str]) -> list[str]:
-        try:
-            return list(dict.fromkeys(normalize_url(url) for url in urls))
-        except ValidationFailed as exc:
-            raise SiteError(str(exc)) from exc
+        """Normalise TOC chapter URLs; skip (and log) over-long ones, fail on other invalid ones."""
+        normalised: dict[str, None] = {}
+        for url in urls:
+            try:
+                normalised[normalize_url(url)] = None
+            except UrlTooLong:
+                log.get().warning("toc_url_too_long_skipped", url_prefix=url[:200])
+            except ValidationFailed as exc:
+                raise SiteError(str(exc)) from exc
+        return list(normalised)

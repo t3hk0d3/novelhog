@@ -4,27 +4,31 @@
 when it did work:
 
 1. recover expired claims (always),
-2. `_dispatch_notifications` (extension point for Task 27; always runs, never returns early),
-3. refresh a due novel,
-4. `_build_export` (claim and build a ready export),
-5. download a batch of pending chapters,
-6. otherwise report "idle".
+2. `_dispatch_notifications` (always runs, never returns early; a failure is logged),
+3. `_empty_trash` (always runs, never returns early; a failure is logged),
+4. refresh a due novel,
+5. `_build_export` (claim and build a ready export),
+6. download a batch of pending chapters,
+7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle".
 """
 
 import random
 import threading
-from collections.abc import Callable, Mapping
-from datetime import datetime
-from typing import Any, Literal, Protocol
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import Literal, Protocol
 
 from novelhog import log
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
+from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
-from novelhog.worker import builds, downloads, refresh, runtime
+from novelhog.worker import builds, downloads, maintenance, refresh, runtime
 from novelhog.worker.downloads import ChapterAdapter, ImageSource
 from novelhog.worker.refresh import TocAdapter
+
+MAINTENANCE_INTERVAL = timedelta(hours=1)
 
 StepResult = Literal["refresh", "build", "download", "idle"]
 
@@ -42,8 +46,8 @@ class Worker:
         adapter: WorkerAdapter,
         fetcher: ImageSource,
         storage: StaticStorage,
-        # TODO(Task 27): type as Mapping[str, NotificationChannel] once channels.py exists.
-        channels: Mapping[str, Any],
+        # A channel mapping, or a callable returning one (production passes `RegistryHolder.get`).
+        channels: dispatcher.Registry,
         settings: Settings,
         *,
         stop: threading.Event | None = None,
@@ -57,6 +61,7 @@ class Worker:
         self._settings = settings
         self._stop = stop if stop is not None else threading.Event()
         self._clock = clock
+        self._last_maintenance: datetime | None = None
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
 
@@ -94,16 +99,56 @@ class Worker:
         """Do one unit of work and name it."""
         self._repo.work.recover()
         self._dispatch_notifications()
+        self._empty_trash()
         if self._refresh_due():
             return "refresh"
         if self._build_export():
             return "build"
         if self._download_batch():
             return "download"
+        self._maintain()
         return "idle"
 
     def _dispatch_notifications(self) -> None:
-        """Extension point (Task 27): deliver the event log to the channels. No-op until then."""
+        """Deliver the event log to the channels; a failure is logged and never stops the step."""
+        settings = self._settings
+        try:
+            dispatcher.dispatch(
+                self._repo,
+                self._channels,
+                owner=settings.worker_id,
+                ttl=settings.claim_ttl,
+                public_url=settings.public_url or "",
+            )
+        except Exception as error:  # noqa: BLE001 - notifications must not block novel work
+            log.get(worker_id=settings.worker_id).error(
+                "notification_dispatch_failed",
+                error=f"{type(error).__name__}: {error}",
+                exc_info=True,
+            )
+
+    def _empty_trash(self) -> None:
+        """Delete trashed static files; a failure is logged and never stops the step."""
+        try:
+            maintenance.empty_trash(self._repo, self._storage)
+        except Exception as error:  # noqa: BLE001 - trash must not block novel work
+            log.get(worker_id=self._settings.worker_id).error(
+                "empty_trash_failed", error=f"{type(error).__name__}: {error}", exc_info=True
+            )
+
+    def _maintain(self) -> None:
+        """Run maintenance at most once per `MAINTENANCE_INTERVAL`; a failure is logged."""
+        now = self._clock()
+        last = self._last_maintenance
+        if last is not None and now - last < MAINTENANCE_INTERVAL:
+            return
+        self._last_maintenance = now  # a failing run is retried next hour, not every pass
+        try:
+            maintenance.maintain(self._repo, now=now)
+        except Exception as error:  # noqa: BLE001 - maintenance must not stop the loop
+            log.get(worker_id=self._settings.worker_id).error(
+                "maintenance_failed", error=f"{type(error).__name__}: {error}", exc_info=True
+            )
 
     def _build_export(self) -> bool:
         """Claim and build a ready export; True if one was built."""

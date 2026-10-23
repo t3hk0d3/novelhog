@@ -1,5 +1,6 @@
 """The worker main loop (spec section 6.1)."""
 
+import json
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -7,8 +8,11 @@ from typing import Any
 
 import pytest
 
+from novelhog import log
 from novelhog.config import Settings
-from novelhog.repo import Repo, SchemaOutdated
+from novelhog.notifications.channels import Delivered
+from novelhog.repo import Repo, SchemaOutdated, db
+from novelhog.repo import events as event_log
 from novelhog.scraper_adapter.errors import InfrastructureError
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
@@ -197,3 +201,102 @@ class TestRun__AfterRequestStop:
 
         assert chapter_of(repo, first).state == "downloaded"
         assert chapter_of(repo, second).state == "pending"
+
+
+def _log_lines(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
+    out = capsys.readouterr().out
+    return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+
+
+class _Channel:
+    name = "webpush"
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, subscription: Any, message: Any) -> Any:
+        self.sent.append(message.body)
+        return Delivered()
+
+
+def _announce(repo: Repo, novel_id: str) -> None:
+    repo.subscriptions.upsert("webpush", {"endpoint": "e"}, "e", None)
+    with db.write(repo.engine) as conn:
+        event_log.append(
+            conn, novel_id, novel_id, {"followed": True, "released": [1]}, now=repo.clock()
+        )
+
+
+class TestStep__Notifications:
+    def test_step__dispatches_new_events_to_the_channels_every_iteration(
+        self,
+        repo: Repo,
+        novel_id: str,
+        adapter: FakeAdapter,
+        fetcher: FakeFetcher,
+        settings: Settings,
+        tmp_path: Path,
+    ) -> None:
+        repo.consumers.claim("notifier", "setup", 60)
+        repo.consumers.advance("notifier", "setup", repo.events.since(0)[-1].seq)
+        channel = _Channel()
+        storage = LocalStaticStorage(tmp_path / "static", "/static")
+        worker = Worker(
+            repo,
+            adapter,
+            fetcher,
+            storage,
+            lambda: {"webpush": channel},
+            settings,
+            stop=RecordingStop(),
+        )
+        _announce(repo, novel_id)
+
+        worker.step()
+
+        assert channel.sent == ["1 new chapter (1\u20131)"]
+
+    def test_step__survives_a_failing_dispatch_and_still_does_the_work(
+        self,
+        repo: Repo,
+        novel_id: str,
+        adapter: FakeAdapter,
+        fetcher: FakeFetcher,
+        settings: Settings,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log.setup("worker")
+
+        def broken() -> dict[str, Any]:
+            msg = "registry down"
+            raise RuntimeError(msg)
+
+        storage = LocalStaticStorage(tmp_path / "static", "/static")
+        worker = Worker(repo, adapter, fetcher, storage, broken, settings, stop=RecordingStop())
+
+        assert worker.step() == "refresh"
+        assert any(line["event"] == "notification_dispatch_failed" for line in _log_lines(capsys))
+
+    def test_step__dispatches_before_refreshing(
+        self,
+        repo: Repo,
+        adapter: FakeAdapter,
+        fetcher: FakeFetcher,
+        settings: Settings,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[str] = []
+        worker = make_worker(repo, adapter, fetcher, settings, tmp_path, RecordingStop())
+        monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("dispatch"))
+
+        def refresh_due() -> bool:
+            calls.append("refresh")
+            return True
+
+        monkeypatch.setattr(worker, "_refresh_due", refresh_due)
+
+        worker.step()
+
+        assert calls == ["dispatch", "refresh"]

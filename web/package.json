@@ -41,6 +41,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "gen:api": "uv run --project .. python -m novelhog.api.export_openapi | openapi-typescript -o src/api/schema.d.ts",
-    "check": "npm run lint && npm run typecheck && npm run test"
+    "check:api": "scripts/check-api.sh",
+    "check": "npm run lint && npm run typecheck && npm run check:api && npm run test"
   }
 }

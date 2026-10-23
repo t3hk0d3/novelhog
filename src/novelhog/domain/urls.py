@@ -9,6 +9,14 @@ from novelhog.domain.errors import ValidationFailed
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
+MAX_URL_LENGTH = 2048
+"""Longest normalised URL accepted; keeps the unique index entries within PostgreSQL's limit."""
+
+
+class UrlTooLong(ValidationFailed):
+    """A normalised URL is longer than `MAX_URL_LENGTH` (code `invalid_url`)."""
+
+
 def _invalid(message: str) -> ValidationFailed:
     return ValidationFailed("invalid_url", message)
 
@@ -64,7 +72,11 @@ def normalize_url(url: str) -> str:
     if port is not None and port != _DEFAULT_PORTS[scheme]:
         host = f"{host}:{port}"
     path = parts.path.rstrip("/") or "/"
-    return urlunsplit((scheme, host, path, parts.query, ""))
+    normalized = urlunsplit((scheme, host, path, parts.query, ""))
+    if len(normalized) > MAX_URL_LENGTH:
+        msg = f"The URL is longer than {MAX_URL_LENGTH} characters"
+        raise UrlTooLong("invalid_url", msg)
+    return normalized
 
 
 def normalize_toc_url(url: str) -> str:
