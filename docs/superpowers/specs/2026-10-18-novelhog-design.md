@@ -916,7 +916,8 @@ visits:
 on start: require_current(); publish_hosts(); recover()
 loop until stop requested:
     recover()                                        # expired claims only
-    dispatch_notifications()                         # event log → channels (§6.6)
+    behind = dispatch_notifications()                # event log → channels (§6.6); full
+                                                     # batches repeat for at most 2 s
     empty_trash()                                    # delete trashed static files
     if novel = claim_due_refresh():                  # due, available; oldest next_refresh_at first
         refresh(novel)                               # releases the novel claim itself (§6.2)
@@ -927,6 +928,7 @@ loop until stop requested:
     if batch = claim_batch(BATCH_SIZE):              # pending, available; priority, queued_at, position
         download(batch)                              # §6.4
         continue
+    if behind: continue                              # notifier still catching up: no idle sleep
     maintenance()                                    # at most hourly: prune events; SQLite optimize + checkpoint
     stop.wait(IDLE_SLEEP)
 ```
@@ -1234,6 +1236,8 @@ through `novelhog.net`, a `requests` session that:
   unique-local (`fc00::/7`), multicast and unspecified addresses, unless
   `NOVELHOG_ALLOW_PRIVATE_FETCH=true`;
 - re-checks every redirect (at most 5) the same way;
+- ignores proxy, CA-bundle and `.netrc` settings from the environment
+  (`trust_env = false`), so the address check sees the real destination;
 - uses a 10 s connect and 30 s read timeout;
 - refuses schemes other than `http` and `https`.
 
@@ -1244,6 +1248,11 @@ scraper adapter applies the same address check to the host of every chapter
 and TOC URL before fetching it, directly or through FlareSolverr, and to every
 redirect of a direct fetch. A refused URL is a site error
 ("Blocked non-public address: <host>").
+
+Known gap: for hosts fetched through FlareSolverr only the requested URL is
+checked. FlareSolverr follows redirects and resolves DNS itself, so a public URL
+that redirects to a private address is not caught. Deployments that care should
+put FlareSolverr on a network without LAN access.
 
 ## 7. Modules
 
@@ -1673,7 +1682,13 @@ manifest makes the app installable.
     later block shows it again. The header bell is shown struck through and
     disabled with the tooltip "Blocked in browser settings".
   - On load the app asks `pushManager.getSubscription()` whether this device is
-    subscribed.
+    subscribed. If it is (and permission is granted), the app re-POSTs it to
+    `/webpush/subscriptions` (an idempotent upsert), so a reset or restored
+    database gets the device back. If that POST fails, the bell shows off. The
+    service worker handles `pushsubscriptionchange` by subscribing again with
+    the server's key and POSTing the new subscription. If the service worker
+    never becomes ready (registration failed, or not ready within a few
+    seconds), the bell is treated as unsupported instead of waiting forever.
   - Subscribing requests permission, calls `PushManager.subscribe` with
     `vapid_public_key`, then `POST /webpush/subscriptions` and keeps the returned
     subscription ID; unsubscribing calls `unsubscribe()` and
@@ -1682,6 +1697,12 @@ manifest makes the app installable.
     unsubscribes the old browser subscription and subscribes again. Over plain HTTP the bell is disabled with a
     tooltip that HTTPS is required and the banner is not shown; on iOS outside an
     installed PWA the banner explains "Add to Home Screen" instead of Turn on.
+- **Connecting.** Pages wait for the event stream's `ready` before showing data
+  and show "Connecting…" meanwhile. If `ready` has not arrived after 4 s, or the
+  stream errors, the app probes the API and shows an alert with the cause: "This
+  host name is not allowed; set NOVELHOG_ALLOWED_HOSTS" for `403
+  host_not_allowed`, otherwise "Live updates unavailable; check that your proxy
+  does not buffer /api/v1/events". The alert clears when `ready` arrives.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
 - **Theme switcher**: an icon-only button in the header, immediately left of the
   notifications bell (`aria-haspopup="menu"`, `aria-label` "Theme: <choice>").
