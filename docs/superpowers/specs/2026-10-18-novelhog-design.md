@@ -766,9 +766,15 @@ still `pending` is dequeued, since it can no longer be shown or cancelled.
 - `POST` with `skip_missing = true` queues nothing; the export is built on the
   worker's next pass from the chapters that are downloaded at that moment
   (`waited = 0`).
-- A `waiting` export never fails because of chapters. If chapters of the range
-  are in `error` or were dequeued (`not_requested`), it stays `waiting` and
-  reports them in `blocked`; re-queuing them lets it continue.
+- A `waiting` export does not fail because chapters are in `error`, or are
+  `not_requested` because a sync inserted them unqueued: it stays `waiting`
+  and reports them in `blocked`; retrying or queuing them lets it continue.
+- **Cancelling fails it.** When the user dequeues (`PATCH /chapters` to
+  `not_requested`) a chapter inside the range of a `waiting` export with
+  `skip_missing = false`, that export moves to `failed` in the same
+  transaction with the error "Chapter <N> was cancelled" ("Chapters <N>, <M>,
+  … were cancelled" for several), and its `EX` event carries the new state.
+  Dequeues done by a sync (chapters removed upstream) do not fail exports.
 - If a sync removes one of the range's end chapters upstream, the export's
   `chapter_from`/`chapter_to` becomes `null`; a `waiting` export in that state
   fails at build time with "Range changed upstream" and the user creates a new
@@ -945,9 +951,19 @@ loop until stop requested:
   their `queued_at`); the process exits 0. Compose gives it 2 minutes.
 - Errors in the loop itself (database busy, unexpected exceptions) are logged,
   then back off 5 s, 10 s, 20 s, … capped at `IDLE_SLEEP`.
-- **Infrastructure errors** (FlareSolverr unreachable, connection refused, DNS
-  failure; raised by the adapter as `InfrastructureError`) are not the site's
-  fault: the affected work is put back unchanged (a sync keeps its interval and
+- **Site unreachable** (connection refused, DNS failure or a connect timeout
+  on a request that goes directly to the site, not through FlareSolverr;
+  raised by the adapter as `SiteUnreachable`, a subclass of
+  `InfrastructureError`) is retried like an infrastructure error, but the
+  worker counts consecutive failures per host (in memory, reset by any
+  successful request to that host). After `SITE_UNREACHABLE_RETRIES` (3)
+  consecutive failures, further unreachable errors for that host are treated
+  as site errors: chapters go to `error` ("Site unreachable: <summary>"),
+  syncs back off as for any site error (an initial import sets
+  `import_error`). The counter is per worker process and is lost on restart.
+- **Infrastructure errors** (FlareSolverr unreachable, or a site-unreachable
+  error below the retry threshold; raised by the adapter as
+  `InfrastructureError`) are not the site's fault: the affected work is put back unchanged (a sync keeps its interval and
   is retried at `now + REFRESH_MIN_INTERVAL`; chapters go back to `pending` with
   their `queued_at`), and the worker backs off as above.
 - Priority: refreshes, then export builds, then downloads.
@@ -1089,6 +1105,7 @@ novel; events of deleted novels never match):
 |---|---|---|
 | `release` | `NV` event whose payload has a non-empty `released` and `followed = true` | "<N> new chapters (<first>–<last>)" |
 | `export_ready` | `EX` event with `state = 'ready'` and `waited = true` | "<filename> is ready" |
+| `export_failed` | `EX` event with `state = 'failed'` | "<filename> failed: <error>" |
 
 `followed` is taken from the event payload, i.e. as it was when the sync ran.
 
@@ -1164,6 +1181,14 @@ dispatch_notifications():
   FlareSolverr, `request_time_between_requests`), with `NOVELHOG_FLARESOLVERR_URL`
   overriding the FlareSolverr address. The adapter enforces at least 1 retry
   (the scraper crashes with 0).
+- **FlareSolverr fallback.** A site override may force FlareSolverr for its
+  host (v1: `fanmtl_com` does). In addition, when a direct request returns a
+  Cloudflare challenge (HTTP 403 or 503 with a `cf-mitigated: challenge`
+  header, or `Server: cloudflare` with a challenge page body such as
+  "Just a moment…" / `cf-chl` markers), the adapter retries that request
+  through FlareSolverr once and, if it succeeds, routes every later request
+  for that host through FlareSolverr for the rest of the worker process
+  (logged once as `flaresolverr_fallback_enabled` with the host).
 - `sync_toc(novel) → TocResult{title, language, cover_url, urls}`:
   `Novel.sync_toc()` (which applies the decoder's TOC rules, URL processors,
   pagination and descending-order flags), then reads the first TOC page's HTML
@@ -1186,8 +1211,10 @@ dispatch_notifications():
   `.novel-cover img`, `figure img`); the first `<img>` whose `alt` equals the
   novel title. An override may register a host-specific rule ahead of these.
   Relative URLs are resolved against the TOC URL.
-- Errors: FlareSolverr unreachable, connection refused or DNS failure →
-  `InfrastructureError`; anything else from the scraper (HTTP status, decode
+- Errors: FlareSolverr unreachable → `InfrastructureError`; connection
+  refused, DNS failure or connect timeout on a direct request to the site →
+  `SiteUnreachable` (an `InfrastructureError`; see §6.1 for the retry
+  threshold); anything else from the scraper (HTTP status, decode
   failure, empty TOC, missing content) → `SiteError` with a short message.
 - **Accepted limitations (v1):**
   - The scraper's request helper discards FlareSolverr's cookies and user
@@ -1224,7 +1251,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `domain` | Pure rules shared by everything: errors (`NotFound`, `Conflict`, `ValidationFailed`), chapter state rules and selector validation, refresh interval rule, export formats and file names (§8.3), URL normalisation and static URL building (`domain.urls`), XML-invalid character stripping (`domain.text`), payload models for REST and SSE (`domain.payloads`), `Host` and `Subscription` types |
 | `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `types.py` (`UTCDateTime`), `db.py` (engine, transactions, migrate, revisions), `claims.py` (compare-and-set claim, renew, release, recover, fencing), `migrations/`, novels, chapters, chapter contents, work claiming, exports, event log and clock, consumers, subscriptions, settings, hosts, storage trash. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it. It never logs; it returns results and raises domain errors |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (§6.7): `supported_hosts()`, `sync_toc(novel)`, `fetch_chapter(novel, url)`, `find_title`, `find_cover_url`, error classification, TOC loop guard. Used only by the worker |
-| `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (2.13.1's next-page rule only matches `>`, the site now writes `&gt;`) |
+| `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (2.13.1's next-page rule only matches `>`, the site now writes `&gt;`; forces FlareSolverr for the host) |
 | `net` | Outbound HTTP guard (§6.8) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Image download through `net`; validation (§8.2) |
@@ -1612,8 +1639,11 @@ manifest makes the app installable.
 
      The panel has the anchor `id="exports"` (notification links point to it).
 
-   - Dequeuing chapters (select mode → Cancel queued) that a waiting export
-     needs shows a confirmation naming the export.
+   - Dequeuing chapters that a waiting export needs (select mode → Cancel
+     queued, or Cancel in chapter details) shows a confirmation naming the
+     export and saying it will fail; confirming cancels the chapters and the
+     export moves to `failed` (§5.5), which also sends an `export_failed`
+     notification.
 - **Follow toggle**: a pill button with a star icon (`aria-pressed`). Following:
   solid gold star, label "Following". Not following: grey outline star, label
   "Follow". Used on library cards, the novel header and the add dialog.
@@ -1870,8 +1900,10 @@ desktop chapters, export dialog, phone normal and select mode).
   building → ready` sets storage key, size and `ready_at`; a build exception gives
   `failed` with a message; a range whose end chapter was removed upstream fails
   with "Range changed upstream"; a chapter inserted upstream inside the range
-  joins it; `blocked` lists errors and dequeued chapters and the export continues
-  after they are re-queued and downloaded; `DELETE` removes waiting, ready and
+  joins it; `blocked` lists errors and unqueued chapters and the export continues
+  after they are re-queued and downloaded; a user dequeue of a chapter in the
+  range of a waiting non-skip-missing export fails it with "Chapter <N> was
+  cancelled" (a sync dequeue does not); `DELETE` removes waiting, ready and
   failed exports (ready files trashed), leaves chapters queued and answers `409`
   while building; expired `building` claims return to `waiting`.
 - **Database portability:** every repository, integration and API test takes its
