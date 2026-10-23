@@ -13,20 +13,26 @@ _APPLE_HOST = "web.push.apple.com"
 
 P256DH_BYTES = 65
 AUTH_BYTES = 16
+_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")
+_FORBIDDEN_CHARS = re.compile(r"[\\\s\x00-\x1f\x7f]")
 _URL_SAFE = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 
 def validate_endpoint(endpoint: str) -> None:
     """Raise `ValidationFailed("invalid_endpoint")` unless `endpoint` is an https URL on a known
     push service host (default port only, no credentials)."""
+    if _FORBIDDEN_CHARS.search(endpoint):
+        raise _invalid_endpoint()
     try:
         parts = urlsplit(endpoint)
         host = parts.hostname
         port = parts.port
     except ValueError:
         host, port, parts = None, None, urlsplit("")
-    known = host is not None and (
-        host in PUSH_HOSTS or host == _APPLE_HOST or host.endswith(PUSH_HOST_SUFFIXES)
+    known = (
+        host is not None
+        and _is_strict_hostname(host)
+        and (host in PUSH_HOSTS or host == _APPLE_HOST or host.endswith(PUSH_HOST_SUFFIXES))
     )
     if (
         parts.scheme != "https"
@@ -34,10 +40,21 @@ def validate_endpoint(endpoint: str) -> None:
         or port not in (None, 443)
         or parts.username is not None
         or parts.password is not None
+        or "%" in parts.netloc
     ):
-        raise ValidationFailed(
-            "invalid_endpoint", "The endpoint must be an https URL of a known push service"
-        )
+        raise _invalid_endpoint()
+
+
+def _invalid_endpoint() -> ValidationFailed:
+    return ValidationFailed(
+        "invalid_endpoint", "The endpoint must be an https URL of a known push service"
+    )
+
+
+def _is_strict_hostname(host: str) -> bool:
+    """True for a lowercase ASCII DNS name of at least two non-empty labels."""
+    labels = host.split(".")
+    return len(labels) >= 2 and all(len(x) <= 63 and _LABEL.fullmatch(x) for x in labels)
 
 
 def decode_key(value: str) -> bytes:

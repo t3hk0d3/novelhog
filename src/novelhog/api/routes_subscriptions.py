@@ -1,15 +1,17 @@
 """Subscriptions routes (spec section 5.6)."""
 
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, Response
+from urllib3.util import parse_url
 
 from novelhog import vapid
 from novelhog.api.deps import get_repo, get_settings, path_id
 from novelhog.api.schemas import ErrorBody, Subscription, WebpushSubscriptionCreate
 from novelhog.config import Settings
 from novelhog.domain import webpush
-from novelhog.domain.errors import ServiceUnavailable
+from novelhog.domain.errors import ServiceUnavailable, ValidationFailed
 from novelhog.repo import Repo
 
 router = APIRouter()
@@ -20,6 +22,20 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 _MAX_LABEL = 200
 _NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": ErrorBody}}
+
+
+def _check_endpoint(endpoint: str) -> None:
+    """Validate the endpoint, then require that urllib3 (used by the worker's HTTP client) reads
+    the same host as `urlsplit`, so the allow-list cannot be bypassed by a parser difference."""
+    webpush.validate_endpoint(endpoint)
+    try:
+        sent_to = parse_url(endpoint).host
+    except ValueError:
+        sent_to = None
+    if sent_to != urlsplit(endpoint).hostname:
+        raise ValidationFailed(
+            "invalid_endpoint", "The endpoint must be an https URL of a known push service"
+        )
 
 
 @router.post(
@@ -43,7 +59,7 @@ def create_webpush_subscription(
     """Register a browser push subscription; an existing endpoint keeps its id."""
     if not settings.webpush_enabled or vapid.load(repo) is None:
         raise ServiceUnavailable("channel_disabled", "Web Push is not enabled")
-    webpush.validate_endpoint(body.endpoint)
+    _check_endpoint(body.endpoint)
     label = user_agent[:_MAX_LABEL] if user_agent else None
     address: dict[str, object] = {
         "endpoint": body.endpoint,

@@ -96,6 +96,12 @@ class TestCreateExport__WithAListSelector:
         response = client.post(_url(novel_id), json=_range(1, 99))
         _assert_error(response, 422, "invalid_selector")
 
+    def test_create_export__list_selector_on_an_unknown_novel_returns_422_first(
+        self, client: TestClient
+    ) -> None:
+        response = client.post(_url(UNKNOWN), json={"chapters": [1]})
+        _assert_error(response, 422, "invalid_selector")
+
 
 class TestCreateExport__WithAnUnknownFormat:
     def test_create_export__returns_422_unsupported_format(
@@ -125,6 +131,21 @@ class TestListExports:
 
     def test_list_exports__unknown_novel_returns_404(self, client: TestClient) -> None:
         _assert_error(client.get(_url(UNKNOWN)), 404, "not_found")
+
+
+class TestExportUrl:
+    def test_list_exports__ready_export_has_a_url(self, client: TestClient, repo: Repo) -> None:
+        novel_id = _seed(repo)
+        export_id = client.post(_url(novel_id), json=_range()).json()["id"]
+        with db.write(repo.engine) as conn:
+            conn.execute(
+                update(exports)
+                .where(exports.c.id == export_id)
+                .values(state="ready", storage_key="k.epub", size_bytes=10)
+            )
+        item = client.get(_url(novel_id)).json()[0]
+        assert item["url"] and item["url"].endswith("k.epub")
+        assert item["size_bytes"] == 10
 
 
 class TestDeleteExport:

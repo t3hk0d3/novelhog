@@ -8,8 +8,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 
-from novelhog.repo import Repo
+from novelhog.repo import Repo, db
+from novelhog.repo.schema import settings as settings_table
 
 URL = "/api/v1/webpush/subscriptions"
 ENDPOINT = "https://fcm.googleapis.com/fcm/send/abc"
@@ -81,6 +83,18 @@ class TestCreateWebpushSubscription__WithAnInvalidEndpoint:
             "https://notify.windows.com.evil.com/x",
             "https://fcm.googleapis.com:8443/x",
             "not a url",
+            "https://evil.com\\.notify.windows.com/x",
+            "https://.notify.windows.com/x",
+            "https://evil.com%2f.notify.windows.com/x",
+            "https://fcm.googleapis.com/x\ty",
+            "https://fcm.googleapis.com/x y",
+            "https://x@fcm.googleapis.com/x",
+            "https://fcm.googleapis.com\u3002evil.com/x",
+            "https://fcm.googleapis.com\uff0eevil.com/x",
+            "https://fcm.googleapis.cоm/x",
+            "https://FCM.googleapis.com./x",
+            "https://a..notify.windows.com/x",
+            "https://notify.windows.com/x",
         ],
     )
     def test_create__returns_422_invalid_endpoint(self, client: TestClient, endpoint: str) -> None:
@@ -121,6 +135,21 @@ class TestCreateWebpushSubscription__WithPushDisabled:
     ) -> None:
         client = make_client(vapid_subject=None, public_url=None)
         _assert_error(client.post(URL, json=_body()), 503, "channel_disabled")
+
+
+class TestCreateWebpushSubscription__WithNoStoredVapidKeys:
+    def test_create__returns_503_channel_disabled(self, client: TestClient, repo: Repo) -> None:
+        with db.write(repo.engine) as conn:
+            conn.execute(delete(settings_table).where(settings_table.c.key == "vapid"))
+        _assert_error(client.post(URL, json=_body()), 503, "channel_disabled")
+
+
+class TestCreateWebpushSubscription__ResubscribingWithoutUserAgent:
+    def test_create__clears_the_label_and_keeps_the_id(self, client: TestClient) -> None:
+        first = client.post(URL, json=_body(), headers={"User-Agent": "A"}).json()
+        second = client.post(URL, json=_body(), headers={"User-Agent": ""})
+        assert second.json()["id"] == first["id"]
+        assert second.json()["label"] is None
 
 
 class TestListSubscriptions:
