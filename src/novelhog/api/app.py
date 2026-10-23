@@ -1,5 +1,6 @@
 """FastAPI application factory, lifespan and error handlers (spec sections 5 and 11)."""
 
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -155,6 +156,7 @@ def create_app(
                     vapid.ensure_keys(repo)
             yield
         finally:
+            app.state.stopping.set()
             if owned_repo and repo is not None:
                 repo.engine.dispose()
 
@@ -167,6 +169,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.repo = repo
+    app.state.stopping = threading.Event()
     app.state.sse_poll_s = sse_poll_s
     app.state.sse_keepalive_s = sse_keepalive_s
 

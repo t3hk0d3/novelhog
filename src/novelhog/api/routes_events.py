@@ -6,7 +6,6 @@ thread is held for the duration of one poll) and waits between polls on the even
 client costs no thread and a disconnect or shutdown cancels the wait at once.
 """
 
-import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -93,19 +92,17 @@ async def stream(
 
 
 async def _guarded(frames: AsyncGenerator[str]) -> AsyncGenerator[str]:
-    """Pass frames through; end the stream quietly on a database error or a cancellation.
+    """Pass frames through; end the stream quietly on a database error.
 
     A database error after the headers went out is logged once and the stream ends, so the
-    browser reconnects with `Last-Event-ID`. A cancellation (client gone, server shutting down)
-    just ends the stream.
+    browser reconnects with `Last-Event-ID`.  A cancellation (client gone) propagates;
+    the wrapped generator is closed either way.
     """
     try:
         async for frame in frames:
             yield frame
     except SQLAlchemyError as error:
         log.get().warning("sse_stream_database_error", error=type(error).__name__)
-    except asyncio.CancelledError:
-        return
     finally:
         await frames.aclose()
 
@@ -134,6 +131,7 @@ def stream_events(
         novel_id=novel_id,
         poll_s=state.sse_poll_s,
         keepalive_s=state.sse_keepalive_s,
+        should_stop=state.stopping.is_set,
     )
     return StreamingResponse(
         _guarded(frames),

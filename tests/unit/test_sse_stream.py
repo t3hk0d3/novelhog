@@ -50,6 +50,7 @@ class Harness:
         self.sleeps: list[float] = []
         self.steps: list[Any] = []
         self.stopped = False
+        self.run_calls: list[str] = []
 
     async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
@@ -69,6 +70,7 @@ class Harness:
         repo = cast("Repo", type("R", (), {"events": self.events})())
 
         async def run(function: Any, *args: Any, **kwargs: Any) -> Any:
+            self.run_calls.append(function.__name__)
             return function(*args, **kwargs)
 
         async def collect() -> list[str]:
@@ -93,6 +95,18 @@ class Harness:
 def _parse(frame: str) -> dict[str, str]:
     fields = dict(line.split(": ", 1) for line in frame.strip("\n").split("\n"))
     return fields
+
+
+class TestStream__RepoCalls:
+    def test_stream__every_repo_call_goes_through_the_injected_runner(self) -> None:
+        events = FakeEvents()
+        events.add(NV1, NV1, {"id": NV1})
+        harness = Harness(events)
+        harness.run(last_event_id="0")
+        assert set(harness.run_calls) == {"replay_status", "since"}
+        harness = Harness(events)
+        harness.run()
+        assert set(harness.run_calls) == {"latest_seq", "since"}
 
 
 class TestStream__WithoutLastEventId:

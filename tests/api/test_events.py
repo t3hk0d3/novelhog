@@ -14,6 +14,7 @@ import pytest
 import uvicorn
 
 from novelhog.api.app import create_app
+from novelhog.api.serve import build_server
 from novelhog.config import Settings
 from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
@@ -45,6 +46,13 @@ class Server:
         """Event requests the app is still serving."""
         return self._open_streams[0]
 
+    def wait_for_streams(self, count: int, within: float = 3) -> None:
+        """Wait until exactly `count` event requests are being served."""
+        deadline = time.monotonic() + within
+        while self.open_streams != count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert self.open_streams == count
+
     def stop(self) -> None:
         self.instance.should_exit = True
         self.thread.join(timeout=10)
@@ -66,7 +74,7 @@ def start_server(settings: Settings, repo: Repo) -> Iterator[StartServer]:
     """
     running: list[Server] = []
 
-    def start(*, keepalive_s: float = 0.3) -> Server:
+    def start(*, keepalive_s: float = 0.3, graceful_s: int = 2) -> Server:
         with closing(socket.socket()) as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
@@ -85,15 +93,8 @@ def start_server(settings: Settings, repo: Repo) -> Iterator[StartServer]:
             finally:
                 open_streams[0] -= counted
 
-        config = uvicorn.Config(
-            wrapped,
-            host="127.0.0.1",
-            port=port,
-            log_level="warning",
-            log_config=None,
-            timeout_graceful_shutdown=2,
-        )
-        instance = uvicorn.Server(config)
+        instance = build_server(app, host="127.0.0.1", port=port, graceful_s=graceful_s)
+        instance.config.app = wrapped  # count requests; the server still flags `app` on shutdown
         thread = threading.Thread(target=instance.run, daemon=True)
         thread.start()
         deadline = time.monotonic() + 10
@@ -193,25 +194,25 @@ class TestEventsOverTcp:
         assert got_a == got_b
         assert [f.splitlines()[0] for f in got_a] == ["id: 1", "id: 2"]
 
-    def test_events__server_stops_while_a_client_is_still_connected(self, server: Server) -> None:
-        with _open(server) as http, http.stream("GET", "/api/v1/events") as response:
-            Frames(response).take(1)
-            server.stop()
-            assert not server.thread.is_alive()
-
-    def test_events__idle_streams_do_not_starve_the_rest_api(self, server: Server) -> None:
-        streams = [_open(server) for _ in range(THREAD_LIMIT + 1)]
-        responses = [c.stream("GET", "/api/v1/events") for c in streams]
+    def test_events__idle_streams_do_not_starve_the_rest_api(
+        self, start_server: StartServer
+    ) -> None:
+        server = start_server(keepalive_s=600)  # idle: nothing yields between polls
+        clients = [_open(server) for _ in range(THREAD_LIMIT + 1)]
+        contexts = [c.stream("GET", "/api/v1/events") for c in clients]
         try:
-            for response in responses:
-                Frames(response.__enter__()).take(1)
+            readers = [Frames(context.__enter__()) for context in contexts]
+            for reader in readers:
+                reader.take(1)
+            server.wait_for_streams(THREAD_LIMIT + 1)
             started = time.monotonic()
             with httpx.Client(base_url=server.base_url, timeout=3) as http:
                 assert http.get("/api/v1/settings").status_code == 200
             assert time.monotonic() - started < 2
+            assert len(readers) == server.open_streams
         finally:
-            for response, client in zip(responses, streams, strict=True):
-                response.__exit__(None, None, None)
+            for context, client in zip(contexts, clients, strict=True):
+                context.__exit__(None, None, None)
                 client.close()
 
     def test_events__disconnect_frees_the_stream_quickly_despite_long_keepalive(
@@ -219,19 +220,42 @@ class TestEventsOverTcp:
     ) -> None:
         server = start_server(keepalive_s=600)
         with _open(server) as http, http.stream("GET", "/api/v1/events") as response:
-            Frames(response).take(1)
-            assert server.open_streams == 1
-        deadline = time.monotonic() + 1
-        while server.open_streams and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert server.open_streams == 0
+            reader = Frames(response)
+            reader.take(1)
+            server.wait_for_streams(1)
+        started = time.monotonic()
+        server.wait_for_streams(0, within=1)
+        assert time.monotonic() - started < 1
 
-    def test_events__graceful_shutdown_with_open_streams_logs_no_error(
-        self, server: Server, caplog: pytest.LogCaptureFixture
+    def test_events__shutdown_ends_open_streams_before_the_graceful_timeout_without_errors(
+        self, start_server: StartServer
     ) -> None:
-        with caplog.at_level(logging.INFO):
-            with _open(server) as http, http.stream("GET", "/api/v1/events") as response:
-                Frames(response).take(1)
-                server.stop()
-                assert not server.thread.is_alive()
-        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+        server = start_server(graceful_s=5)
+        errors: list[str] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if record.levelno >= logging.ERROR:
+                    errors.append(record.getMessage())
+
+        handler = Collect()
+        logger = logging.getLogger("uvicorn.error")
+        logger.addHandler(handler)
+        try:
+            with _open(server) as a, _open(server) as b:
+                with (
+                    a.stream("GET", "/api/v1/events") as ra,
+                    b.stream("GET", "/api/v1/events") as rb,
+                ):
+                    readers = [Frames(ra), Frames(rb)]
+                    for reader in readers:
+                        reader.take(1)
+                    server.wait_for_streams(2)
+                    started = time.monotonic()
+                    server.stop()
+                    elapsed = time.monotonic() - started
+                    assert not server.thread.is_alive()
+        finally:
+            logger.removeHandler(handler)
+        assert elapsed < 2
+        assert errors == []
