@@ -207,7 +207,9 @@ The database is accessed through **SQLAlchemy Core 2.x** (no ORM) inside
   is never used in Compose.
 - SQLite connections use WAL, `foreign_keys = ON` and `busy_timeout = 15000`.
   The `PRAGMA` statements and `BEGIN IMMEDIATE` in `repo/db.py`'s connection
-  events are the only raw SQL in the code base.
+  events, plus `PRAGMA optimize` and `PRAGMA wal_checkpoint(TRUNCATE)` in
+  `repo/db.py`'s `optimize()` (worker maintenance, §6.1), are the only raw SQL
+  in the code base.
 - A write that still finds the database locked after the busy timeout raises
   `repo.Busy`; the API maps it to `503 database_busy` with `Retry-After: 2`, the
   worker treats it like any other loop error (§6.1).
