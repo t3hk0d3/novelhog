@@ -148,6 +148,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        app.state.stopping.clear()  # the same app may be started again
         try:
             if repo is not None:
                 if check_schema:

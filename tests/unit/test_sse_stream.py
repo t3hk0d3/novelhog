@@ -103,10 +103,10 @@ class TestStream__RepoCalls:
         events.add(NV1, NV1, {"id": NV1})
         harness = Harness(events)
         harness.run(last_event_id="0")
-        assert set(harness.run_calls) == {"replay_status", "since"}
+        assert harness.run_calls == ["replay_status", "since"]
         harness = Harness(events)
         harness.run()
-        assert set(harness.run_calls) == {"latest_seq", "since"}
+        assert harness.run_calls == ["latest_seq", "since"]
 
 
 class TestStream__WithoutLastEventId:

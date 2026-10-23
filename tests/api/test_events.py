@@ -259,3 +259,40 @@ class TestEventsOverTcp:
             logger.removeHandler(handler)
         assert elapsed < 2
         assert errors == []
+
+    def test_events__app_started_twice_keeps_streams_open_after_the_second_start(
+        self, settings: Settings, repo: Repo
+    ) -> None:
+        app = create_app(settings, repo=repo, sse_poll_s=0.05, sse_keepalive_s=0.3)
+        for round_number in (1, 2):
+            with closing(socket.socket()) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            instance = build_server(app, host="127.0.0.1", port=port, graceful_s=2)
+            thread = threading.Thread(target=instance.run, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 10
+            while not instance.started and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert instance.started
+            try:
+                with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as http:
+                    with http.stream("GET", "/api/v1/events") as response:
+                        reader = Frames(response)
+                        reader.take(1)
+                        time.sleep(0.4)  # several polls: an ended stream would be closed by now
+                        keepalives = reader.take(1)
+                        assert keepalives == [": keepalive"], round_number
+            finally:
+                instance.should_exit = True
+                thread.join(timeout=10)
+                assert not thread.is_alive()
+
+
+class TestServeHelper:
+    def test_build_server__graceful_timeout_not_above_poll_raises_value_error(
+        self, settings: Settings, repo: Repo
+    ) -> None:
+        app = create_app(settings, repo=repo, sse_poll_s=1.0)
+        with pytest.raises(ValueError, match="graceful_s"):
+            build_server(app, host="127.0.0.1", port=0, graceful_s=1)

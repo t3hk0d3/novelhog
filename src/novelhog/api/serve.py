@@ -10,6 +10,8 @@ import socket
 import uvicorn
 from fastapi import FastAPI
 
+GRACE_MARGIN_S = 0.5
+
 
 class Server(uvicorn.Server):
     """A uvicorn server that sets `app.state.stopping` when it begins to shut down."""
@@ -25,11 +27,20 @@ class Server(uvicorn.Server):
 
 
 def build_server(app: FastAPI, *, host: str, port: int, graceful_s: int) -> Server:
-    """Build the server; open requests are cancelled after `graceful_s` seconds at the latest."""
+    """Build the server; open requests are cancelled after `graceful_s` seconds at the latest.
+
+    Streams end within one poll of the stop flag, so `graceful_s` must exceed the app's
+    `sse_poll_s` by `GRACE_MARGIN_S`; otherwise a `ValueError` is raised (cancelled streams
+    would be logged as errors).
+    """
+    poll_s: float = app.state.sse_poll_s
+    if graceful_s <= poll_s + GRACE_MARGIN_S:
+        msg = f"graceful_s ({graceful_s}) must exceed sse_poll_s ({poll_s}) + {GRACE_MARGIN_S}"
+        raise ValueError(msg)
     config = uvicorn.Config(app, host=host, port=port, timeout_graceful_shutdown=graceful_s)
     return Server(config, app)
 
 
 def run(app: FastAPI, *, host: str, port: int, graceful_s: int) -> None:
-    """Serve `app` until a stop signal arrives (blocking)."""
+    """Serve `app` until a stop signal arrives (blocking); see `build_server` for `graceful_s`."""
     build_server(app, host=host, port=port, graceful_s=graceful_s).run()
