@@ -11,6 +11,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
@@ -42,6 +43,7 @@
     "test": "vitest run",
     "gen:api": "uv run --project .. python -m novelhog.api.export_openapi | openapi-typescript -o src/api/schema.d.ts",
     "check:api": "scripts/check-api.sh",
-    "check": "npm run lint && npm run typecheck && npm run check:api && npm run test"
+    "check": "npm run lint && npm run typecheck && npm run check:api && npm run test",
+    "e2e": "playwright test"
   }
 }
