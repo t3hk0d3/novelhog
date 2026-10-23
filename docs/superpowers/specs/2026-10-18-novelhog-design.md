@@ -1441,6 +1441,7 @@ flowchart LR
 |---|---|---|---|
 | `release` | novel title (or host) | "<N> new chapters (<first>–<last>)" | `<PUBLIC_URL>/novels/<id>` |
 | `export_ready` | novel title (or host) | "<filename> is ready" | `<PUBLIC_URL>/novels/<id>#exports` |
+| `export_failed` | novel title (or host) | "<filename> failed: <error>" | `<PUBLIC_URL>/novels/<id>#exports` |
 
 `icon` is the novel's absolute cover URL (`STATIC_BASE_URL`-relative URLs are
 prefixed with `PUBLIC_URL`), or `<PUBLIC_URL>/icons/192.png`. Web Push sends the
