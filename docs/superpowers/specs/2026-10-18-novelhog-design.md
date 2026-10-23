@@ -1238,8 +1238,12 @@ through `novelhog.net`, a `requests` session that:
 - refuses schemes other than `http` and `https`.
 
 A refused request is a failed fetch (`[image unavailable]`, no cover, push
-`Failed`). Requests made by FlareSolverr on the scraper's behalf only reach hosts
-in the scraper's decode guide.
+`Failed`). Chapter and TOC URLs come from the site's own pages and may point at
+other hosts (botitranslation's chapters live on `api.mystorywave.com`), so the
+scraper adapter applies the same address check to the host of every chapter
+and TOC URL before fetching it, directly or through FlareSolverr, and to every
+redirect of a direct fetch. A refused URL is a site error
+("Blocked non-public address: <host>").
 
 ## 7. Modules
 
@@ -1572,7 +1576,8 @@ manifest makes the app installable.
        rectangle.
    - **Normal mode** (default):
      - Clicking or tapping a row opens chapter details. Rows are links named
-       "<title>, <status>, open details".
+       "<title>, <status>, open details" ("<title>, new, <status>, open details"
+       for a new chapter).
      - The toolbar has a **Select** button. Long-press (phone) or
        Shift-/Ctrl-/Cmd-click (desktop) on a row enters select mode with that
        row (or range) selected.
