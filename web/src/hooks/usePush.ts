@@ -6,10 +6,22 @@ import { useLiveReady } from './useLiveEvents';
 /** localStorage key for this device's subscription id (spec 5.6). */
 export const SUBSCRIPTION_ID_KEY = 'novelhog.pushSubscriptionId';
 
+/** How long to wait for the service worker before treating push as unsupported. */
+export const WORKER_READY_TIMEOUT_MS = 10_000;
+
+/** The service worker did not become ready (registration failed or it never activated). */
+export class WorkerUnavailable extends Error {
+  constructor() {
+    super('Notifications are unavailable: the service worker did not start');
+    this.name = 'WorkerUnavailable';
+  }
+}
+
 /**
  * Why the bell is shown the way it is:
  * `hidden` (server has Web Push off, or settings not loaded: no bell), `needs-https`,
- * `install-first` (iOS outside an installed PWA), `unsupported` (browser lacks Push),
+ * `install-first` (iOS outside an installed PWA), `unsupported` (browser lacks Push, or the
+ * service worker did not start within `WORKER_READY_TIMEOUT_MS`),
  * `blocked` (permission denied), `checking` (asking the browser), `off`, `on`.
  */
 export type PushStatus =
@@ -91,8 +103,44 @@ async function register(subscription: PushSubscription): Promise<string> {
   return saved.id;
 }
 
+/** `navigator.serviceWorker.ready`, which never settles when registration failed, with a timeout. */
+async function workerReady(): Promise<ServiceWorkerRegistration> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new WorkerUnavailable());
+    }, WORKER_READY_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([navigator.serviceWorker.ready, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sameKey(key: ArrayBuffer | null, expected: Uint8Array): boolean {
+  if (key === null) return false;
+  const actual = new Uint8Array(key);
+  return actual.length === expected.length && actual.every((byte, i) => byte === expected[i]);
+}
+
+/**
+ * Makes the server know this device's existing subscription again (spec 11.1: a restored or
+ * reset database, or a rotated subscription). A subscription made with another VAPID key is
+ * replaced first. Re-posting is an idempotent upsert; the returned id is stored.
+ */
+async function resync(pushManager: PushManager, subscription: PushSubscription, vapidKey: string) {
+  let current = subscription;
+  const key = urlBase64ToBytes(vapidKey);
+  if (!sameKey(current.options.applicationServerKey, key)) {
+    await current.unsubscribe();
+    current = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  }
+  writeStoredId(await register(current));
+}
+
 async function browserSubscribe(vapidKey: string): Promise<PushSubscription> {
-  const { pushManager } = await navigator.serviceWorker.ready;
+  const { pushManager } = await workerReady();
   const options = { userVisibleOnly: true, applicationServerKey: urlBase64ToBytes(vapidKey) };
   try {
     return await pushManager.subscribe(options);
@@ -118,6 +166,7 @@ export function usePush(): Push {
   const enabled = webpush?.enabled === true && vapidKey !== null;
 
   const [subscribed, setSubscribed] = useState<boolean | null>(null);
+  const [workerMissing, setWorkerMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [, rerender] = useState(0);
 
@@ -127,18 +176,29 @@ export function usePush(): Push {
   useEffect(() => {
     if (!asking) return;
     let cancelled = false;
-    void navigator.serviceWorker.ready
-      .then((registration) => registration.pushManager.getSubscription())
-      .then((subscription) => {
-        if (!cancelled) setSubscribed(subscription !== null);
-      })
-      .catch(() => {
-        if (!cancelled) setSubscribed(false);
-      });
+    const check = async () => {
+      let pushManager: PushManager;
+      try {
+        ({ pushManager } = await workerReady());
+      } catch {
+        if (!cancelled) setWorkerMissing(true);
+        return;
+      }
+      const subscription = await pushManager.getSubscription();
+      if (subscription !== null && Notification.permission === 'granted') {
+        await resync(pushManager, subscription, vapidKey);
+      }
+      if (!cancelled) setSubscribed(subscription !== null);
+    };
+    check().catch((error: unknown) => {
+      // The server does not have this device: show "off" so Turn on registers it again.
+      console.warn('Push subscription check failed', error);
+      if (!cancelled) setSubscribed(false);
+    });
     return () => {
       cancelled = true;
     };
-  }, [asking]);
+  }, [asking, vapidKey]);
 
   const subscribe = useCallback(async () => {
     if (vapidKey === null) return;
@@ -158,6 +218,9 @@ export function usePush(): Push {
         throw error;
       }
       setSubscribed(true);
+    } catch (error) {
+      if (error instanceof WorkerUnavailable) setWorkerMissing(true);
+      throw error;
     } finally {
       setBusy(false);
     }
@@ -166,7 +229,7 @@ export function usePush(): Push {
   const unsubscribe = useCallback(async () => {
     setBusy(true);
     try {
-      const { pushManager } = await navigator.serviceWorker.ready;
+      const { pushManager } = await workerReady();
       const subscription = await pushManager.getSubscription();
       // Without a stored id, registering the same endpoint again returns the same id.
       const id = readStoredId() ?? (subscription ? await register(subscription) : null);
@@ -185,6 +248,7 @@ export function usePush(): Push {
 
   let status: PushStatus;
   if (environment !== undefined) status = environment;
+  else if (workerMissing) status = 'unsupported';
   else if (subscribed === null) status = 'checking';
   else status = subscribed ? 'on' : 'off';
   return { status, busy, subscribe, unsubscribe };

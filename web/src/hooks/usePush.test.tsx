@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { makeSettings } from '../test/fixtures';
 import { fakeBrowser } from '../test/push';
 import { testClient } from '../test/render';
-import { SUBSCRIPTION_ID_KEY, usePush } from './usePush';
+import {
+  SUBSCRIPTION_ID_KEY,
+  usePush,
+  WORKER_READY_TIMEOUT_MS,
+  WorkerUnavailable,
+} from './usePush';
 
 vi.mock('./useLiveEvents', () => ({ useLiveReady: () => true }));
 
@@ -254,6 +259,128 @@ describe('usePush', () => {
       await act(() => result.current.unsubscribe());
       expect(calls('POST')).toHaveLength(1);
       expect(calls('DELETE')[0]?.[0]).toBe('/api/v1/subscriptions/SB1');
+    });
+  });
+
+  describe('On load with permission granted and an existing subscription', () => {
+    it('re-POSTs the subscription and stores the returned id', async () => {
+      fakeBrowser({ permission: 'granted', subscribed: true });
+      localStorage.setItem(SUBSCRIPTION_ID_KEY, 'SBold');
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('on');
+      });
+      const [url, init] = calls('POST')[0] as [string, RequestInit];
+      expect(url).toBe('/api/v1/webpush/subscriptions');
+      expect(JSON.parse(init.body as string)).toEqual({
+        endpoint: 'https://fcm.googleapis.com/send/abc',
+        keys: { p256dh: 'pk', auth: 'ak' },
+      });
+      expect(localStorage.getItem(SUBSCRIPTION_ID_KEY)).toBe('SB1');
+    });
+
+    it('replaces a subscription made with another VAPID key and POSTs the new one', async () => {
+      const browser = fakeBrowser({ permission: 'granted', subscribed: true, key: [9, 9] });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('on');
+      });
+      expect(browser.subscription.unsubscribe).toHaveBeenCalled();
+      const options = browser.pushManager.subscribe.mock.calls[0]?.[0] as {
+        applicationServerKey: Uint8Array;
+      };
+      expect([...options.applicationServerKey]).toEqual([4, 5, 3]);
+      expect(calls('POST')).toHaveLength(1);
+    });
+
+    it('keeps a subscription made with the server key', async () => {
+      const browser = fakeBrowser({ permission: 'granted', subscribed: true });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('on');
+      });
+      expect(browser.subscription.unsubscribe).not.toHaveBeenCalled();
+      expect(browser.pushManager.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('shows off when the server rejects the subscription', async () => {
+      fakeBrowser({ permission: 'granted', subscribed: true });
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      fetchMock.mockImplementation((input: string) => {
+        if (input.endsWith('/settings'))
+          return Promise.resolve(Response.json(makeSettings(webpush)));
+        return Promise.resolve(
+          Response.json({ error: { code: 'boom', message: 'Boom' } }, { status: 500 }),
+        );
+      });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('off');
+      });
+      expect(calls('POST')).toHaveLength(1);
+    });
+
+    it('does not POST without a browser subscription', async () => {
+      fakeBrowser({ permission: 'granted', subscribed: false });
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('off');
+      });
+      expect(calls('POST')).toHaveLength(0);
+    });
+  });
+
+  describe('When the service worker never becomes ready', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function neverReady() {
+      fakeBrowser();
+      Object.defineProperty(navigator, 'serviceWorker', {
+        configurable: true,
+        value: { ready: new Promise(() => undefined), register: vi.fn() },
+      });
+    }
+
+    it('shows unsupported instead of checking after the timeout', async () => {
+      neverReady();
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('checking');
+      });
+      act(() => {
+        vi.advanceTimersByTime(WORKER_READY_TIMEOUT_MS);
+      });
+      await waitFor(() => {
+        expect(result.current.status).toBe('unsupported');
+      });
+    });
+
+    it('Turn on fails with WorkerUnavailable and is not left busy', async () => {
+      neverReady();
+      const { result } = mount();
+      await waitFor(() => {
+        expect(result.current.status).toBe('checking');
+      });
+      let pending: Promise<void> | undefined;
+      act(() => {
+        pending = result.current.subscribe();
+      });
+      await waitFor(() => {
+        expect(result.current.busy).toBe(true);
+      });
+      act(() => {
+        vi.advanceTimersByTime(WORKER_READY_TIMEOUT_MS);
+      });
+      await act(async () => {
+        await expect(pending).rejects.toBeInstanceOf(WorkerUnavailable);
+      });
+      expect(result.current.busy).toBe(false);
+      expect(result.current.status).toBe('unsupported');
     });
   });
 });

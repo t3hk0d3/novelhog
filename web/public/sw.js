@@ -1,5 +1,6 @@
-/* novelhog service worker (spec 8.6, 10): shows Web Push messages and opens/focuses their url.
-   No caching and no exports: handlers are registered on `self`. */
+/* novelhog service worker (spec 8.6, 10): shows Web Push messages and opens/focuses their url,
+   and registers a subscription the browser replaced. No caching and no exports: handlers are
+   registered on `self`. */
 
 self.addEventListener('push', (event) => {
   let message = {};
@@ -42,4 +43,36 @@ self.addEventListener('notificationclick', (event) => {
       return undefined;
     }),
   );
+});
+
+function urlBase64ToBytes(value) {
+  const base64 = value
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+    .padEnd(Math.ceil(value.length / 4) * 4, '=');
+  return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+}
+
+/* The browser replaced or dropped the subscription: subscribe again with the server's current
+   VAPID key and register it (an idempotent upsert). The app re-registers on its next load too. */
+async function resubscribe() {
+  const settings = await fetch('/api/v1/settings');
+  if (!settings.ok) return;
+  const body = await settings.json();
+  const webpush = body && body.notifications && body.notifications.channels.webpush;
+  if (!webpush || !webpush.enabled || !webpush.vapid_public_key) return;
+  const subscription = await self.registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToBytes(webpush.vapid_public_key),
+  });
+  const { endpoint, keys } = subscription.toJSON();
+  await fetch('/api/v1/webpush/subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } }),
+  });
+}
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(resubscribe());
 });

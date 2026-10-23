@@ -19,6 +19,8 @@ function client(url: string): FakeClient {
 
 const handlers: Record<string, Handler> = {};
 const showNotification = vi.fn();
+const pushSubscribe = vi.fn();
+const fetchMock = vi.fn();
 const matchAll = vi.fn();
 const openWindow = vi.fn();
 
@@ -27,15 +29,27 @@ beforeEach(() => {
   showNotification.mockReset().mockResolvedValue(undefined);
   matchAll.mockReset().mockResolvedValue([]);
   openWindow.mockReset().mockResolvedValue(undefined);
+  pushSubscribe.mockReset().mockResolvedValue({
+    toJSON: () => ({ endpoint: 'https://push/new', keys: { p256dh: 'pk', auth: 'ak' } }),
+  });
+  fetchMock.mockReset().mockImplementation((url: string) =>
+    Promise.resolve(
+      url === '/api/v1/settings'
+        ? Response.json({
+            notifications: { channels: { webpush: { enabled: true, vapid_public_key: 'BAUD' } } },
+          })
+        : Response.json({ id: 'SB2' }, { status: 201 }),
+    ),
+  );
   const self = {
     addEventListener: (type: string, handler: Handler) => {
       handlers[type] = handler;
     },
     location: { origin: 'https://h' },
-    registration: { showNotification },
+    registration: { showNotification, pushManager: { subscribe: pushSubscribe } },
     clients: { matchAll, openWindow },
   };
-  runInNewContext(source, { self, URL });
+  runInNewContext(source, { self, URL, atob, fetch: fetchMock });
 });
 
 /** Runs a handler and awaits whatever it passed to event.waitUntil. */
@@ -114,6 +128,43 @@ describe('sw.js', () => {
       });
       expect(tab.focus).toHaveBeenCalled();
       expect(tab.navigate).toHaveBeenCalledWith('https://h/novels/NV1#exports');
+    });
+  });
+
+  describe('pushsubscriptionchange', () => {
+    it('resubscribes with the server VAPID key', async () => {
+      await dispatch('pushsubscriptionchange', {});
+      expect(fetchMock).toHaveBeenCalledWith('/api/v1/settings');
+      const options = pushSubscribe.mock.calls[0]?.[0] as {
+        userVisibleOnly: boolean;
+        applicationServerKey: Uint8Array;
+      };
+      expect(options.userVisibleOnly).toBe(true);
+      expect([...options.applicationServerKey]).toEqual([4, 5, 3]);
+    });
+
+    it('POSTs the new subscription', async () => {
+      await dispatch('pushsubscriptionchange', {});
+      const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+      expect(url).toBe('/api/v1/webpush/subscriptions');
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body as string)).toEqual({
+        endpoint: 'https://push/new',
+        keys: { p256dh: 'pk', auth: 'ak' },
+      });
+    });
+
+    it('does nothing when Web Push is off on the server', async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          Response.json({
+            notifications: { channels: { webpush: { enabled: false, vapid_public_key: null } } },
+          }),
+        ),
+      );
+      await dispatch('pushsubscriptionchange', {});
+      expect(pushSubscribe).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 });

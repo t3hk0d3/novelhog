@@ -1,9 +1,16 @@
 import { vi } from 'vitest';
 
 /** The browser pieces usePush talks to, faked; stubs them onto window and navigator. */
-export function fakeBrowser({ permission = 'default', subscribed = false, secure = true } = {}) {
+export function fakeBrowser({
+  permission = 'default',
+  subscribed = false,
+  secure = true,
+  // The bytes of the settings fixture's VAPID key `BAUD`.
+  key = [4, 5, 3],
+} = {}) {
   const subscription = {
     endpoint: 'https://fcm.googleapis.com/send/abc',
+    options: { applicationServerKey: new Uint8Array(key).buffer },
     toJSON: () => ({
       endpoint: 'https://fcm.googleapis.com/send/abc',
       keys: { p256dh: 'pk', auth: 'ak' },
