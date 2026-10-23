@@ -203,7 +203,8 @@ function NovelPage({ novel }: { novel: NovelData }) {
       {exportRange !== null && (
         <ExportDialog
           novelId={novel.id}
-          novelTitle={novel.title ?? novel.host}
+          novelTitle={novel.title}
+          novelHost={novel.host}
           chapters={all}
           from={exportRange.from}
           to={exportRange.to}

@@ -77,6 +77,22 @@ describe('ChapterTable', () => {
       ).toBeInTheDocument();
     });
 
+    it('of new chapters are named "<title>, new, <status>, open details"', () => {
+      render(
+        <ChapterTable
+          chapters={[makeChapter(1, { state: 'pending' }), makeChapter(2, { state: 'pending' })]}
+          isNew={(c) => c.position === 2}
+          onOpenDetails={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole('link', { name: 'Page 2, new, Pending, open details' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('link', { name: 'Page 1, Pending, open details' }),
+      ).toBeInTheDocument();
+    });
+
     it('link to the chapter inside the app, not to the source site', () => {
       const chapter = makeChapter(4);
       render(<ChapterTable chapters={[chapter]} isNew={never} onOpenDetails={vi.fn()} />, {

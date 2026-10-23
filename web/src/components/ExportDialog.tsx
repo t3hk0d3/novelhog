@@ -11,7 +11,10 @@ import { useToast } from './Toast';
 
 interface Props {
   novelId: string;
-  novelTitle: string;
+  /** Null when no title was detected: the file is "Untitled …", as on the server. */
+  novelTitle: string | null;
+  /** Shown in place of a missing title. */
+  novelHost: string;
   /** The novel's whole chapter list, in position order. */
   chapters: Chapter[];
   /** The range the inputs start with. */
@@ -99,6 +102,7 @@ const label = 'text-sm font-semibold';
 export function ExportDialog({
   novelId,
   novelTitle,
+  novelHost,
   chapters,
   from,
   to,
@@ -155,7 +159,7 @@ export function ExportDialog({
   return (
     <Dialog title="Export" sheet={!wide} onClose={onClose}>
       <form onSubmit={submit} className="mt-1 flex flex-col gap-5">
-        <p className="-mt-1 text-sm text-ink-muted">{novelTitle}</p>
+        <p className="-mt-1 text-sm text-ink-muted">{novelTitle ?? novelHost}</p>
 
         <fieldset className="flex flex-col gap-2">
           <legend className={label}>Chapters</legend>

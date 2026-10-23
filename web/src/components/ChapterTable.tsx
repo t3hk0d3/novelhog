@@ -200,7 +200,7 @@ function Row({
       <a
         href={href}
         data-chapter-id={chapter.id}
-        aria-label={`${title}, ${STATE_LABELS[chapter.state]}, open details`}
+        aria-label={`${title}, ${isNew(chapter) ? 'new, ' : ''}${STATE_LABELS[chapter.state]}, open details`}
         onClick={onClick}
         {...press.handlers}
         className={`${layout} hover:bg-page`}

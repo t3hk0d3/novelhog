@@ -24,7 +24,12 @@ function setWide(wide: boolean) {
 function mount(
   count: number,
   states: Record<number, ChapterState>,
-  { from = 1, to = count, response }: { from?: number; to?: number; response?: Response } = {},
+  {
+    from = 1,
+    to = count,
+    response,
+    title = 'Ashen Lantern Chronicles',
+  }: { from?: number; to?: number; response?: Response; title?: string | null } = {},
 ) {
   setWide(true);
   const fetchMock = vi.fn(() =>
@@ -36,7 +41,8 @@ function mount(
   renderWithProviders(
     <ExportDialog
       novelId={NOVEL}
-      novelTitle="Ashen Lantern Chronicles"
+      novelTitle={title}
+      novelHost="fanmtl.com"
       chapters={makeChapters(count, states)}
       from={from}
       to={to}
@@ -55,6 +61,18 @@ const run = (from: number, to: number, state: ChapterState) =>
   Object.fromEntries(Array.from({ length: to - from + 1 }, (_, i) => [from + i, state]));
 
 describe('ExportDialog', () => {
+  describe('For a novel without a title', () => {
+    it('previews the file name the server uses, "Untitled Chapters …"', () => {
+      mount(50, {}, { title: null });
+      expect(screen.getByText('Untitled Chapters 1-50.epub')).toBeInTheDocument();
+    });
+
+    it('names the novel by its host', () => {
+      mount(50, {}, { title: null });
+      expect(screen.getByText('fanmtl.com')).toBeInTheDocument();
+    });
+  });
+
   describe('on open', () => {
     it('prefills From and To from the selection', () => {
       mount(30, {}, { from: 5, to: 20 });
