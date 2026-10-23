@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import Connection, Engine, insert, select
 
-from novelhog.repo.schema import chapters, events, exports, hosts, novels
+from novelhog.repo.schema import chapters, events, exports, hosts, novels, storage_trash
 
 NOW = datetime.fromisoformat("2026-10-19T12:00:00+00:00")
 NOVEL_ID = "NV000000000001"
@@ -80,3 +80,13 @@ def assert_no_events_after_delete(engine: Engine, novel_id: str) -> None:
     deleted = [row.seq for row in rows if row.payload.get("deleted")]
     assert len(deleted) == 1
     assert rows[-1].seq == deleted[0]
+
+
+def trash_keys(engine: Engine) -> list[str]:
+    """Return every key in the storage trash, ignoring the grace age of `Trash.take`."""
+    with engine.connect() as connection:
+        return list(
+            connection.execute(
+                select(storage_trash.c.key).order_by(storage_trash.c.at, storage_trash.c.key)
+            ).scalars()
+        )

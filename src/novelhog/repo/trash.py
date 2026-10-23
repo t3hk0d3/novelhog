@@ -1,6 +1,6 @@
 """The storage trash: static-file keys waiting for the worker to delete them (spec section 4)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import Connection, delete, select
 
@@ -9,6 +9,14 @@ from novelhog.repo import db
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import exports, storage_trash
 from novelhog.repo.sql import dialect_insert
+
+TRASH_GRACE_S = 3600
+"""Minimum age of a trash row before `take` returns it.
+
+Well above the default export claim TTL (300 s) and any sensible override: a build that
+uploaded a file whose key was trashed by a previous owner has either finished (which clears the
+row) or lost its claim long before the row becomes takeable.
+"""
 
 
 def add(conn: Connection, keys: list[str], now: datetime) -> None:
@@ -62,14 +70,16 @@ class Trash:
             add(conn, [key for key in unique if key not in live], self._clock())
 
     def take(self, limit: int = 100) -> list[str]:
-        """Return up to `limit` trashed keys, oldest first; they stay until `remove`.
+        """Return up to `limit` keys trashed at least `TRASH_GRACE_S` ago, oldest first.
 
-        Never returns a key a `ready` export still references; such trash rows are deleted.
+        They stay until `remove`. Never returns a key a `ready` export still references; such
+        trash rows are deleted.
         """
         with db.write(self._engine) as conn:
             rows = list(
                 conn.execute(
                     select(storage_trash.c.key)
+                    .where(storage_trash.c.at <= self._clock() - timedelta(seconds=TRASH_GRACE_S))
                     .order_by(storage_trash.c.at, storage_trash.c.key)
                     .limit(limit)
                 ).scalars()

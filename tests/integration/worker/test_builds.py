@@ -24,6 +24,7 @@ from novelhog.repo.schema import chapters, exports, novels
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import builds
 from novelhog.worker.loop import Worker
+from tests.integration.helpers import trash_keys
 from tests.integration.worker.conftest import (
     ME,
     FakeAdapter,
@@ -422,7 +423,7 @@ class TestBuild__WhenTheClaimWasLost:
         run_build(repo, storage, claim, settings, tmp_dir)
 
         key = f"exports/{claim.novel_id}/{claim.export_id}/{claim.filename}"
-        assert repo.trash.take() == [key]
+        assert trash_keys(repo.engine) == [key]
         row = export_of(repo, claim.export_id)
         assert (row.state, row.claimed_by, row.storage_key) == ("building", OTHER, None)
 
@@ -520,7 +521,7 @@ class TestBuild__Hardening:
 
         key = f"exports/{claim.novel_id}/{claim.export_id}/{claim.filename}"
         assert storage.get(key) is None
-        assert repo.trash.take() == []
+        assert trash_keys(repo.engine) == []
         assert export_of(repo, claim.export_id).state == ExportState.BUILDING
         assert list(tmp_dir.iterdir()) == []
         assert any(entry["event"] == "export_claim_lost" for entry in logs)
@@ -629,7 +630,7 @@ class TestBuild__Hardening:
 
         run_build(repo, storage, claim, settings, tmp_dir)
 
-        assert repo.trash.take() == []
+        assert trash_keys(repo.engine) == []
 
     def test_build__a_storage_failure_fails_the_export_and_removes_the_temp_file(
         self,
@@ -677,7 +678,7 @@ class TestBuild__Hardening:
 
         run_build(repo, storage, claim, settings, tmp_dir)  # old owner: finish False -> discard
 
-        assert repo.trash.take() == []
+        assert trash_keys(repo.engine) == []
         assert storage.get(key) is not None
 
 
