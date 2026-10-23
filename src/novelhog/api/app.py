@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from novelhog import log, vapid
 from novelhog.api import (
     routes_chapters,
+    routes_events,
     routes_exports,
     routes_novels,
     routes_settings,
@@ -178,4 +179,5 @@ def create_app(
     app.include_router(routes_chapters.router, prefix=API_PREFIX)
     app.include_router(routes_exports.router, prefix=API_PREFIX)
     app.include_router(routes_subscriptions.router, prefix=API_PREFIX)
+    app.include_router(routes_events.router, prefix=API_PREFIX)
     return app

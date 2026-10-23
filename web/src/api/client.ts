@@ -8,11 +8,13 @@ export type ChapterState = Schemas['ChapterState'];
 export type ChapterPage = Schemas['ChapterPage'];
 export type ChapterSelector = Schemas['ChapterSelector'];
 export type ChapterPatchResult = Schemas['ChapterPatchResult'];
-export type NovelCreate = Schemas['NovelCreate'];
+// Fields with a server default are required in the generated type; requests may omit them.
+export type NovelCreate = Omit<Schemas['NovelCreate'], 'followed'> & { followed?: boolean };
 export type NovelPatch = Schemas['NovelPatch'];
 export type Export = Schemas['Export'];
-export type ExportCreate = Schemas['ExportCreate'];
-export type Settings = Schemas['Settings'];
+export type ExportCreate = Omit<Schemas['ExportCreate'], 'format' | 'skip_missing'> &
+  Partial<Pick<Schemas['ExportCreate'], 'format' | 'skip_missing'>>;
+export type Settings = Schemas['SettingsOut'];
 export type Subscription = Schemas['Subscription'];
 export type WebpushSubscriptionCreate = Schemas['WebpushSubscriptionCreate'];
 
@@ -38,7 +40,7 @@ async function toApiError(response: Response): Promise<ApiError> {
     const body = (await response.json()) as Partial<Schemas['ErrorBody']> | null;
     const error = body?.error;
     if (error && typeof error.code === 'string' && typeof error.message === 'string') {
-      return new ApiError(response.status, error.code, error.message, error.details);
+      return new ApiError(response.status, error.code, error.message, error.details ?? undefined);
     }
   } catch {
     // not JSON (for example a proxy error page): fall through to the generic error
