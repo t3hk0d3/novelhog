@@ -66,6 +66,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["container: builds and runs the Docker image (needs NOVELHOG_CONTAINER_TESTS=1)"]
 filterwarnings = [
     # fastapi.testclient still builds on httpx; httpx2 is not packaged for it yet.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",

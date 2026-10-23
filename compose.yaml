@@ -1,0 +1,67 @@
+# novelhog: one image, three roles, plus a FlareSolverr paired 1:1 with the worker (spec section 2).
+# Scale by adding worker/FlareSolverr pairs in an override file, never with `--scale`.
+
+x-novelhog: &novelhog
+  image: novelhog:local
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  environment: &novelhog-env
+    NOVELHOG_DATABASE_URL: ${NOVELHOG_DATABASE_URL:-sqlite:////data/db/app.db}
+    NOVELHOG_PUBLIC_URL: ${NOVELHOG_PUBLIC_URL:-}
+    NOVELHOG_VAPID_SUBJECT: ${NOVELHOG_VAPID_SUBJECT:-}
+    NOVELHOG_ALLOWED_HOSTS: ${NOVELHOG_ALLOWED_HOSTS:-}
+    NOVELHOG_HTTP_PORT: ${NOVELHOG_HTTP_PORT:-8080}
+
+services:
+  novelhog-migrate:
+    <<: *novelhog
+    command: ["db", "migrate"]
+    restart: "no"
+    volumes:
+      - novelhog-db:/data/db
+
+  novelhog-web:
+    <<: *novelhog
+    command: ["web"]
+    restart: unless-stopped
+    depends_on:
+      novelhog-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${NOVELHOG_HTTP_PORT:-8080}:${NOVELHOG_HTTP_PORT:-8080}"
+    volumes:
+      - novelhog-db:/data/db
+      - novelhog-static:/data/static:ro
+
+  novelhog-worker:
+    <<: *novelhog
+    command: ["worker"]
+    restart: unless-stopped
+    stop_grace_period: 2m
+    depends_on:
+      novelhog-migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *novelhog-env
+      NOVELHOG_FLARESOLVERR_URL: http://flaresolverr:8191
+    volumes:
+      - novelhog-db:/data/db
+      - novelhog-static:/data/static
+    networks:
+      - default
+      - worker-pair
+
+  # No depends_on from the worker: while this is down the worker reports an infrastructure error.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    restart: unless-stopped
+    networks:
+      - worker-pair
+
+networks:
+  worker-pair: {}
+
+volumes:
+  novelhog-db:
+  novelhog-static:

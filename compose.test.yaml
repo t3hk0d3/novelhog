@@ -1,0 +1,10 @@
+# Overlay for the container smoke tests: no FlareSolverr, loopback-only port, no restarts.
+services:
+  novelhog-web:
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:${NOVELHOG_HTTP_PORT:-8080}:${NOVELHOG_HTTP_PORT:-8080}"
+  novelhog-worker:
+    restart: "no"
+  flaresolverr:
+    profiles: [disabled]
