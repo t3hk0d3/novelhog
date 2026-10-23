@@ -358,6 +358,21 @@ class Chapters:
                 raise NotFound("chapter", chapter_id)
             return _views(conn, [row])[0]
 
+    def headings(self, chapter_ids: Sequence[str]) -> dict[str, tuple[int, str | None]]:
+        """Return `{id: (position, title)}` in one read for those chapters that have a position.
+
+        Unknown, malformed and removed chapters are left out.
+        """
+        if not chapter_ids:
+            return {}
+        with db.read(self._engine) as conn:
+            rows = conn.execute(
+                select(chapters.c.id, chapters.c.position, chapters.c.title).where(
+                    chapters.c.id.in_(list(chapter_ids)), chapters.c.position.is_not(None)
+                )
+            )
+            return {r.id: (r.position, r.title) for r in rows}
+
     def patch(self, novel_id: str, target: ChapterState, selector: Selector) -> PatchResult:
         """Move the selected chapters to `target` (`pending` or `not_requested`).
 

@@ -2,6 +2,7 @@
 
 from novelhog.repo import Repo, db, trash
 from tests.conftest import FakeClock
+from tests.integration.helpers import NOW, insert_export
 
 
 def put(repo: Repo, keys: list[str]) -> None:
@@ -45,3 +46,13 @@ class TestDiscard:
         repo.trash.discard(["a"])
         repo.trash.discard([])
         assert repo.trash.take() == ["a"]
+
+
+class TestDiscard__ReferencedKeys:
+    def test_discard__skips_a_key_a_ready_export_references(self, repo: Repo) -> None:
+        with db.write(repo.engine) as conn:
+            insert_export(conn, state="ready", storage_key="exports/a", size_bytes=1, ready_at=NOW)
+
+        repo.trash.discard(["exports/a", "other"])
+
+        assert repo.trash.take() == ["other"]

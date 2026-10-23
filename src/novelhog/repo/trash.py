@@ -4,9 +4,10 @@ from datetime import datetime
 
 from sqlalchemy import Connection, delete, select
 
+from novelhog.domain.exports import ExportState
 from novelhog.repo import db
 from novelhog.repo.context import RepoContext
-from novelhog.repo.schema import storage_trash
+from novelhog.repo.schema import exports, storage_trash
 from novelhog.repo.sql import dialect_insert
 
 
@@ -28,11 +29,23 @@ class Trash:
         self._clock = context.clock
 
     def discard(self, keys: list[str]) -> None:
-        """Trash the keys in their own transaction (a file uploaded but never published)."""
+        """Trash the keys in their own transaction (a file uploaded but never published).
+
+        Keys that a `ready` export references are skipped: export keys are deterministic, so a
+        build that lost its claim may have written the very file the new owner published.
+        """
         if not keys:
             return
         with db.write(self._engine) as conn:
-            add(conn, keys, self._clock())
+            live = set(
+                conn.execute(
+                    select(exports.c.storage_key).where(
+                        exports.c.storage_key.in_(keys),
+                        exports.c.state == ExportState.READY.value,
+                    )
+                ).scalars()
+            )
+            add(conn, [key for key in keys if key not in live], self._clock())
 
     def take(self, limit: int = 100) -> list[str]:
         """Return up to `limit` trashed keys, oldest first; they stay until `remove`."""

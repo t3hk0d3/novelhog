@@ -13,10 +13,10 @@ from novelhog.repo.novels import NovelClaim, SyncFailed, SyncOutcome, SyncSuccee
 from novelhog.scraper_adapter.adapter import TocResult
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
 from novelhog.storage import StaticStorage, cover_key
+from novelhog.worker.errors import summarize
 from novelhog.worker.runtime import Heartbeat
 
 SHRINK_MIN_KNOWN = 20
-_SUMMARY_LIMIT = 300
 _COVER_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -43,11 +43,6 @@ def publish_hosts(repo: Repo, adapter: TocAdapter) -> None:
     """Publish the adapter's hosts as supported; hosts it dropped are marked unsupported."""
     report = repo.hosts.publish(adapter.supported_hosts())
     log.get().info("hosts_published", added=report.added, unsupported=report.unsupported)
-
-
-def _summary(error: Exception) -> str:
-    text = " ".join(str(error).split())[:_SUMMARY_LIMIT]
-    return f"{type(error).__name__}: {text}"
 
 
 def _fetch_toc(repo: Repo, adapter: TocAdapter, claim: NovelClaim) -> TocResult:
@@ -78,7 +73,7 @@ def _store_cover(
     try:
         files.put(key, image.data, image.mime)
     except OSError as error:
-        log.get(novel_id=claim.novel_id).warning("cover_store_failed", error=_summary(error))
+        log.get(novel_id=claim.novel_id).warning("cover_store_failed", error=summarize(error))
         return None
     return key
 
@@ -116,16 +111,16 @@ def refresh(  # noqa: PLR0913
                 cover = _store_cover(fetcher, files, claim, toc.cover_url)
             outcome = SyncSucceeded(toc.urls, toc.title, toc.language, cover, min_s, max_s, rng)
         except InfrastructureError as error:
-            logger.warning("refresh_infrastructure_error", error=_summary(error))
+            logger.warning("refresh_infrastructure_error", error=summarize(error))
             infrastructure = error
             outcome = SyncFailed(None, claim.refresh_interval, now + timedelta(seconds=min_s))
         except Exception as error:  # noqa: BLE001 - any other failure counts as a site error
-            logger.warning("refresh_failed", error=_summary(error), exc_info=True)
+            logger.warning("refresh_failed", error=summarize(error), exc_info=True)
             interval = next_interval(
                 claim.refresh_interval, found_new=False, failed=True, min_s=min_s, max_s=max_s
             )
             outcome = SyncFailed(
-                _summary(error) if claim.initial else None,
+                summarize(error) if claim.initial else None,
                 interval,
                 now + timedelta(seconds=jittered(interval, rng)),
             )

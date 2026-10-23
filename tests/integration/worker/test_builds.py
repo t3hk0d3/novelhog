@@ -273,6 +273,7 @@ class TestBuild__OnSuccess:
         class Recorded:
             def __init__(self, renew: Callable[[], bool], interval_s: float) -> None:
                 beats.append((renew, interval_s))
+                self.lost = False
                 self._renew = renew
 
             def __enter__(self) -> Recorded:
@@ -485,3 +486,207 @@ class TestEndToEnd__ExportWithMissingChapters:
         assert worker.step() == "download"
         assert worker.step() == "build"
         assert repo.exports.get(novel_id, view.id).state is ExportState.READY
+
+
+class TestBuild__Hardening:
+    def test_build__lost_heartbeat_skips_upload_and_finish(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        claim = claim_export(repo, novel_id, 1, 1)
+
+        class Lost:
+            lost = True
+
+            def __init__(self, renew: Callable[[], bool], interval_s: float) -> None:
+                pass
+
+            def __enter__(self) -> Lost:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+        monkeypatch.setattr(builds, "Heartbeat", Lost)
+
+        with structlog.testing.capture_logs() as logs:
+            run_build(repo, storage, claim, settings, tmp_dir)
+
+        key = f"exports/{claim.novel_id}/{claim.export_id}/{claim.filename}"
+        assert storage.get(key) is None
+        assert repo.trash.take() == []
+        assert export_of(repo, claim.export_id).state == ExportState.BUILDING
+        assert list(tmp_dir.iterdir()) == []
+        assert any(entry["event"] == "export_claim_lost" for entry in logs)
+
+    def test_build__each_attempt_uses_its_own_temporary_path(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        claim = claim_export(repo, novel_id, 1, 1)
+        paths: list[Path] = []
+
+        def record(fmt: Format, book: BookInput, out: Path) -> None:
+            paths.append(out)
+            out.write_bytes(b"x")
+
+        monkeypatch.setattr(exporter, "build", record)
+
+        run_build(repo, storage, claim, settings, tmp_dir)
+        run_build(repo, storage, claim, settings, tmp_dir)
+
+        assert paths[0] != paths[1]
+        assert paths[0].parent == paths[1].parent == tmp_dir
+
+    def test_build__leaves_out_an_interior_chapter_removed_after_the_claim(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        middle = add_downloaded(repo, novel_id, 2)
+        add_downloaded(repo, novel_id, 3)
+        claim = claim_export(repo, novel_id, 1, 3)
+        remove_position(repo, middle)
+
+        run_build(repo, storage, claim, settings, tmp_dir)
+
+        row = export_of(repo, claim.export_id)
+        text = epub_text(storage._path(row.storage_key))  # noqa: SLF001
+        assert row.state == ExportState.READY
+        assert "Body of 1" in text
+        assert "Body of 3" in text
+        assert "Body of 2" not in text
+
+    def test_build__fails_when_an_end_chapter_was_removed_after_the_claim(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        last = add_downloaded(repo, novel_id, 2)
+        claim = claim_export(repo, novel_id, 1, 2)
+        remove_position(repo, last)
+
+        run_build(repo, storage, claim, settings, tmp_dir)
+
+        row = export_of(repo, claim.export_id)
+        assert (row.state, row.error) == (ExportState.FAILED, "Range changed upstream")
+
+    def test_build__a_failing_cover_read_builds_without_cover(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(novels).values(cover_key="covers/x/a.png"))
+        claim = claim_export(repo, novel_id, 1, 1)
+
+        def broken(key: str) -> bytes | None:
+            raise ValueError(key)
+
+        monkeypatch.setattr(storage, "get", broken)
+
+        with structlog.testing.capture_logs() as logs:
+            run_build(repo, storage, claim, settings, tmp_dir)
+
+        assert export_of(repo, claim.export_id).state == ExportState.READY
+        assert any(entry["event"] == "export_cover_failed" for entry in logs)
+
+    def test_build__success_leaves_the_trash_empty(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        claim = claim_export(repo, novel_id, 1, 1)
+
+        run_build(repo, storage, claim, settings, tmp_dir)
+
+        assert repo.trash.take() == []
+
+    def test_build__a_storage_failure_fails_the_export_and_removes_the_temp_file(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        claim = claim_export(repo, novel_id, 1, 1)
+
+        def refuse(*_: object, **__: object) -> None:
+            msg = "no space"
+            raise OSError(msg)
+
+        monkeypatch.setattr(storage, "put_file", refuse)
+
+        run_build(repo, storage, claim, settings, tmp_dir)
+
+        row = export_of(repo, claim.export_id)
+        assert (row.state, row.error) == (ExportState.FAILED, "OSError: no space")
+        assert list(tmp_dir.iterdir()) == []
+
+    def test_build__old_owner_losing_the_claim_cannot_get_the_new_owners_file_deleted(
+        self,
+        repo: Repo,
+        novel_id: str,
+        storage: HookedStorage,
+        settings: Settings,
+        tmp_dir: Path,
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        claim = claim_export(repo, novel_id, 1, 1)
+        key = f"exports/{claim.novel_id}/{claim.export_id}/{claim.filename}"
+
+        def new_owner_finishes() -> None:
+            # The old owner's claim is gone; the new owner publishes the same deterministic key.
+            with db.write(repo.engine) as conn:
+                conn.execute(update(exports).values(claimed_by=OTHER))
+            assert repo.exports.finish(claim.export_id, OTHER, storage_key=key, size_bytes=1)
+
+        storage.after_put = new_owner_finishes
+
+        run_build(repo, storage, claim, settings, tmp_dir)  # old owner: finish False -> discard
+
+        assert repo.trash.take() == []
+        for stale in repo.trash.take():
+            storage.delete(stale)
+        assert storage.get(key) is not None
+
+
+def remove_position(repo: Repo, chapter_id: str) -> None:
+    with db.write(repo.engine) as conn:
+        conn.execute(
+            update(chapters)
+            .where(chapters.c.id == chapter_id)
+            .values(position=None, removed_at=repo.clock())
+        )

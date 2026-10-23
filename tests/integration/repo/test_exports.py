@@ -551,6 +551,22 @@ class TestFinish:
         assert row.ready_at == clock.current
         assert (row.claimed_by, row.claimed_until) == (None, None)
 
+    def test_finish__removes_a_trash_row_for_its_key(self, repo: Repo, novel_id: str) -> None:
+        export_id = build_claim(repo, novel_id)
+        repo.trash.discard(["exports/a.epub"])  # an earlier owner that lost its claim
+
+        assert repo.exports.finish(export_id, ME, storage_key="exports/a.epub", size_bytes=1)
+
+        assert repo.trash.take() == []
+
+    def test_finish__lost_claim_leaves_the_trash_alone(self, repo: Repo, novel_id: str) -> None:
+        export_id = build_claim(repo, novel_id)
+        repo.trash.discard(["exports/a.epub"])
+
+        assert not repo.exports.finish(export_id, OTHER, storage_key="exports/a.epub", size_bytes=1)
+
+        assert repo.trash.take() == ["exports/a.epub"]
+
     def test_finish__appends_an_ex_event(self, repo: Repo, novel_id: str) -> None:
         export_id = build_claim(repo, novel_id)
         assert repo.exports.finish(export_id, ME, storage_key="k", size_bytes=1)
