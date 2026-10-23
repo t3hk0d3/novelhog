@@ -678,8 +678,6 @@ class TestBuild__Hardening:
         run_build(repo, storage, claim, settings, tmp_dir)  # old owner: finish False -> discard
 
         assert repo.trash.take() == []
-        for stale in repo.trash.take():
-            storage.delete(stale)
         assert storage.get(key) is not None
 
 

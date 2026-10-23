@@ -82,3 +82,11 @@ def export_filename(title: str | None, start: int, end: int, ext: str) -> str:
 def export_key(novel_id: str, export_id: str, filename: str) -> str:
     """Return the static storage key of an export file."""
     return f"exports/{novel_id}/{export_id}/{filename}"
+
+
+def novel_id_of_export_key(key: str) -> str | None:
+    """Return the novel id of an `export_key` (its inverse), or `None` for any other key."""
+    parts = key.split("/")
+    if len(parts) == 4 and parts[0] == "exports" and all(parts[1:]):  # noqa: PLR2004
+        return parts[1]
+    return None
