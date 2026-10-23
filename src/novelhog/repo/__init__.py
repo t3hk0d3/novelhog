@@ -65,3 +65,7 @@ class Repo:
     def revisions(self) -> Revisions:
         """Return the current and head revisions."""
         return db.revisions(self.engine)
+
+    def optimize(self) -> None:
+        """Run SQLite's `PRAGMA optimize` and a truncating WAL checkpoint; no-op on Postgres."""
+        db.optimize(self.engine)
