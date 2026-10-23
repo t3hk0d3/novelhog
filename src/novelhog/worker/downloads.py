@@ -11,8 +11,9 @@ from novelhog.images import FetchedImage
 from novelhog.repo import Repo
 from novelhog.repo.work import ChapterClaim
 from novelhog.scraper_adapter.adapter import FetchedChapter
-from novelhog.scraper_adapter.errors import InfrastructureError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteUnreachable
 from novelhog.worker.errors import summarize
+from novelhog.worker.reachability import Reachability
 from novelhog.worker.runtime import Heartbeat
 
 
@@ -99,12 +100,15 @@ def download(  # noqa: PLR0913
     *,
     settings: Settings,
     stop: threading.Event,
+    reachability: Reachability,
 ) -> BatchReport:
     """Download the claimed chapters one by one (spec 6.4).
 
     Stops early (releasing the unstarted rest) when `stop` is set or the heartbeat reports a lost
     claim. An `InfrastructureError` requeues the current chapter, releases the rest and is
-    re-raised. Between chapters it waits the larger of `REQUEST_DELAY` and the host's own delay.
+    re-raised, except that a `SiteUnreachable` which `reachability` says has failed too often for
+    its host fails the chapter like a site error. Between chapters it waits the larger of
+    `REQUEST_DELAY` and the host's own delay.
     """
     worker_id = settings.worker_id
     held = _Claims(repo, worker_id, settings.claim_ttl, [claim.chapter_id for claim in batch])
@@ -124,7 +128,17 @@ def download(  # noqa: PLR0913
                     counts["lost"] += rest - released
                     break
                 held.take_pending(claim.chapter_id)
-                _download_one(repo, adapter, fetcher, claim, settings, held, counts, release_rest)
+                _download_one(
+                    repo,
+                    adapter,
+                    fetcher,
+                    claim,
+                    settings,
+                    held,
+                    counts,
+                    release_rest,
+                    reachability,
+                )
                 if index + 1 < len(batch):
                     stop.wait(max(settings.request_delay, adapter.request_delay(claim.host)))
     except Exception:
@@ -143,6 +157,7 @@ def _download_one(  # noqa: PLR0913
     held: _Claims,
     counts: dict[str, int],
     release_rest: Callable[[], int],
+    reachability: Reachability,
 ) -> None:
     worker_id = settings.worker_id
     chapter_log = log.get(worker_id=worker_id, novel_id=claim.novel_id, chapter_id=claim.chapter_id)
@@ -156,6 +171,7 @@ def _download_one(  # noqa: PLR0913
         conversion = html_to_markdown.convert(fetched.body_html, fetcher.fetch)
         title = fetched.title or f"Chapter {claim.position}"
         held.end()
+        reachability.succeeded(claim.host)
         done = repo.work.complete(
             claim.chapter_id,
             worker_id,
@@ -163,18 +179,18 @@ def _download_one(  # noqa: PLR0913
             title=title,
             has_images=conversion.has_images,
         )
-    except InfrastructureError as error:
-        held.end()
-        chapter_log.warning("download_infrastructure_error", error=summarize(error))
-        repo.work.requeue(claim.chapter_id, worker_id)
-        release_rest()
-        raise
     except Exception as error:  # noqa: BLE001 - any failure is recorded on the chapter
         held.end()
-        chapter_log.warning("download_failed", error=summarize(error), exc_info=True)
-        counts[
-            "failed" if repo.work.fail(claim.chapter_id, worker_id, summarize(error)) else "lost"
-        ] += 1
+        message = summarize(error)
+        if isinstance(error, SiteUnreachable) and reachability.failed(claim.host):
+            message = f"Site unreachable: {message}"
+        elif isinstance(error, InfrastructureError):
+            chapter_log.warning("download_infrastructure_error", error=message)
+            repo.work.requeue(claim.chapter_id, worker_id)
+            release_rest()
+            raise
+        chapter_log.warning("download_failed", error=message, exc_info=True)
+        counts["failed" if repo.work.fail(claim.chapter_id, worker_id, message) else "lost"] += 1
     else:
         if done:
             counts["downloaded"] += 1

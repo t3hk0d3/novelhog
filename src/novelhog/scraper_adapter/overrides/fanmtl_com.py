@@ -1,4 +1,8 @@
-"""fanmtl.com: the next-page link is now written `&gt;`; 2.13.1's rule only matches `>`."""
+"""fanmtl.com overrides: the next-page link is now written `&gt;` (2.13.1's rule only matches `>`).
+
+The site is behind Cloudflare, so its requests are always forced through FlareSolverr
+(`overrides.FORCE_FLARESOLVERR_HOSTS`).
+"""
 
 import re
 from urllib.parse import urljoin

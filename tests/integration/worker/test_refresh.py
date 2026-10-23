@@ -17,8 +17,9 @@ from novelhog.repo import Repo, db
 from novelhog.repo.novels import NovelClaim
 from novelhog.repo.schema import chapters, novels
 from novelhog.scraper_adapter.adapter import TocResult
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import LocalStaticStorage
+from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.refresh import publish_hosts, refresh
 from tests.conftest import FakeClock
 
@@ -116,6 +117,7 @@ class Harness:
     ) -> None:
         self.repo, self.adapter, self.fetcher = repo, adapter, fetcher
         self.files, self.settings = files, settings
+        self.reachability = Reachability()
 
     def claim(self) -> NovelClaim:
         claim = self.repo.novels.claim_due_refresh(ME, self.settings.claim_ttl)
@@ -131,6 +133,7 @@ class Harness:
             claim or self.claim(),
             settings=self.settings,
             rng=random.Random(7),  # noqa: S311
+            reachability=self.reachability,
         )
 
     def novel(self, novel_id: str) -> Any:
@@ -435,6 +438,77 @@ class TestRefresh__OnInfrastructureError:
 
         assert run.novel(novel_id).import_error is None
         assert run.novel(novel_id).refresh_interval == MIN
+
+
+class TestRefresh__OnSiteUnreachable:
+    def fail_below_threshold(self, run: Harness, clock: FakeClock) -> None:
+        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
+            with pytest.raises(SiteUnreachable):
+                run.run()
+            clock.advance(days=1)
+
+    def test_refresh__below_the_threshold_keeps_the_interval_and_schedules_min(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteUnreachable("refused")
+        before = run.novel(novel_id).refresh_interval
+
+        self.fail_below_threshold(run, clock)
+
+        row = run.novel(novel_id)
+        assert row.refresh_interval == before
+        assert row.next_refresh_at == clock() - timedelta(days=1) + timedelta(seconds=MIN)
+        assert row.import_error is None
+
+    def test_refresh__at_the_threshold_an_initial_import_sets_import_error(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        run.adapter.error = SiteUnreachable("refused")
+        self.fail_below_threshold(run, clock)
+
+        run.run()
+
+        error = run.novel(novel_id).import_error
+        assert error == "Site unreachable: SiteUnreachable: refused"
+
+    def test_refresh__at_the_threshold_a_later_sync_backs_off_like_a_site_error(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteUnreachable("refused")
+        before = run.novel(novel_id).refresh_interval
+        self.fail_below_threshold(run, clock)
+
+        run.run()
+
+        row = run.novel(novel_id)
+        assert row.refresh_interval == min(before * 2, MAX)
+        assert row.import_error is None
+
+    def test_refresh__a_success_resets_the_count(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteUnreachable("refused")
+        self.fail_below_threshold(run, clock)
+        run.adapter.error = None
+        run.run()
+        clock.advance(days=40)
+        run.adapter.error = SiteUnreachable("refused")
+
+        with pytest.raises(SiteUnreachable):
+            run.run()
+
+    def test_refresh__counts_hosts_independently(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        for _ in range(SITE_UNREACHABLE_RETRIES):
+            run.reachability.failed("other.com")
+        run.adapter.error = SiteUnreachable("refused")
+
+        with pytest.raises(SiteUnreachable):
+            run.run()
 
 
 class TestRefresh__OnCoverFailure:

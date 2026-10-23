@@ -26,6 +26,7 @@ from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
 from novelhog.worker import builds, downloads, maintenance, refresh, runtime
 from novelhog.worker.downloads import ChapterAdapter, ImageSource
+from novelhog.worker.reachability import Reachability
 from novelhog.worker.refresh import TocAdapter
 
 MAINTENANCE_INTERVAL = timedelta(hours=1)
@@ -64,6 +65,7 @@ class Worker:
         self._last_maintenance: datetime | None = None
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
+        self._reachability = Reachability()
 
     def request_stop(self) -> None:
         """Ask the loop to return after the current step; wakes any wait."""
@@ -179,6 +181,7 @@ class Worker:
             claim,
             settings=settings,
             rng=self._rng,
+            reachability=self._reachability,
         )
         return True
 
@@ -190,6 +193,12 @@ class Worker:
         if not batch:
             return False
         downloads.download(
-            self._repo, self._adapter, self._fetcher, batch, settings=settings, stop=self._stop
+            self._repo,
+            self._adapter,
+            self._fetcher,
+            batch,
+            settings=settings,
+            stop=self._stop,
+            reachability=self._reachability,
         )
         return True

@@ -11,9 +11,10 @@ from novelhog.images import FetchedImage
 from novelhog.repo import Repo
 from novelhog.repo.novels import NovelClaim, SyncFailed, SyncOutcome, SyncSucceeded
 from novelhog.scraper_adapter.adapter import TocResult
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import StaticStorage, cover_key
 from novelhog.worker.errors import summarize
+from novelhog.worker.reachability import Reachability
 from novelhog.worker.runtime import Heartbeat
 
 SHRINK_MIN_KNOWN = 20
@@ -87,18 +88,20 @@ def refresh(  # noqa: PLR0913
     *,
     settings: Settings,
     rng: random.Random,
+    reachability: Reachability,
 ) -> None:
     """Sync one claimed novel and release its claim (spec 6.2).
 
     Site errors are recorded and backed off; an `InfrastructureError` is recorded as an
-    unchanged-interval retry and re-raised so the loop can back off.
+    unchanged-interval retry and re-raised so the loop can back off. A `SiteUnreachable` that
+    `reachability` says has failed too often for the host is a site error.
     """
     logger = log.get(novel_id=claim.novel_id, host=claim.host, worker_id=settings.worker_id)
     worker_id = settings.worker_id
     ttl = settings.claim_ttl
     min_s, max_s = settings.refresh_min_interval, settings.refresh_max_interval
     now = repo.clock()
-    outcome: SyncOutcome | None
+    outcome: SyncOutcome
     infrastructure: InfrastructureError | None = None
 
     with Heartbeat(
@@ -106,24 +109,30 @@ def refresh(  # noqa: PLR0913
     ) as beat:
         try:
             toc = _fetch_toc(repo, adapter, claim)
+            reachability.succeeded(claim.host)
             cover = None
             if claim.cover_key is None and not beat.lost:
                 cover = _store_cover(fetcher, files, claim, toc.cover_url)
             outcome = SyncSucceeded(toc.urls, toc.title, toc.language, cover, min_s, max_s, rng)
-        except InfrastructureError as error:
-            logger.warning("refresh_infrastructure_error", error=summarize(error))
-            infrastructure = error
-            outcome = SyncFailed(None, claim.refresh_interval, now + timedelta(seconds=min_s))
         except Exception as error:  # noqa: BLE001 - any other failure counts as a site error
-            logger.warning("refresh_failed", error=summarize(error), exc_info=True)
-            interval = next_interval(
-                claim.refresh_interval, found_new=False, failed=True, min_s=min_s, max_s=max_s
-            )
-            outcome = SyncFailed(
-                summarize(error) if claim.initial else None,
-                interval,
-                now + timedelta(seconds=jittered(interval, rng)),
-            )
+            message = summarize(error)
+            gave_up = isinstance(error, SiteUnreachable) and reachability.failed(claim.host)
+            if gave_up:
+                message = f"Site unreachable: {message}"
+            if isinstance(error, InfrastructureError) and not gave_up:
+                logger.warning("refresh_infrastructure_error", error=message)
+                infrastructure = error
+                outcome = SyncFailed(None, claim.refresh_interval, now + timedelta(seconds=min_s))
+            else:
+                logger.warning("refresh_failed", error=message, exc_info=True)
+                interval = next_interval(
+                    claim.refresh_interval, found_new=False, failed=True, min_s=min_s, max_s=max_s
+                )
+                outcome = SyncFailed(
+                    message if claim.initial else None,
+                    interval,
+                    now + timedelta(seconds=jittered(interval, rng)),
+                )
 
     report = repo.novels.finish_sync(claim.novel_id, worker_id, outcome)
     if report is None:

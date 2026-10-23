@@ -8,11 +8,17 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from novelhog import config
 from novelhog.config import Settings
-from novelhog.scraper_adapter import ScraperAdapter
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, TocLoopError
+from novelhog.scraper_adapter import ScraperAdapter, guard
+from novelhog.scraper_adapter.errors import (
+    InfrastructureError,
+    SiteError,
+    SiteUnreachable,
+    TocLoopError,
+)
 from tests.fixtures.fake_flaresolverr import FakeFlareSolverr, load_html
 from tests.fixtures.fake_site import FakeSite
 
@@ -44,12 +50,6 @@ def hostednovel_pages(*, loop: bool = False) -> dict[str, str]:
     }
 
 
-@pytest.fixture
-def fanmtl_via_flaresolverr(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scraper's host config does not route fanmtl through FlareSolverr; its env switch does."""
-    monkeypatch.setenv("SCRAPER_FORCE_FLARESOLVER", "true")
-
-
 def fanmtl_pages() -> dict[str, str]:
     return {
         FM_TOC: load_html("fanmtl_toc_1.html"),
@@ -70,6 +70,14 @@ def make_settings(tmp_path: Path, flaresolverr_url: str, **overrides: str) -> Se
 def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """The scraper sleeps between retries; skip that so failure tests stay fast."""
     monkeypatch.setattr("web_novel_scraper.request_helper.time.sleep", lambda _seconds: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_sticky_hosts() -> Iterator[None]:
+    """The Cloudflare fallback is remembered per process; every test starts without it."""
+    guard._sticky_hosts.clear()
+    yield
+    guard._sticky_hosts.clear()
 
 
 @pytest.fixture
@@ -181,7 +189,7 @@ class TestScraperAdapter__SyncToc:
         assert result.toc_html == load_html("scribblehub_toc_1.html")
 
     def test_sync_toc__returns_detected_title_and_cover_url(
-        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, fanmtl_via_flaresolverr: None
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
         flaresolverr.pages.update(fanmtl_pages())
         result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
@@ -200,7 +208,7 @@ class TestScraperAdapter__SyncToc:
         assert (result.title, result.cover_url) == ("Lantern of the Ash Road", None)
 
     def test_sync_toc__follows_fanmtl_gt_entity_pagination(
-        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, fanmtl_via_flaresolverr: None
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
         flaresolverr.pages.update(fanmtl_pages())
         result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
@@ -417,21 +425,126 @@ class TestScraperAdapter__DirectHost:
                 "NV000000000001", DIRECT_HOST, f"{site.url}/missing"
             )
 
-    def test_sync_toc__connection_refused_raises_infrastructure_error(
+    def test_sync_toc__connection_refused_raises_site_unreachable_naming_the_host(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr, dead_url: str
     ) -> None:
-        with pytest.raises(InfrastructureError):
+        with pytest.raises(SiteUnreachable, match=DIRECT_HOST):
             ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
                 "NV000000000001", DIRECT_HOST, f"{dead_url}/toc"
             )
 
-    def test_sync_toc__dns_failure_raises_infrastructure_error(
+    def test_sync_toc__dns_failure_raises_site_unreachable_naming_the_host(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
-        with pytest.raises(InfrastructureError):
+        with pytest.raises(SiteUnreachable, match=DIRECT_HOST):
             ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
                 "NV000000000001", DIRECT_HOST, "http://no-such-host.invalid/toc"
             )
+
+    def test_fetch_chapter__connection_refused_raises_site_unreachable(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, dead_url: str
+    ) -> None:
+        with pytest.raises(SiteUnreachable, match=DIRECT_HOST):
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).fetch_chapter(
+                "NV000000000001", DIRECT_HOST, f"{dead_url}/toc", f"{dead_url}/c/1"
+            )
+
+
+class TestScraperErrors__SiteUnreachable:
+    def test_site_unreachable__is_an_infrastructure_error(self) -> None:
+        assert issubclass(SiteUnreachable, InfrastructureError)
+
+
+class TestScraperAdapter__OnUnreachableFlaresolverr__ForAForcedHost:
+    def test_sync_toc__raises_infrastructure_error_that_is_not_site_unreachable(
+        self, tmp_path: Path, dead_url: str
+    ) -> None:
+        with pytest.raises(InfrastructureError) as raised:
+            ScraperAdapter(make_settings(tmp_path, dead_url)).sync_toc(
+                "NV000000000001", SH_HOST, SH_TOC
+            )
+        assert not isinstance(raised.value, SiteUnreachable)
+
+
+@pytest.fixture(params=["header", "body"])
+def challenge(request: pytest.FixtureRequest) -> str:
+    return str(request.param)
+
+
+class TestScraperAdapter__OnCloudflareChallenge:
+    def test_sync_toc__retries_the_request_through_flaresolverr_and_returns_its_result(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, challenge: str
+    ) -> None:
+        with FakeSite({}, challenge=challenge) as site:
+            flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
+            result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+            )
+            assert site.requests == ["/toc"]
+        assert result.urls == [f"{site.url}/c/1", f"{site.url}/c/2"]
+        assert flaresolverr.requested_urls == [f"{site.url}/toc"]
+
+    def test_sync_toc__routes_later_requests_for_the_host_through_flaresolverr(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, challenge: str
+    ) -> None:
+        with FakeSite({}, challenge=challenge) as site:
+            flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
+            flaresolverr.pages[f"{site.url}/c/1"] = (
+                '<html><body><ul><li class="active">One</li></ul>'
+                '<div class="reading-content"><p>Hello there.</p></div></body></html>'
+            )
+            adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            chapter = adapter.fetch_chapter(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc", f"{site.url}/c/1"
+            )
+            assert site.requests == ["/toc"]
+        assert flaresolverr.requested_urls == [f"{site.url}/toc"] * 2 + [f"{site.url}/c/1"]
+        assert chapter.body_html == "<p>Hello there.</p>"
+
+    def test_sync_toc__logs_flaresolverr_fallback_enabled_once_with_the_host(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}, challenge="header") as site, capture_logs() as logs:
+            flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
+            adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+        events = [e for e in logs if e["event"] == "flaresolverr_fallback_enabled"]
+        assert [e["host"] for e in events] == ["127.0.0.1"]
+
+    def test_sync_toc__failed_flaresolverr_retry_raises_site_error_and_keeps_requesting_directly(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}, challenge="header") as site:
+            adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
+            with pytest.raises(SiteError):
+                adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            assert guard._sticky_hosts == set()
+            with pytest.raises(SiteError):
+                adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            assert site.requests == ["/toc", "/toc"]
+
+    def test_sync_toc__unreachable_flaresolverr_retry_raises_infrastructure_error(
+        self, tmp_path: Path, dead_url: str
+    ) -> None:
+        with FakeSite({}, challenge="header") as site:
+            with pytest.raises(InfrastructureError) as raised:
+                ScraperAdapter(make_settings(tmp_path, dead_url)).sync_toc(
+                    "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+                )
+        assert not isinstance(raised.value, SiteUnreachable)
+        assert guard._sticky_hosts == set()
+
+    def test_sync_toc__a_plain_403_is_a_site_error_without_flaresolverr(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}) as site, pytest.raises(SiteError):
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/missing"
+            )
+        assert flaresolverr.commands == []
 
 
 class TestScraperAdapter__SyncToc__OnExactlyBudgetPages:

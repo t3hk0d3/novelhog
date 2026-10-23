@@ -5,6 +5,13 @@ class InfrastructureError(Exception):
     """FlareSolverr is unreachable; not the site's fault, so the work is retried unchanged."""
 
 
+class SiteUnreachable(InfrastructureError):  # noqa: N818 - named by the spec
+    """A direct request to the site was refused, failed DNS or timed out connecting.
+
+    The worker retries it like an infrastructure error until a host has failed too often.
+    """
+
+
 class SiteError(Exception):
     """The site or the scraper failed: HTTP status, decode failure, empty TOC, missing content."""
 
