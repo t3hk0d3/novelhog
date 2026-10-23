@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql, sqlite
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from novelhog.repo import Busy, Repo, db
 from novelhog.repo.schema import hosts
@@ -92,6 +92,22 @@ class TestCreateEngine__WithASqliteUrl:
         finally:
             for connection in connections:
                 connection.close()
+            engine.dispose()
+
+
+BOUND_VALUE = "bound-value-4f1c"
+
+
+class TestCreateEngine__OnAFailingStatement:
+    def test_create_engine__keeps_bound_values_out_of_the_error(self, repo: Repo) -> None:
+        engine = db.create_engine(repo.engine.url.render_as_string(hide_password=False))
+        try:
+            with engine.connect() as connection, pytest.raises(DBAPIError) as raised:
+                statement = text("SELECT * FROM no_such_table WHERE x = :v")
+                connection.execute(statement, {"v": BOUND_VALUE})
+            assert BOUND_VALUE not in str(raised.value)
+            assert engine.hide_parameters is True
+        finally:
             engine.dispose()
 
 

@@ -55,15 +55,18 @@ class Revisions:
 
 
 def create_engine(url: str) -> Engine:
-    """Create an engine for a SQLite or Postgres URL (Postgres uses the psycopg driver)."""
+    """Create an engine for a SQLite or Postgres URL (Postgres uses the psycopg driver).
+
+    Bound values are kept out of error messages (a logged traceback must not show the VAPID key).
+    """
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite":
-        engine = _create_engine(parsed)
+        engine = _create_engine(parsed, hide_parameters=True)
         _configure_sqlite(engine)
         return engine
     if parsed.get_backend_name() in ("postgresql", "postgres"):
         parsed = parsed.set(drivername="postgresql+psycopg")
-    return _create_engine(parsed, pool_pre_ping=True)
+    return _create_engine(parsed, pool_pre_ping=True, hide_parameters=True)
 
 
 def _configure_sqlite(engine: Engine) -> None:
