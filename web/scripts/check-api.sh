@@ -4,8 +4,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-generated="$(mktemp --suffix=.d.ts)"
-trap 'rm -f "${generated}"' EXIT
+workdir="$(mktemp -d)"
+trap 'rm -rf "${workdir}"' EXIT
+generated="${workdir}/schema.d.ts"
 
 uv run --project .. python -m novelhog.api.export_openapi | npx openapi-typescript -o "${generated}" >/dev/null
 if ! diff -q "${generated}" src/api/schema.d.ts >/dev/null; then

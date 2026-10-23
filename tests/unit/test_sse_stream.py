@@ -1,11 +1,15 @@
 """The SSE event generator with a fake repo and a fake clock (spec section 5.7)."""
 
+import asyncio
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from novelhog.api.routes_events import stream
+from sqlalchemy.exc import OperationalError
+
+from novelhog.api.routes_events import _guarded, stream
 from novelhog.repo import Repo
 from novelhog.repo.events import EventRow
 
@@ -47,7 +51,7 @@ class Harness:
         self.steps: list[Any] = []
         self.stopped = False
 
-    def sleep(self, seconds: float) -> None:
+    async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.now += seconds
         if self.steps:
@@ -63,18 +67,27 @@ class Harness:
         keepalive_s: float = 15.0,
     ) -> list[str]:
         repo = cast("Repo", type("R", (), {"events": self.events})())
-        return list(
-            stream(
-                repo,
-                last_event_id=last_event_id,
-                novel_id=novel_id,
-                poll_s=1.0,
-                keepalive_s=keepalive_s,
-                should_stop=lambda: self.stopped,
-                sleep=self.sleep,
-                monotonic=lambda: self.now,
-            )
-        )
+
+        async def run(function: Any, *args: Any, **kwargs: Any) -> Any:
+            return function(*args, **kwargs)
+
+        async def collect() -> list[str]:
+            return [
+                frame
+                async for frame in stream(
+                    repo,
+                    last_event_id=last_event_id,
+                    novel_id=novel_id,
+                    poll_s=1.0,
+                    keepalive_s=keepalive_s,
+                    should_stop=lambda: self.stopped,
+                    sleep=self.sleep,
+                    monotonic=lambda: self.now,
+                    run=run,
+                )
+            ]
+
+        return asyncio.run(collect())
 
 
 def _parse(frame: str) -> dict[str, str]:
@@ -134,7 +147,7 @@ class TestStream__WithResyncLastEventId:
     def test_stream__non_numeric_id_yields_resync_without_asking_the_log(self) -> None:
         events = FakeEvents()
         events.add(NV1, NV1, {"id": NV1})
-        for bad in ("abc", "", "-1", "1.5", " "):
+        for bad in ("abc", "", "-1", "1.5", " ", "9" * 5000, "1" * 20):
             frames = Harness(events).run(last_event_id=bad)
             assert _parse(frames[0]) == {"id": "1", "event": "resync", "data": "{}"}, bad
         assert events.status_calls == []
@@ -204,3 +217,26 @@ class TestStream__Payloads:
             "novel_id": NV1,
             "title": "Ünï\ncode",
         }
+
+
+class TestStream__WithFullBatches:
+    def test_stream__full_batch_polls_again_without_sleeping_and_keeps_order(self) -> None:
+        events = FakeEvents()
+        for _ in range(501):
+            events.add(NV1, NV1, {"id": NV1})
+        harness = Harness(events)
+        frames = harness.run(last_event_id="0")
+        assert [int(_parse(f)["id"]) for f in frames] == list(range(1, 502))
+        assert len(harness.sleeps) == 1
+
+
+class TestGuarded:
+    def test_guarded__database_error_ends_the_stream_cleanly(self) -> None:
+        async def failing() -> AsyncGenerator[str]:
+            yield "first"
+            raise OperationalError("select", {}, Exception("gone"))
+
+        async def collect() -> list[str]:
+            return [frame async for frame in _guarded(failing())]
+
+        assert asyncio.run(collect()) == ["first"]
