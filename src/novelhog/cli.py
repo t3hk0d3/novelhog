@@ -62,6 +62,7 @@ def _db_migrate(settings: Settings) -> int:
     try:
         head = repo.migrate()
     except Exception as error:  # noqa: BLE001 - surface any Alembic or driver failure and exit 1
+        log.get().exception("migration_failed")
         print(f"migration failed: {type(error).__name__}: {error}", file=sys.stderr)
         return EXIT_FAILURE
     finally:
@@ -190,6 +191,7 @@ def _parser() -> argparse.ArgumentParser:
     api.add_argument("--migrate", action="store_true", help="migrate first (development only)")
     api.add_argument("--port", type=int, default=API_PORT, help=argparse.SUPPRESS)
     web = commands.add_parser("web", help="serve the API and Caddy")
+    # Test-only seam: Caddy's upstream stays on 8000, so this is not a deployment setting.
     web.add_argument("--api-port", type=int, default=API_PORT, help=argparse.SUPPRESS)
     commands.add_parser("worker", help="run the worker")
     return parser

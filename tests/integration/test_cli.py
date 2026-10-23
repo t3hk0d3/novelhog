@@ -1,11 +1,13 @@
 """The `novelhog` command, run as real subprocesses against a temporary SQLite database."""
 
 import os
+import queue
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -64,7 +66,8 @@ def _run(args: list[str], env: dict[str, str]) -> tuple[int, str]:
             output, _ = process.communicate(timeout=TIMEOUT_S)
         except subprocess.TimeoutExpired:
             process.kill()
-            raise
+            output, _ = process.communicate()
+            pytest.fail(f"{args} did not exit within {TIMEOUT_S}s; output:\n{output}")
         return process.returncode, output
 
 
@@ -75,6 +78,41 @@ def _wait_for(check: Callable[[], bool], seconds: float = 30) -> bool:
             return True
         time.sleep(0.1)
     return False
+
+
+def _serving(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310
+            return bool(response.status == 200)
+    except urllib.error.URLError, OSError:
+        return False
+
+
+def _wait_for_output(process: subprocess.Popen[str], needle: str, seconds: float = 30) -> None:
+    """Read the process's output until a line contains `needle`; kill and fail at the deadline."""
+    stream = process.stdout
+    assert stream is not None
+    lines: queue.Queue[str] = queue.Queue()
+
+    def pump() -> None:
+        for line in stream:
+            lines.put(line)
+
+    threading.Thread(target=pump, daemon=True).start()
+    seen: list[str] = []
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            line = lines.get(timeout=min(remaining, 0.5))
+        except queue.Empty:
+            if process.poll() is not None and lines.empty():
+                break
+            continue
+        seen.append(line)
+        if needle in line:
+            return
+    process.kill()
+    pytest.fail(f"no {needle!r} in output within {seconds}s; captured:\n{''.join(seen)}")
 
 
 def _migrated(env: dict[str, str]) -> None:
@@ -126,15 +164,8 @@ class TestApi:
         port = _free_port()
         url = f"http://127.0.0.1:{port}/api/v1/settings"
 
-        def serving() -> bool:
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310
-                    return bool(response.status == 200)
-            except urllib.error.URLError, OSError:
-                return False
-
         with _running(["api", "--migrate", "--port", str(port)], env) as process:
-            assert _wait_for(serving)
+            assert _wait_for(lambda: _serving(url))
             process.send_signal(signal.SIGTERM)
             # uvicorn re-raises the signal it handled, so the status is 0 or -SIGTERM.
             assert process.wait(timeout=TIMEOUT_S) in (0, -signal.SIGTERM)
@@ -153,9 +184,7 @@ class TestWorker:
     def test_exits_0_within_2s_of_sigterm_while_idle(self, env: dict[str, str]) -> None:
         _migrated(env)
         with _running(["worker"], env) as process:
-            assert process.stdout is not None
-            lines = iter(process.stdout.readline, "")
-            assert any("worker_started" in line for line in lines)
+            _wait_for_output(process, "worker_started")
             process.send_signal(signal.SIGTERM)
             start = time.monotonic()
             code = process.wait(timeout=TIMEOUT_S)
@@ -205,22 +234,15 @@ class TestWeb:
         port = _free_port()
         url = f"http://127.0.0.1:{port}/api/v1/settings"
 
-        def serving() -> bool:
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310
-                    return bool(response.status == 200)
-            except urllib.error.URLError, OSError:
-                return False
-
         with _running(["web", "--api-port", str(port)], env) as process:
-            assert _wait_for(serving)
+            assert _wait_for(lambda: _serving(url))
             assert _wait_for(marker.exists)
             process.send_signal(signal.SIGTERM)
             assert process.wait(timeout=TIMEOUT_S) == 0
 
         caddy_pid = int(pid_file.read_text())
         assert not _wait_for(lambda: _alive(caddy_pid), seconds=0.5)
-        assert not serving()
+        assert not _serving(url)
 
 
 def _alive(pid: int) -> bool:
