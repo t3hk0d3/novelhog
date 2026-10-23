@@ -10,13 +10,14 @@ import pytest
 
 from novelhog import log
 from novelhog.config import Settings
+from novelhog.notifications import dispatcher
 from novelhog.notifications.channels import Delivered
 from novelhog.repo import Repo, SchemaOutdated, db
 from novelhog.repo import events as event_log
 from novelhog.scraper_adapter.errors import InfrastructureError
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
-from novelhog.worker.loop import Worker
+from novelhog.worker.loop import DISPATCH_BUDGET_S, Worker
 from tests.conftest import FakeClock
 from tests.integration.worker.conftest import (
     HOST,
@@ -300,3 +301,123 @@ class TestStep__Notifications:
         worker.step()
 
         assert calls == ["dispatch", "refresh"]
+
+
+FULL = dispatcher.DispatchReport(claimed=True, events=dispatcher.BATCH, advanced=True)
+PARTIAL = dispatcher.DispatchReport(claimed=True, events=3, advanced=True)
+
+
+class _Reports:
+    """Stands in for `dispatcher.dispatch`: returns `reports` in turn, then empty ones."""
+
+    def __init__(self, *reports: dispatcher.DispatchReport) -> None:
+        self.reports = list(reports)
+        self.calls = 0
+
+    def __call__(self, *_args: object, **_kwargs: object) -> dispatcher.DispatchReport:
+        self.calls += 1
+        return self.reports.pop(0) if self.reports else dispatcher.DispatchReport(claimed=True)
+
+
+class _Ticks:
+    """A monotonic clock that moves `step` seconds every time it is read."""
+
+    def __init__(self, step: float) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def idle_worker(
+    repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings, tmp_path: Path,
+    stop: threading.Event, monotonic: _Ticks,
+) -> Worker:  # fmt: skip
+    """A worker with no novel work, so a step only dispatches."""
+    storage = LocalStaticStorage(tmp_path / "static", "/static")
+    return Worker(repo, adapter, fetcher, storage, {}, settings, stop=stop, monotonic=monotonic)
+
+
+class TestStep__Notifications__WhileFullBatchesComeBack:
+    def test_step__keeps_dispatching_until_a_partial_batch(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        reports = _Reports(FULL, FULL, PARTIAL)
+        monkeypatch.setattr(dispatcher, "dispatch", reports)
+        worker = idle_worker(
+            repo, adapter, fetcher, settings, tmp_path, RecordingStop(), _Ticks(0.1)
+        )
+
+        assert worker.step() == "idle"
+        assert reports.calls == 3
+
+    def test_step__stops_dispatching_when_the_time_budget_is_spent(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        reports = _Reports(*[FULL] * 10)
+        monkeypatch.setattr(dispatcher, "dispatch", reports)
+        ticks = _Ticks(DISPATCH_BUDGET_S / 4)
+        worker = idle_worker(repo, adapter, fetcher, settings, tmp_path, RecordingStop(), ticks)
+
+        worker.step()
+
+        assert reports.calls == 4
+
+    def test_step__stops_dispatching_when_a_stop_is_requested(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        reports = _Reports(*[FULL] * 10)
+        monkeypatch.setattr(dispatcher, "dispatch", reports)
+        stop = RecordingStop()
+        stop.set()
+        worker = idle_worker(repo, adapter, fetcher, settings, tmp_path, stop, _Ticks(0.1))
+
+        worker.step()
+
+        assert reports.calls == 1
+
+    def test_step__stops_dispatching_when_the_claim_is_lost(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        lost = dispatcher.DispatchReport(claimed=True, events=dispatcher.BATCH, lost=True)
+        reports = _Reports(lost, FULL)
+        monkeypatch.setattr(dispatcher, "dispatch", reports)
+        worker = idle_worker(
+            repo, adapter, fetcher, settings, tmp_path, RecordingStop(), _Ticks(0.1)
+        )
+
+        assert worker.step() == "idle"
+        assert reports.calls == 1
+
+
+class TestStep__Notifications__WhenTheNotifierIsBehind:
+    def test_step__returns_notify_instead_of_idle(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        monkeypatch.setattr(dispatcher, "dispatch", _Reports(*[FULL] * 10))
+        ticks = _Ticks(DISPATCH_BUDGET_S)
+        worker = idle_worker(repo, adapter, fetcher, settings, tmp_path, RecordingStop(), ticks)
+
+        assert worker.step() == "notify"
+
+    def test_run__does_not_idle_sleep(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        reports = _Reports(FULL, FULL)
+        monkeypatch.setattr(dispatcher, "dispatch", reports)
+        stop = RecordingStop(stop_after_waits=1)
+        ticks = _Ticks(DISPATCH_BUDGET_S)
+        worker = idle_worker(repo, adapter, fetcher, settings, tmp_path, stop, ticks)
+
+        worker.run()
+
+        assert reports.calls == 3
+        assert stop.waits == [IDLE]

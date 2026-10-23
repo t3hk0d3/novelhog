@@ -4,16 +4,19 @@
 when it did work:
 
 1. recover expired claims (always),
-2. `_dispatch_notifications` (always runs, never returns early; a failure is logged),
+2. `_dispatch_notifications` (always runs, never returns early; a failure is logged; keeps
+   dispatching while full batches come back, for up to `DISPATCH_BUDGET_S`),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
 4. refresh a due novel,
 5. `_build_export` (claim and build a ready export),
 6. download a batch of pending chapters,
-7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle".
+7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
+   when the notifier is still behind (so the loop does not sleep).
 """
 
 import random
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Literal, Protocol
@@ -30,8 +33,9 @@ from novelhog.worker.reachability import Reachability
 from novelhog.worker.refresh import TocAdapter
 
 MAINTENANCE_INTERVAL = timedelta(hours=1)
+DISPATCH_BUDGET_S = 2.0
 
-StepResult = Literal["refresh", "build", "download", "idle"]
+StepResult = Literal["refresh", "build", "download", "notify", "idle"]
 
 
 class WorkerAdapter(TocAdapter, ChapterAdapter, Protocol):
@@ -53,6 +57,7 @@ class Worker:
         *,
         stop: threading.Event | None = None,
         clock: Callable[[], datetime] = utcnow,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._repo = repo
         self._adapter = adapter
@@ -62,6 +67,7 @@ class Worker:
         self._settings = settings
         self._stop = stop if stop is not None else threading.Event()
         self._clock = clock
+        self._monotonic = monotonic
         self._last_maintenance: datetime | None = None
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
@@ -100,7 +106,7 @@ class Worker:
     def step(self) -> StepResult:
         """Do one unit of work and name it."""
         self._repo.work.recover()
-        self._dispatch_notifications()
+        behind = self._dispatch_notifications()
         self._empty_trash()
         if self._refresh_due():
             return "refresh"
@@ -109,25 +115,35 @@ class Worker:
         if self._download_batch():
             return "download"
         self._maintain()
-        return "idle"
+        return "notify" if behind else "idle"
 
-    def _dispatch_notifications(self) -> None:
-        """Deliver the event log to the channels; a failure is logged and never stops the step."""
+    def _dispatch_notifications(self) -> bool:
+        """Deliver the event log to the channels; True when the notifier is still behind.
+
+        Dispatches batch after batch while full batches come back, until `DISPATCH_BUDGET_S` has
+        passed or a stop is requested. A failure is logged and never stops the step.
+        """
         settings = self._settings
+        deadline = self._monotonic() + DISPATCH_BUDGET_S
         try:
-            dispatcher.dispatch(
-                self._repo,
-                self._channels,
-                owner=settings.worker_id,
-                ttl=settings.claim_ttl,
-                public_url=settings.public_url or "",
-            )
+            while True:
+                report = dispatcher.dispatch(
+                    self._repo,
+                    self._channels,
+                    owner=settings.worker_id,
+                    ttl=settings.claim_ttl,
+                    public_url=settings.public_url or "",
+                )
+                behind = report.advanced and report.events >= dispatcher.BATCH
+                if not behind or self._stop.is_set() or self._monotonic() >= deadline:
+                    return behind
         except Exception as error:  # noqa: BLE001 - notifications must not block novel work
             log.get(worker_id=settings.worker_id).error(
                 "notification_dispatch_failed",
                 error=f"{type(error).__name__}: {error}",
                 exc_info=True,
             )
+            return False
 
     def _empty_trash(self) -> None:
         """Delete trashed static files; a failure is logged and never stops the step."""

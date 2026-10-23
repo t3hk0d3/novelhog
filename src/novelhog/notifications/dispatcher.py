@@ -16,6 +16,7 @@ from novelhog.worker.runtime import Heartbeat
 Registry = Mapping[str, NotificationChannel] | Callable[[], Mapping[str, NotificationChannel]]
 
 CONSUMER = "notifier"
+BATCH = 100
 _HEARTBEAT_DIVISOR = 3
 
 
@@ -47,7 +48,7 @@ def dispatch(
     owner: str,
     ttl: int,
     public_url: str,
-    batch: int = 100,
+    batch: int = BATCH,
 ) -> DispatchReport:
     """Deliver the notifications of the next `batch` events, then advance the cursor.
 
