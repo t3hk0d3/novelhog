@@ -139,6 +139,8 @@ def refresh(  # noqa: PLR0913
     report = repo.novels.finish_sync(claim.novel_id, worker_id, outcome)
     if report is None:
         logger.warning("refresh_claim_lost", initial=claim.initial)
+        if isinstance(outcome, SyncSucceeded) and outcome.cover_key is not None:
+            repo.trash.discard([outcome.cover_key])  # stored for a sync that changed nothing
     else:
         if report.diff.removed:
             logger.warning("toc_chapters_removed", chapter_ids=report.diff.removed)

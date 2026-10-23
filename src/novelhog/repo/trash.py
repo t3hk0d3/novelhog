@@ -2,12 +2,12 @@
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import Connection, delete, select
+from sqlalchemy import Connection, delete, select, union
 
 from novelhog.domain.exports import ExportState, novel_id_of_export_key
 from novelhog.repo import db
 from novelhog.repo.context import RepoContext
-from novelhog.repo.schema import exports, storage_trash
+from novelhog.repo.schema import exports, novels, storage_trash
 from novelhog.repo.sql import dialect_insert
 
 TRASH_GRACE_S = 3600
@@ -30,11 +30,14 @@ def add(conn: Connection, keys: list[str], now: datetime) -> None:
 
 
 def _referenced(conn: Connection, keys: list[str]) -> set[str]:
-    """The keys among `keys` that a `ready` export references."""
+    """The keys among `keys` that a `ready` export or a novel's cover references."""
     return set(
         conn.execute(
-            select(exports.c.storage_key).where(
-                exports.c.storage_key.in_(keys), exports.c.state == ExportState.READY.value
+            union(
+                select(exports.c.storage_key).where(
+                    exports.c.storage_key.in_(keys), exports.c.state == ExportState.READY.value
+                ),
+                select(novels.c.cover_key).where(novels.c.cover_key.in_(keys)),
             )
         ).scalars()
     )
@@ -50,8 +53,9 @@ class Trash:
     def discard(self, keys: list[str]) -> None:
         """Trash the keys in their own transaction (a file uploaded but never published).
 
-        Keys that a `ready` export references are skipped: export keys are deterministic, so a
-        build that lost its claim may have written the very file the new owner published. To
+        Keys that a `ready` export or a novel's cover references are skipped: export and cover
+        keys are deterministic, so a build or sync that lost its claim may have written the very
+        file the new owner published. To
         serialise with that owner's `finish`, the transaction first takes the lock of the novel
         named in each export key (`exports/<novel_id>/...`, the same lock `finish` takes). A key
         of another shape is trashed without that lock; so is one of a deleted novel, which no
@@ -72,8 +76,8 @@ class Trash:
     def take(self, limit: int = 100) -> list[str]:
         """Return up to `limit` keys trashed at least `TRASH_GRACE_S` ago, oldest first.
 
-        They stay until `remove`. Never returns a key a `ready` export still references; such
-        trash rows are deleted.
+        They stay until `remove`. Never returns a key a `ready` export or a novel's cover still
+        references; such trash rows are deleted.
         """
         with db.write(self._engine) as conn:
             rows = list(

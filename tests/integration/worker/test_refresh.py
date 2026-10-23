@@ -22,6 +22,7 @@ from novelhog.storage import LocalStaticStorage
 from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.refresh import publish_hosts, refresh
 from tests.conftest import FakeClock
+from tests.integration.helpers import trash_keys
 
 HOST = "example.com"
 URL = "https://example.com/novel"
@@ -566,6 +567,30 @@ class TestRefresh__OnLostClaim:
         assert any(e["event"] == "refresh_claim_lost" for e in logs)
         assert run.chapters(novel_id) == []
         assert run.novel(novel_id).last_refreshed_at is None
+
+    def test_refresh__trashes_the_cover_it_stored(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        run.adapter.hook = lambda: clock.advance(seconds=run.settings.claim_ttl + 1)
+
+        run.run()
+
+        assert run.novel(novel_id).cover_key is None
+        [key] = trash_keys(repo.engine)
+        assert key.startswith(f"covers/{novel_id}/")
+        assert run.files.get(key) == PNG
+
+
+class TestRefresh__OnNovelDeletedDuringTheSync:
+    def test_refresh__trashes_the_cover_it_stored(
+        self, repo: Repo, novel_id: str, run: Harness
+    ) -> None:
+        run.adapter.hook = lambda: repo.novels.delete(novel_id)
+
+        run.run()
+
+        [key] = trash_keys(repo.engine)
+        assert key.startswith(f"covers/{novel_id}/")
 
 
 class TestRefresh__Heartbeat:

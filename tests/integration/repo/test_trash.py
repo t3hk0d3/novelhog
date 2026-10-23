@@ -7,10 +7,16 @@ from sqlalchemy import delete, select, update
 
 from novelhog.repo import Repo, db, trash
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import exports, storage_trash
+from novelhog.repo.schema import exports, novels, storage_trash
 from novelhog.repo.trash import TRASH_GRACE_S
 from tests.conftest import FakeClock
-from tests.integration.helpers import NOVEL_ID, NOW, insert_export, trash_keys
+from tests.integration.helpers import (
+    NOVEL_ID,
+    NOW,
+    insert_export,
+    insert_novel_with_chapter,
+    trash_keys,
+)
 
 LATER = timedelta(days=1)
 
@@ -86,6 +92,15 @@ class TestDiscard__ReferencedKeys:
 
         assert trash_keys(repo.engine) == ["other"]
 
+    def test_discard__skips_a_key_a_novel_cover_references(self, repo: Repo) -> None:
+        with db.write(repo.engine) as conn:
+            insert_novel_with_chapter(conn)
+            conn.execute(update(novels).values(cover_key="covers/a.png"))
+
+        repo.trash.discard(["covers/a.png", "other"])
+
+        assert trash_keys(repo.engine) == ["other"]
+
 
 class TestTake__ReferencedKeys:
     def test_take__skips_and_cleans_up_a_key_a_ready_export_references(
@@ -100,6 +115,18 @@ class TestTake__ReferencedKeys:
         with db.read(repo.engine) as conn:
             remaining = conn.execute(select(storage_trash.c.key)).scalars().all()
         assert sorted(remaining) == ["other"]
+
+    def test_take__skips_and_cleans_up_a_key_a_novel_cover_references(
+        self, repo: Repo, clock: FakeClock
+    ) -> None:
+        put(repo, ["covers/a.png", "other"])
+        with db.write(repo.engine) as conn:
+            insert_novel_with_chapter(conn)
+            conn.execute(update(novels).values(cover_key="covers/a.png"))
+
+        clock.advance(seconds=TRASH_GRACE_S)
+        assert repo.trash.take() == ["other"]
+        assert trash_keys(repo.engine) == ["other"]
 
 
 class TestDiscard__RacingFinish:
