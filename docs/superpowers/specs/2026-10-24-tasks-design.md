@@ -204,7 +204,7 @@ are their own transaction.
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
 | `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks and the total count (API, §7): newest `created_at` first; with `changed_since`, every live task plus tasks with `updated_at >= changed_since`, newest `updated_at` first, unpaged. |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks and the total count (API, §7), ordered `run_after ASC, priority DESC, ordinal ASC, id ASC`; with `changed_since`, every live task plus tasks with `updated_at >= changed_since`, unpaged. |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -363,8 +363,12 @@ GET /api/v1/tasks/{task_id}
 ```
 
 - `GET /tasks?novel_id=&entity_id=&kind=&state=&since=&offset=0&limit=50` →
-  `{items: Task[], total: int, next_since: timestamp}`, newest `created_at`
-  first (ties by `id`).
+  `{items: Task[], total: int, next_since: timestamp}`, ordered by
+  `run_after` (earliest first), then `priority` (highest first), then
+  `ordinal`, then `id`. The same order applies with `since`. Within one
+  `run_after` this is the claim order (§4); across different `run_after`
+  values it is not, because the worker takes a due higher-priority task before
+  an older lower-priority one.
   Every filter is optional and combines with AND. `state` may repeat
   (`state=queued&state=running` = live tasks). `limit` is at most 500.
 - `since=<timestamp>` (RFC 3339) returns every live task plus every task with
@@ -382,8 +386,7 @@ GET /api/v1/tasks/{task_id}
       network work and last milliseconds). The client merges results by `id`,
       so the repeated rows are harmless.
     - **Unpaged.** A `since` response holds every match: `offset` and `limit`
-      with `since` → `422 validation_error`; `total = len(items)`; newest
-      `updated_at` first. Pagination can be added later if responses grow
+      with `since` → `422 validation_error`; `total = len(items)`. Pagination can be added later if responses grow
       too big.
     - **Vanished tasks.** Because the response is complete, a live task the
       client holds that is not in it no longer exists (its novel was deleted):
@@ -537,7 +540,7 @@ TaskQueue
         - deletes finished tasks older than TASK_RETENTION, keeps live and recent ones
 GET /api/v1/tasks
     Without filters
-        - returns {items, total, next_since}, newest created_at first
+        - returns {items, total, next_since} ordered by run_after ASC, priority DESC, ordinal ASC, id ASC
         - next_since is the database clock at query time
     With novel_id, entity_id, kind and state filters
         - returns only matching tasks; repeated state means any of them
@@ -551,7 +554,7 @@ GET /api/v1/tasks
         - a since in the future returns only live tasks
         - also returns a task with updated_at up to TASK_SINCE_OVERLAP before since
         - a change committed after a poll is returned by the next poll that sends its next_since
-        - returns every match unpaged, newest updated_at first, total = len(items)
+        - returns every match unpaged in the same order, total = len(items)
         - a live task of a deleted novel is absent from the next response
     With a malformed filter value, a since that is not RFC 3339, offset or limit with since, or limit above 500
         - 422 validation_error
