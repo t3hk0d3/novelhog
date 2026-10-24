@@ -56,7 +56,7 @@ This spec moves all background work onto one `tasks` table:
 | Term | Meaning |
 |---|---|
 | **Task** | One unit of background work for one record (`entity_id`): sync a novel, download a chapter, build an export. |
-| **Kind** | What the task does: `refresh`, `download` or `build`. Each kind accepts one ID prefix (§3). |
+| **Kind** | What the task does, named `<entity>_<action>`: `novel_refresh`, `chapter_download` or `export_build`. Each kind accepts one ID prefix (§3); its processor is `<Entity><Action>Processor`. |
 | **Processor** | The class that runs tasks of one kind. It checks whether the task is still needed, does the work and writes the result (§5). |
 | **Live task** | A task in `queued` or `running`. |
 | **Entity state** | The record's own state that users see (chapter `pending`, export `waiting`, …). It stays on the record and keeps its v1 meaning. The task holds only the execution state. |
@@ -65,12 +65,12 @@ How the two kinds of state relate:
 
 | Entity state (v1 name) | Task that must exist |
 |---|---|
-| chapter `pending` | a `queued` `download` task for the chapter |
-| chapter `downloading` | a `running` `download` task for the chapter |
-| export `waiting` and buildable (v1 §6.5) | a `queued` `build` task for the export |
-| export `building` | a `running` `build` task for the export |
-| novel `syncing` (derived) | a `running` `refresh` task for the novel |
-| every novel | exactly one live `refresh` task chain: always one `queued`, plus at most one `running` |
+| chapter `pending` | a `queued` `chapter_download` task for the chapter |
+| chapter `downloading` | a `running` `chapter_download` task for the chapter |
+| export `waiting` and buildable (v1 §6.5) | a `queued` `export_build` task for the export |
+| export `building` | a `running` `export_build` task for the export |
+| novel `syncing` (derived) | a `running` `novel_refresh` task for the novel |
+| every novel | exactly one live `novel_refresh` task chain: always one `queued`, plus at most one `running` |
 
 The database cannot enforce these pairs across tables. They are kept by two
 rules:
@@ -88,7 +88,7 @@ rules:
 ```sql
 CREATE TABLE tasks (
     id            TEXT PRIMARY KEY,                -- 'TK' + 12 chars (v1 §3)
-    kind          TEXT NOT NULL,                   -- 'refresh' | 'download' | 'build'
+    kind          TEXT NOT NULL,                   -- 'novel_refresh' | 'chapter_download' | 'export_build'
     entity_id     TEXT NOT NULL,                   -- NV… / CH… / EX…
     novel_id      TEXT NOT NULL REFERENCES novels(id),
     state         TEXT NOT NULL DEFAULT 'queued',
@@ -107,7 +107,7 @@ CREATE TABLE tasks (
     duration_ms   INTEGER,                         -- finished_at − started_at of the last run
     CHECK (state IN ('queued', 'running', 'done', 'failed', 'skipped', 'cancelled')),
     CHECK ((kind, substr(entity_id, 1, 2)) IN
-           (('refresh', 'NV'), ('download', 'CH'), ('build', 'EX'))),
+           (('novel_refresh', 'NV'), ('chapter_download', 'CH'), ('export_build', 'EX'))),
     CHECK (state <> 'running' OR (claimed_by IS NOT NULL AND started_at IS NOT NULL)),
     CHECK (claimed_by IS NULL OR state IN ('queued', 'running')),  -- queued + claim = claimed, not started
     CHECK ((state IN ('done', 'failed', 'skipped', 'cancelled')) = (finished_at IS NOT NULL)),
@@ -164,10 +164,10 @@ v1's order (v1 §6.1: refreshes, then builds, then downloads):
 
 | Kind | Priority | `ordinal` | `run_after` on enqueue |
 |---|---|---|---|
-| `refresh` | 300 | 0 | the next refresh time (v1 §6.2), or now for a manual sync |
-| `build` | 200 | 0 | now |
-| `download`, auto-queued release (v1 `priority = 1`) | 110 | chapter position | now |
-| `download`, user-queued | 100 | chapter position | now |
+| `novel_refresh` | 300 | 0 | the next refresh time (v1 §6.2), or now for a manual sync |
+| `export_build` | 200 | 0 | now |
+| `chapter_download`, auto-queued release (v1 `priority = 1`) | 110 | chapter position | now |
+| `chapter_download`, user-queued | 100 | chapter position | now |
 
 `ordinal` is copied from the chapter position when the task is enqueued. A later
 sync that moves positions does not update it; order is a hint, not a contract.
@@ -235,9 +235,9 @@ class TaskProcessor(Protocol):
 
 | Processor | `begin`: still needed when … / entity change on start | `complete` |
 |---|---|---|
-| `RefreshProcessor` | the novel exists / none (`syncing` turns on because the task is running) | v1 §6.2 `finish_sync` unchanged, plus: `Done` or `Failed` enqueue the successor refresh task with `run_after` = v1's `next_refresh_at`. A queued manual-sync task already exists → merge (`min`), so v1's "now if `sync_requested`" still holds. `Retry` keeps v1's infrastructure rule: `run_after = now + REFRESH_MIN_INTERVAL`, interval unchanged. |
-| `DownloadProcessor` | the chapter is `pending` and has a position / `pending` → `downloading` | v1 §6.4 `complete` and `fail` unchanged. `Retry` (infrastructure error, or site unreachable below the threshold): `downloading` → `pending`, `run_after` kept. After `Done`/`Failed`: enqueue builds that are now ready (§5.1). |
-| `BuildProcessor` | the export is `waiting` and buildable (v1 §6.5) / `waiting` → `building` | v1 §6.5 `finish` and `fail` unchanged. `Retry`: `building` → `waiting`, `run_after` kept. |
+| `NovelRefreshProcessor` | the novel exists / none (`syncing` turns on because the task is running) | v1 §6.2 `finish_sync` unchanged, plus: `Done` or `Failed` enqueue the successor refresh task with `run_after` = v1's `next_refresh_at`. A queued manual-sync task already exists → merge (`min`), so v1's "now if `sync_requested`" still holds. `Retry` keeps v1's infrastructure rule: `run_after = now + REFRESH_MIN_INTERVAL`, interval unchanged. |
+| `ChapterDownloadProcessor` | the chapter is `pending` and has a position / `pending` → `downloading` | v1 §6.4 `complete` and `fail` unchanged. `Retry` (infrastructure error, or site unreachable below the threshold): `downloading` → `pending`, `run_after` kept. After `Done`/`Failed`: enqueue builds that are now ready (§5.1). |
+| `ExportBuildProcessor` | the export is `waiting` and buildable (v1 §6.5) / `waiting` → `building` | v1 §6.5 `finish` and `fail` unchanged. `Retry`: `building` → `waiting`, `run_after` kept. |
 
 ### 5.1 When a build task is enqueued
 
@@ -294,7 +294,7 @@ run_task(task):
         processor.complete(task, outcome)        # nothing written if the fence failed
     log task_finished
     if outcome is Retry: raise to the loop's backoff (v1 §6.1, unchanged)
-    if task.kind == download: stop.wait(request delay for the host)   # v1 §6.3 politeness
+    if task.kind == chapter_download: stop.wait(request delay for the host)   # v1 §6.3 politeness
 ```
 
 - The runner claims one task at a time, so an urgent refresh never waits behind
@@ -394,7 +394,7 @@ columns from the live tasks (`next_refresh_at`, `sync_requested`, `queued_at`,
 | `repo/work.py` | loses `claim_batch` and chapter/novel/export recovery; keeps consumer recovery |
 | `repo/chapters.py`, `novels.py`, `exports.py` | entity transitions call `TaskQueue` in the same transaction; derived fields via join |
 | `domain/payloads.py` | `TaskPayload`; `NovelPayload`/`ChapterPayload` read derived fields |
-| `worker/tasks/{base,refresh,download,build}.py` | new: protocol and the three processors; they take over the bodies of `worker/refresh.py`, `downloads.py`, `builds.py` |
+| `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py` | new: protocol and the three processors; they take over the bodies of `worker/refresh.py`, `downloads.py`, `builds.py` |
 | `worker/runner.py` | new: `run_task`, processor registry |
 | `worker/loop.py` | stages 4–6 replaced by the runner (§6) |
 | `worker/maintenance.py` | retention and repair (§8) |
@@ -471,7 +471,7 @@ Runner.run_task
         - a claimed, unstarted task is released; a running task finishes
     After a download task
         - waits the host's request delay
-RefreshProcessor
+NovelRefreshProcessor
     - "still needed" = the novel exists
     On Done or Failed
         - applies v1 finish_sync and enqueues the successor at v1's next_refresh_at
@@ -481,7 +481,7 @@ RefreshProcessor
         - successor at now + REFRESH_MIN_INTERVAL, interval unchanged
     NV payload
         - syncing is true while the task runs; next_refresh_at is the queued task's run_after
-DownloadProcessor
+ChapterDownloadProcessor
     - "still needed" = the chapter is pending and positioned; start turns it downloading
     When the chapter was dequeued after claim
         - task skipped (or not startable, because cancel already cancelled it)
@@ -491,7 +491,7 @@ DownloadProcessor
         - chapter back to pending, run_after kept (keeps its place in line)
     Site unreachable
         - below SITE_UNREACHABLE_RETRIES → Retry; at the threshold → Failed "Site unreachable: <message>"
-BuildProcessor
+ExportBuildProcessor
     - "still needed" = the export is waiting and buildable; start turns it building
     On Done / Failed
         - v1 finish / fail
