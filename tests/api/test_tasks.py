@@ -322,6 +322,9 @@ class TestListTasks__WithInvalidQuery:
             {"state": "bogus"},
             {"since": "x"},
             {"since": -1},
+            {"since": 2**63},
+            {"offset": 2**63},
+            {"offset": 2**70},
             {"since": 1, "offset": 0},
             {"since": 1, "limit": 10},
             {"offset": -1},
@@ -381,3 +384,11 @@ class TestGetTask:
         _finish(repo, task, TaskState.DONE)
         assert repo.tasks._queue.prune(repo.clock() + timedelta(days=1)) == 1  # noqa: SLF001
         _assert_error(client.get(f"/api/v1/tasks/{task.id}"), 404, "not_found")
+
+
+class TestListTasks__WithLargestIntegers:
+    @pytest.mark.parametrize("name", ["since", "offset"])
+    def test_list_tasks__the_signed_64_bit_maximum_is_accepted(
+        self, client: TestClient, name: str
+    ) -> None:
+        assert client.get("/api/v1/tasks", params={name: 2**63 - 1}).status_code == 200
