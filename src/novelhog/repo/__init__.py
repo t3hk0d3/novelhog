@@ -15,6 +15,7 @@ from novelhog.repo.hosts import Hosts
 from novelhog.repo.novels import Novels
 from novelhog.repo.settings import Settings
 from novelhog.repo.subscriptions import Subscriptions
+from novelhog.repo.tasks import Tasks
 from novelhog.repo.trash import Trash
 from novelhog.repo.types import utcnow
 from novelhog.repo.work import Work
@@ -51,6 +52,7 @@ class Repo:
         self.novels = Novels(self.context)
         self.settings = Settings(self.context)
         self.subscriptions = Subscriptions(self.context)
+        self.tasks = Tasks(self.context)
         self.trash = Trash(self.context)
         self.work = Work(self.context)
 

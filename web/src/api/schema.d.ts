@@ -244,6 +244,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tasks
+         * @description Return tasks in claim order; with `since`, every live task and every change since then.
+         */
+        get: operations["list_tasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Task
+         * @description Return one task; 404 for an unknown, malformed or pruned ID.
+         */
+        get: operations["get_task"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/webpush/subscriptions": {
         parameters: {
             query?: never;
@@ -575,6 +615,62 @@ export interface components {
             /** Label */
             label: string | null;
         };
+        /**
+         * Task
+         * @description The `Task` object (tasks spec section 7); timestamps are RFC 3339 strings.
+         */
+        Task: {
+            /** Attempts */
+            attempts: number;
+            /** Change Seq */
+            change_seq: number;
+            /** Created At */
+            created_at: string;
+            /** Duration Ms */
+            duration_ms: number | null;
+            /** Entity Id */
+            entity_id: string;
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: string;
+            kind: components["schemas"]["TaskKind"];
+            /** Novel Id */
+            novel_id: string;
+            /** Run After */
+            run_after: string;
+            /** Started At */
+            started_at: string | null;
+            state: components["schemas"]["TaskState"];
+            /** Updated At */
+            updated_at: string;
+        };
+        /**
+         * TaskKind
+         * @description What a task does; each kind accepts one entity ID prefix.
+         * @enum {string}
+         */
+        TaskKind: "novel_refresh" | "chapter_download" | "export_build";
+        /**
+         * TaskList
+         * @description `GET /api/v1/tasks`: tasks in claim order, the match count and the cursor to poll from.
+         */
+        TaskList: {
+            /** Items */
+            items: components["schemas"]["Task"][];
+            /** Next Since */
+            next_since: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * TaskState
+         * @description Execution state of a task.
+         * @enum {string}
+         */
+        TaskState: "queued" | "running" | "done" | "failed" | "skipped" | "cancelled";
         /**
          * WebpushChannelOut
          * @description Web Push availability and the public VAPID key.
@@ -1201,6 +1297,83 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_tasks: {
+        parameters: {
+            query?: {
+                novel_id?: string | null;
+                entity_id?: string | null;
+                kind?: components["schemas"]["TaskKind"][] | null;
+                state?: components["schemas"]["TaskState"][] | null;
+                since?: number | null;
+                offset?: number | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskList"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Task"];
+                };
             };
             /** @description Not Found */
             404: {

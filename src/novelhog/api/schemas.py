@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from novelhog.domain import webpush
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.exports import ExportState
+from novelhog.domain.tasks import TaskKind, TaskState
 
 
 class ErrorDetail(BaseModel):
@@ -249,3 +250,30 @@ class WebpushSubscriptionCreate(BaseModel):
 
     endpoint: str
     keys: WebpushKeys
+
+
+class Task(BaseModel):
+    """The `Task` object (tasks spec section 7); timestamps are RFC 3339 strings."""
+
+    id: str
+    kind: TaskKind
+    entity_id: str
+    novel_id: str
+    state: TaskState
+    attempts: int
+    error: str | None
+    run_after: str
+    change_seq: int
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    finished_at: str | None
+    duration_ms: int | None
+
+
+class TaskList(BaseModel):
+    """`GET /api/v1/tasks`: tasks in claim order, the match count and the cursor to poll from."""
+
+    items: list[Task]
+    total: int
+    next_since: int
