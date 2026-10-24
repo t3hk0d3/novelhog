@@ -194,7 +194,7 @@ are their own transaction.
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
 | `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), finished_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -351,12 +351,19 @@ GET /api/v1/tasks
 GET /api/v1/tasks/{task_id}
 ```
 
-- `GET /tasks?novel_id=&entity_id=&kind=&state=&offset=0&limit=50` →
+- `GET /tasks?novel_id=&entity_id=&kind=&state=&since=&offset=0&limit=50` →
   `{items: Task[], total: int}`, newest `created_at` first (ties by `id`).
   Every filter is optional and combines with AND. `state` may repeat
   (`state=queued&state=running` = live tasks). `limit` is at most 500.
+- `since=<timestamp>` (RFC 3339) returns every live task plus the finished
+  tasks with `finished_at >= since`. It drops only finished tasks that finished
+  earlier, so it combines with the other filters: `state=failed&since=…` = tasks
+  that failed since then. A `since` in the future returns only live tasks. A
+  client that polls passes its previous request time and gets what is pending
+  plus what finished in between.
 - A malformed filter value (an ID with the wrong prefix or format, an unknown
-  `kind` or `state`, `limit` out of range) → `422 validation_error`. A well-formed
+  `kind` or `state`, a `since` that is not an RFC 3339 timestamp, `limit` out
+  of range) → `422 validation_error`. A well-formed
   ID that matches nothing → an empty list, not `404`.
 - `GET /tasks/{task_id}` → the Task, or `404 not_found` for an unknown,
   malformed or pruned ID.
@@ -496,7 +503,12 @@ GET /api/v1/tasks
         - returns only matching tasks; repeated state means any of them
     With offset and limit
         - pages the list; total counts all matches
-    With a malformed filter value or limit above 500
+    With since
+        - returns every queued and running task
+        - returns finished tasks with finished_at >= since, not older ones
+        - combined with state, returns only matches of both (state=failed&since=… = failed since then)
+        - a since in the future returns only live tasks
+    With a malformed filter value, a since that is not RFC 3339, or limit above 500
         - 422 validation_error
     With a well-formed ID that matches nothing
         - empty list
