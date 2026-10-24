@@ -654,6 +654,13 @@ API (unchanged contract)
 - Routes that change tasks, and task kinds without a novel.
 - Returning the task from `POST /novels/{id}/sync`, if following it through
   events proves awkward in the UI.
+- **Novel previews** (its own spec, on top of this one): a draft novel
+  (`confirmed = false`) whose first-import task fills the preview. Confirming
+  keeps it without a second scrape; cancelling deletes it; maintenance deletes
+  abandoned drafts. Drafts stay out of the library, get no successor refresh,
+  never auto-queue or notify. Not an entity-less `novel_preview` task: that
+  would need tasks and events without a novel, a result field, separate cover
+  handling, and would scrape the site twice.
 - Pagination for `since` responses, and a counts endpoint for a header
   indicator, if live tasks grow too many to return on every poll.
 - Batch claims for downloads, and per-host queues or concurrency.
