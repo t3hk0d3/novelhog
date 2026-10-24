@@ -666,9 +666,8 @@ API (unchanged contract)
 - Batch claims for downloads, and per-host queues or concurrency.
 - Task dependencies in general. Builds use the enqueue rule in §5.1 instead.
 
-## 13. Open questions
+## 13. Resolved questions
 
-1. Is `TASK_RETENTION = 7 d` right, or should failed tasks be kept longer than
-   successful ones?
-2. Are the `emit_event` defaults in §5.2 right? Should scheduled refreshes emit
-   too?
+1. `TASK_RETENTION = 7 d` is right, for failed and successful tasks alike
+   (user, 2026-10-24).
+2. The `emit_event` defaults in §5.2 stand (user, 2026-10-24).
