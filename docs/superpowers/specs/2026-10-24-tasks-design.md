@@ -439,7 +439,8 @@ mode with foreign keys off). Stop the workers before upgrading.
      buildable → one queued build task.
 3. Drop the columns, checks and indexes listed in §3.
 
-`emit_event` is false for every migrated task. The downgrade restores the
+`emit_event` is false and `created_at` = `updated_at` = the migration time for every
+migrated task. The downgrade restores the
 columns from the live tasks (`next_refresh_at`, `sync_requested`, `queued_at`,
 `priority`), then drops `tasks` and its `TK` events.
 
