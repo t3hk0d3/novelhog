@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { StrictMode, createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Chapter, Export, Novel } from '../api/client';
-import { isDeletedNovel } from '../api/events';
+import { EVENT_NAMES, isDeletedNovel } from '../api/events';
 import { FakeEventSource } from '../test/FakeEventSource';
 import { STALL_MS, useLiveEvents, useLiveReady, useLiveStatus } from './useLiveEvents';
 
@@ -63,6 +63,12 @@ describe('useLiveEvents', () => {
     rerender();
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(source.url).toBe('/api/v1/events');
+  });
+
+  it('does not listen for task events: EVENT_NAMES does not contain task', () => {
+    expect(EVENT_NAMES).not.toContain('task');
+    mount();
+    expect(source.listeners.has('task')).toBe(false);
   });
 
   it('closes the EventSource on unmount', () => {

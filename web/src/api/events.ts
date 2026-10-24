@@ -19,6 +19,12 @@ export type ChapterEvent = Omit<Chapter, 'position'> & {
 export type ExportEvent = Export;
 export type ExportDeletedEvent = { id: string; novel_id: string; deleted: true };
 
+/**
+ * `task` events (`TK` rows of the log) carry the Task object of the tasks API. The UI does not
+ * listen for them yet, so `task` is deliberately not an `EventName` and not in `EVENT_NAMES`;
+ * the stream still delivers them, and they advance `Last-Event-ID`.
+ */
+
 /** `ready` and `resync` carry no data. */
 export type EmptyEvent = Record<string, never>;
 

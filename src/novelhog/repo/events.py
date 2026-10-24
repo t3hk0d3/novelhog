@@ -12,17 +12,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import Connection, delete, func, insert, select, update
+from sqlalchemy import Connection, delete, func, insert, or_, select, update
 
 from novelhog.repo import db
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import consumers, event_clock
 from novelhog.repo.schema import events as events_table
 
-_KINDS: dict[str, Literal["novel", "chapter", "export"]] = {
+EventKind = Literal["novel", "chapter", "export", "task"]
+
+_KINDS: dict[str, EventKind] = {
     "NV": "novel",
     "CH": "chapter",
     "EX": "export",
+    "TK": "task",
 }
 
 Payload = dict[str, object] | Callable[[], dict[str, object]]
@@ -133,7 +136,7 @@ class EventRow:
     at: datetime
 
     @property
-    def kind(self) -> Literal["novel", "chapter", "export"]:
+    def kind(self) -> EventKind:
         """The SSE event name, derived from the `entity_id` prefix."""
         return _KINDS[self.entity_id[:2]]
 
@@ -202,8 +205,11 @@ class Events:
     ) -> Literal["ok", "resync"]:
         """Say whether a client that last saw `seq` can be sent the events after it.
 
-        `resync` when `seq` is above the clock, its row is gone (pruned) or older than `max_age_s`,
-        or more than `max_rows` events follow. An empty log accepts only `seq` 0.
+        `resync` when `seq` is above the clock, or the first event after it is older than
+        `max_age_s`, or more than `max_rows` events follow. `seq` needs no row of its own: a clock
+        value taken without an event (a task-only transaction, the migration) is a valid resume
+        point (tasks spec section 4, "Change cursor"). A pruned row is therefore told apart only by
+        the age of what follows it. With no event after `seq` the client is up to date.
         """
         threshold = self._clock() - timedelta(seconds=max_age_s)
         with db.read(self._engine) as conn:
@@ -212,12 +218,15 @@ class Events:
             )
             if seq > latest:
                 return "resync"
-            if seq == latest == 0:
-                return "ok"
-            at = conn.execute(
-                select(events_table.c.at).where(events_table.c.seq == seq)
+            first = conn.execute(
+                select(events_table.c.at)
+                .where(events_table.c.seq > seq)
+                .order_by(events_table.c.seq)
+                .limit(1)
             ).scalar_one_or_none()
-            if at is None or at < threshold:
+            if first is None:
+                return "ok"
+            if first < threshold:
                 return "resync"
             following = conn.execute(
                 select(func.count()).select_from(events_table).where(events_table.c.seq > seq)
@@ -225,7 +234,9 @@ class Events:
             return "resync" if following > max_rows else "ok"
 
     def prune(self, *, keep_s: int = 86400, max_consumer_lag_s: int = 604800) -> PruneReport:
-        """Delete old events, keeping the newest of every entity and all a consumer still needs.
+        """Delete old events, keeping what a consumer still needs and each entity's newest row.
+
+        The newest-row exception covers `NV`, `CH` and `EX` events; `TK` events go by age alone.
 
         The boundary is the first `seq` younger than `keep_s`, capped at the slowest consumer's
         `last_seq + 1`. A consumer whose next event is older than `max_consumer_lag_s` is first
@@ -268,7 +279,11 @@ class Events:
                 )
                 .exists()
             )
+            # `TK` events are pruned by age alone: a finished task leaves no row behind.
             deleted = conn.execute(
-                delete(events_table).where(events_table.c.seq < boundary, has_newer)
+                delete(events_table).where(
+                    events_table.c.seq < boundary,
+                    or_(events_table.c.entity_id.like("TK%"), has_newer),
+                )
             ).rowcount
         return PruneReport(deleted=deleted, consumers_moved=moved)

@@ -173,6 +173,26 @@ class TestEventsOverTcp:
             (frame,) = Frames(r).take_events(1)
         assert frame == f'id: 2\nevent: novel\ndata: {{"id":"{NV}","again":true}}'
 
+    def test_events__streams_a_task_event_as_event_task_with_its_seq_as_id(
+        self, server: Server
+    ) -> None:
+        with _open(server) as http, http.stream("GET", "/api/v1/events") as response:
+            frames = Frames(response)
+            frames.take(1)
+            server.append("TK000000000001", {"id": "TK000000000001", "state": "queued"})
+            assert frames.take_events(1) == [
+                'id: 1\nevent: task\ndata: {"id":"TK000000000001","state":"queued"}'
+            ]
+
+    def test_events__resumes_from_a_last_event_id_that_has_no_row(self, server: Server) -> None:
+        with db.write(server.repo.engine) as conn:
+            event_log.take_clock(conn)  # seq 1: a task-only transaction, no event row
+        server.append(NV, {"id": NV})
+        headers = {"Last-Event-ID": "1"}
+        with _open(server, headers=headers) as http, http.stream("GET", "/api/v1/events") as r:
+            (frame,) = Frames(r).take_events(1)
+        assert frame == f'id: 2\nevent: novel\ndata: {{"id":"{NV}"}}'
+
     def test_events__unknown_novel_returns_404(self, server: Server) -> None:
         with _open(server) as http:
             unknown = http.get("/api/v1/events", params={"novel_id": "NV999999999999"})
