@@ -34,8 +34,8 @@ This spec moves all background work onto one `tasks` table:
 ### Scope
 
 - **The refactor does not change behaviour.** Users see the same API, UI and
-  notifications as in v1. The only new things on the wire are optional task
-  events (§7). Every v1 worker rule keeps its effect: priorities, politeness,
+  notifications as in v1. The only new things on the wire are a read-only tasks
+  API and optional task events (§7). The UI does not change. Every v1 worker rule keeps its effect: priorities, politeness,
   site-unreachable counting, infrastructure backoff, the export rules.
 - **Some work stays as sweeps, not tasks.** Notification dispatch (v1 §6.6), the
   trash (v1 §6.1 `empty_trash`) and maintenance stay as they are, outside the
@@ -193,6 +193,8 @@ are their own transaction.
 | `renew(task, worker_id, ttl) -> bool` | Heartbeat (v1 §4, unchanged). |
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
+| `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -319,19 +321,59 @@ and `attempts`:
 - `task_recovered`
 - `task_repaired` (`problem`)
 
-## 7. Task events
+## 7. API and task events
+
+### Task object
+
+```
+id           string          TK…
+kind         string          novel_refresh | chapter_download | export_build
+entity_id    string          NV… / CH… / EX…
+novel_id     string
+state        string          queued | running | done | failed | skipped | cancelled
+attempts     int
+error        string | null   last error, kept across retries
+run_after    timestamp
+created_at   timestamp
+started_at   timestamp | null
+finished_at  timestamp | null
+duration_ms  int | null
+```
+
+`payload`, `priority`, `ordinal`, `emit_event` and the claim are not exposed.
+The model lives in `domain.payloads` and is the single source for REST and SSE
+(v1 §4).
+
+### Routes (read-only)
+
+```
+GET /api/v1/tasks
+GET /api/v1/tasks/{task_id}
+```
+
+- `GET /tasks?novel_id=&entity_id=&kind=&state=&offset=0&limit=50` →
+  `{items: Task[], total: int}`, newest `created_at` first (ties by `id`).
+  Every filter is optional and combines with AND. `state` may repeat
+  (`state=queued&state=running` = live tasks). `limit` is at most 500.
+- A malformed filter value (an ID with the wrong prefix or format, an unknown
+  `kind` or `state`, `limit` out of range) → `422 validation_error`. A well-formed
+  ID that matches nothing → an empty list, not `404`.
+- `GET /tasks/{task_id}` → the Task, or `404 not_found` for an unknown,
+  malformed or pruned ID.
+- There are no routes that change tasks. Retrying, cancelling and "sync now"
+  stay on the records (v1 §5.3–§5.5), so there is one way to make each change
+  and the task schema stays free to change.
+- Both routes follow v1's host and origin checks (v1 §5.9) and read-only
+  database access like the other `GET` routes.
+
+### Task events
 
 - When a task with `emit_event = true` changes state (start, finish, retry,
   skip, cancel, recovery), the same transaction appends one `TK` event after the
   entity's own events. Claim and renew are not state changes and write no
   events.
-- Payload: the `Task` object
-  `{id, kind, entity_id, novel_id, state, attempts, error, run_after,
-  created_at, started_at, finished_at, duration_ms}`.
-  `payload` and the claim are not exposed.
-- This spec adds no REST route for tasks. That deviates from v1's rule that an
-  event payload is "as `GET` would return it"; the `Task` model in
-  `domain.payloads` is the single definition.
+- Payload: the Task object, as `GET /tasks/{task_id}` would return it right
+  after the change (v1 §4 "Event rows are state snapshots").
 - **SSE** sends `TK` events like any other. The web client ignores entity
   prefixes it does not know. Nothing in the v1 UI uses `TK` events yet.
 - **The notifier** ignores `TK` events. Notification rules (v1 §6.6, §8.6) do not
@@ -394,6 +436,7 @@ columns from the live tasks (`next_refresh_at`, `sync_requested`, `queued_at`,
 | `repo/work.py` | loses `claim_batch` and chapter/novel/export recovery; keeps consumer recovery |
 | `repo/chapters.py`, `novels.py`, `exports.py` | entity transitions call `TaskQueue` in the same transaction; derived fields via join |
 | `domain/payloads.py` | `TaskPayload`; `NovelPayload`/`ChapterPayload` read derived fields |
+| `api/routes_tasks.py`, `api/schemas.py` | new: the two read-only routes and the `Task` schema (§7) |
 | `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py` | new: protocol and the three processors; they take over the bodies of `worker/refresh.py`, `downloads.py`, `builds.py` |
 | `worker/runner.py` | new: `run_task`, processor registry |
 | `worker/loop.py` | stages 4–6 replaced by the runner (§6) |
@@ -446,10 +489,26 @@ TaskQueue
         - removes every task of the novel, no TK events
     prune
         - deletes finished tasks older than TASK_RETENTION, keeps live and recent ones
+GET /api/v1/tasks
+    Without filters
+        - returns {items, total}, newest created_at first
+    With novel_id, entity_id, kind and state filters
+        - returns only matching tasks; repeated state means any of them
+    With offset and limit
+        - pages the list; total counts all matches
+    With a malformed filter value or limit above 500
+        - 422 validation_error
+    With a well-formed ID that matches nothing
+        - empty list
+    - response fields are exactly the Task object; payload, priority, ordinal, emit_event and claim are absent
+GET /api/v1/tasks/{task_id}
+    - returns the Task
+    For an unknown, malformed or pruned ID
+        - 404 not_found
 Task events
     When emit_event is true
         - start, finish, retry, skip, cancel and recovery each append one TK event after the entity's events
-        - payload is the Task object without payload and claim
+        - payload equals what GET /tasks/{task_id} returns right after the change
     When emit_event is false
         - no TK events
     Notifier
@@ -522,7 +581,11 @@ API (unchanged contract)
 - **Pausing an unreachable host** (the open v1 question "M2"). With tasks this
   becomes "push `run_after` forward for that host's queued download tasks", so
   the chapters stay queued.
-- A task list in the UI or REST API, and task kinds without a novel.
+- **Tasks in the UI** (its own spec, after this ships): an activity section on
+  the novel page, a worker status indicator, a retry hint on chapter rows. It
+  will revisit retention (last N per entity instead of 7 days) and whether
+  scheduled refreshes emit events.
+- Routes that change tasks, and task kinds without a novel.
 - Batch claims for downloads, and per-host queues or concurrency.
 - Task dependencies in general. Builds use the enqueue rule in §5.1 instead.
 
