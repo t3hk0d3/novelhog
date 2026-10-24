@@ -134,6 +134,24 @@ def optimize(engine: Engine) -> None:
         connection.close()
 
 
+_TRANSACTION_INFO = "novelhog_transaction_info"
+
+
+def transaction_info(conn: Connection) -> dict[str, Any]:
+    """Return a scratch dict that lives as long as the connection's current transaction.
+
+    `Connection.info` belongs to the pooled DBAPI connection and outlives the transaction, so the
+    dict is tied to the transaction object and starts empty in every new transaction.
+    """
+    transaction = conn.get_transaction()
+    held = conn.info.get(_TRANSACTION_INFO)
+    if held is None or held[0] is not transaction:
+        held = (transaction, {})
+        conn.info[_TRANSACTION_INFO] = held
+    info: dict[str, Any] = held[1]
+    return info
+
+
 @contextmanager
 def read(engine: Engine) -> Iterator[Connection]:
     """Run a read-only transaction (one consistent snapshot) and end it without committing."""

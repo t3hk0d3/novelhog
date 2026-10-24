@@ -70,6 +70,7 @@ def claim(
     extra_set: Mapping[str, object] = {},  # noqa: B006  (read-only default)
     returning: list[Column[Any]],
     retries: int = 3,
+    recheck: ColumnElement[bool] | None = None,
 ) -> list[Row[Any]]:
     """Claim up to `n` eligible, available rows for `owner` and return them sorted by `priority`.
 
@@ -77,6 +78,10 @@ def claim(
     on eligible rows; a priority column missing from `returning` is added to the returned rows.
     A statement that claims fewer than `n` rows while eligible rows remain (a lost race) is
     retried up to `retries` times.
+
+    `recheck` is added to the outer `WHERE` beside "free or expired". On Postgres the outer
+    `WHERE` is re-evaluated against the newest row version after a concurrent update, so a row
+    that stopped satisfying `recheck` meanwhile (for example a cancelled task) is not claimed.
     """
     _reject_claim_columns(extra_set)
     key = _key(table)
@@ -90,7 +95,7 @@ def claim(
         candidates = select(key).where(and_(eligible, free)).order_by(*priority, key).limit(wanted)
         statement = (
             table.update()
-            .where(key.in_(candidates), free)
+            .where(key.in_(candidates), free if recheck is None else and_(free, recheck))
             .values({"claimed_by": owner, "claimed_until": until, **extra_set})
             .returning(*columns)
         )
