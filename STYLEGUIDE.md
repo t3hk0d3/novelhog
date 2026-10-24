@@ -29,7 +29,7 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - Task handlers (`repo/task_kinds/`) are the transactional half of a task kind and processors
   (`worker/tasks/`) the network half (tasks spec section 5); a processor never opens a
   transaction and a handler never does network I/O.
-- Task log events are named `task_<verb>` (`task_started`, `task_retried`, ...).
+- Task log events are named `task_<verb>` (`task_started`, `task_retry`, ...).
 
 ## TypeScript
 
