@@ -135,7 +135,10 @@ CREATE INDEX tasks_updated ON tasks (updated_at);                -- unscoped sin
 - `updated_at` is set on insert and by every write that changes a field of the
   Task object (§7): an enqueue merge, start, finish, retry, cancel, recovery.
   `claim`, `release` and `renew` touch only the claim, which is not exposed, and
-  leave it alone.
+  leave it alone. It comes from the **database clock** in the writing statement
+  (Postgres `clock_timestamp()`, SQLite `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+  millisecond precision), never from the writer's clock, so worker and API hosts
+  share one clock for `since` (§7).
 - `payload` is `{}` for every kind in this spec. It exists for later request
   parameters, for example a forced full re-fetch.
 
@@ -159,6 +162,7 @@ The API objects (v1 §5.2) do not change. `next_refresh_at`, `syncing` and
 - `NOVELHOG_BATCH_SIZE` is removed. The runner claims one task at a time (§6). If
   the variable is set, the worker starts anyway and logs `config_ignored` once.
 - New constant `TASK_RETENTION = 7 d` (§8). Not configurable.
+- New constant `TASK_SINCE_OVERLAP = 2 s` (§7). Not configurable.
 
 ## 4. Queue (`repo/tasks.py`, `TaskQueue`)
 
@@ -200,7 +204,7 @@ are their own transaction.
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
 | `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks and the total count (API, §7): newest `created_at` first; with `changed_since`, every live task plus tasks with `updated_at >= changed_since`, newest `updated_at` first, unpaged. |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -359,20 +363,41 @@ GET /api/v1/tasks/{task_id}
 ```
 
 - `GET /tasks?novel_id=&entity_id=&kind=&state=&since=&offset=0&limit=50` →
-  `{items: Task[], total: int}`, newest `created_at` first (ties by `id`).
+  `{items: Task[], total: int, next_since: timestamp}`, newest `created_at`
+  first (ties by `id`).
   Every filter is optional and combines with AND. `state` may repeat
   (`state=queued&state=running` = live tasks). `limit` is at most 500.
 - `since=<timestamp>` (RFC 3339) returns every live task plus every task with
   `updated_at >= since`, whatever its state: one that started, finished,
   failed, was skipped, cancelled or retried since then. It drops only tasks
-  that are finished and unchanged since `since`, so it combines with the other
-  filters: `state=failed&since=…` = tasks that failed since then. A `since` in
-  the future returns only live tasks. A client that polls passes its previous
-  request time and gets what is pending plus everything that changed in
-  between.
+  that are finished and unchanged since `since`.
+    - **Polling.** Every list response carries `next_since`, the database
+      clock when the query ran. A client that polls sends it back as `since`
+      and never uses its own clock. It gets what is pending plus everything
+      that changed in between.
+    - **Commit lag.** `updated_at` is assigned before its transaction commits,
+      so a row can become visible after a poll whose `next_since` is later than
+      its `updated_at`. The server therefore reads
+      `updated_at >= since − TASK_SINCE_OVERLAP` (2 s; task transactions do no
+      network work and last milliseconds). The client merges results by `id`,
+      so the repeated rows are harmless.
+    - **Unpaged.** A `since` response holds every match: `offset` and `limit`
+      with `since` → `422 validation_error`; `total = len(items)`; newest
+      `updated_at` first. Pagination can be added later if responses grow
+      too big.
+    - **Vanished tasks.** Because the response is complete, a live task the
+      client holds that is not in it no longer exists (its novel was deleted):
+      the client drops it. Finished tasks removed by retention simply stop
+      being returned.
+    - **Filters.** `novel_id`, `entity_id`, `kind` and `state` filter the
+      combined set: `state=failed&since=…` = tasks that failed since then, with
+      no live tasks. A `since` in the future returns only live tasks.
+    - **Several tasks per entity.** A merge or a retry can leave a `cancelled`
+      row next to the live task of the same entity. A client showing one row
+      per entity shows its newest task (`created_at`).
 - A malformed filter value (an ID with the wrong prefix or format, an unknown
   `kind` or `state`, a `since` that is not an RFC 3339 timestamp, `limit` out
-  of range) → `422 validation_error`. A well-formed
+  of range, `offset` or `limit` together with `since`) → `422 validation_error`. A well-formed
   ID that matches nothing → an empty list, not `404`.
 - `GET /tasks/{task_id}` → the Task, or `404 not_found` for an unknown,
   malformed or pruned ID.
@@ -507,11 +532,13 @@ TaskQueue
     updated_at
         - is set by insert, merge, start, finish, retry, cancel and recovery
         - is not changed by claim, release or renew
+        - comes from the database clock, not the writer's
     prune
         - deletes finished tasks older than TASK_RETENTION, keeps live and recent ones
 GET /api/v1/tasks
     Without filters
-        - returns {items, total}, newest created_at first
+        - returns {items, total, next_since}, newest created_at first
+        - next_since is the database clock at query time
     With novel_id, entity_id, kind and state filters
         - returns only matching tasks; repeated state means any of them
     With offset and limit
@@ -522,7 +549,11 @@ GET /api/v1/tasks
         - leaves out finished tasks whose last change is before since
         - combined with state, returns only matches of both (state=failed&since=… = failed since then)
         - a since in the future returns only live tasks
-    With a malformed filter value, a since that is not RFC 3339, or limit above 500
+        - also returns a task with updated_at up to TASK_SINCE_OVERLAP before since
+        - a change committed after a poll is returned by the next poll that sends its next_since
+        - returns every match unpaged, newest updated_at first, total = len(items)
+        - a live task of a deleted novel is absent from the next response
+    With a malformed filter value, a since that is not RFC 3339, offset or limit with since, or limit above 500
         - 422 validation_error
     With a well-formed ID that matches nothing
         - empty list
@@ -612,6 +643,8 @@ API (unchanged contract)
   will revisit retention (last N per entity instead of 7 days) and whether
   scheduled refreshes emit events.
 - Routes that change tasks, and task kinds without a novel.
+- Pagination for `since` responses, and a counts endpoint for a header
+  indicator, if live tasks grow too many to return on every poll.
 - Batch claims for downloads, and per-host queues or concurrency.
 - Task dependencies in general. Builds use the enqueue rule in §5.1 instead.
 
