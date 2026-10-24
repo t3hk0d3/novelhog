@@ -3,15 +3,19 @@
 `Worker.step` is one iteration and runs these stages in priority order, each returning early
 when it did work:
 
-1. recover expired claims (always),
+1. recover expired claims (always): v1 claims, then lapsed tasks (`Runner.recover`),
 2. `_dispatch_notifications` (always runs, never returns early; a failure is logged; keeps
    dispatching while full batches come back, for up to `DISPATCH_BUDGET_S`),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
-4. refresh a due novel,
-5. `_build_export` (claim and build a ready export),
-6. download a batch of pending chapters,
-7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
+4. claim and run one task (`Runner.step`, tasks spec section 6),
+5. refresh a due novel,
+6. `_build_export` (claim and build a ready export),
+7. download a batch of pending chapters,
+8. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
    when the notifier is still behind (so the loop does not sleep).
+
+Stages 5-7 are v1's and leave as their kinds move to tasks. A `RunnerBackoff` from stage 4 backs
+the loop off like a failed step; the runner has logged the task event, so the loop logs nothing.
 """
 
 import random
@@ -19,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal
 
 from novelhog import log
 from novelhog.chapter_store import ChapterStore
@@ -28,22 +32,20 @@ from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
 from novelhog.worker import builds, downloads, maintenance, refresh, runtime
-from novelhog.worker.downloads import ChapterAdapter, ImageSource
+from novelhog.worker.downloads import ImageSource
 from novelhog.worker.reachability import Reachability
-from novelhog.worker.refresh import TocAdapter
+from novelhog.worker.runner import Runner, RunnerBackoff
+from novelhog.worker.tasks import default_processors
+from novelhog.worker.tasks.base import ProcessorRegistry, TaskContext, WorkerAdapter
 
 MAINTENANCE_INTERVAL = timedelta(hours=1)
 DISPATCH_BUDGET_S = 2.0
 
-StepResult = Literal["refresh", "build", "download", "notify", "idle"]
-
-
-class WorkerAdapter(TocAdapter, ChapterAdapter, Protocol):
-    """What the loop needs from `ScraperAdapter`: hosts, TOC syncs and chapter fetches."""
+StepResult = Literal["task", "refresh", "build", "download", "notify", "idle"]
 
 
 class Worker:
-    """Runs recover, refresh, build and download steps until asked to stop."""
+    """Runs recover, task, refresh, build and download steps until asked to stop."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -58,6 +60,7 @@ class Worker:
         stop: threading.Event | None = None,
         clock: Callable[[], datetime] = utcnow,
         monotonic: Callable[[], float] = time.monotonic,
+        processors: ProcessorRegistry | None = None,
     ) -> None:
         self._repo = repo
         self._adapter = adapter
@@ -72,6 +75,21 @@ class Worker:
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
         self._reachability = Reachability()
+        self._runner = Runner(
+            repo,
+            default_processors() if processors is None else processors,
+            TaskContext(
+                adapter=adapter,
+                fetcher=fetcher,
+                storage=storage,
+                chapter_store=ChapterStore(repo),
+                settings=settings,
+                stop=self._stop,
+                reachability=self._reachability,
+                rng=self._rng,
+                heartbeat=runtime.Heartbeat,
+            ),
+        )
 
     def request_stop(self) -> None:
         """Ask the loop to return after the current step; wakes any wait."""
@@ -83,11 +101,15 @@ class Worker:
         self._repo.require_current()
         refresh.publish_hosts(self._repo, self._adapter)
         self._repo.work.recover()
+        self._runner.recover()
         logger = log.get(worker_id=self._settings.worker_id)
         logger.info("worker_started")
         while not self._stop.is_set():
             try:
                 result = self.step()
+            except RunnerBackoff:
+                self._stop.wait(self._backoff.next())
+                continue
             except Exception as error:  # noqa: BLE001 - the loop must survive any step failure
                 delay = self._backoff.next()
                 logger.error(
@@ -106,8 +128,11 @@ class Worker:
     def step(self) -> StepResult:
         """Do one unit of work and name it."""
         self._repo.work.recover()
+        self._runner.recover()
         behind = self._dispatch_notifications()
         self._empty_trash()
+        if self._runner.step():
+            return "task"
         if self._refresh_due():
             return "refresh"
         if self._build_export():

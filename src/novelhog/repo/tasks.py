@@ -10,11 +10,17 @@ the transaction (see `db.transaction_info`); `stamp` then appends a `TK` event f
 with `emit_event` and sets `change_seq` on the touched rows: to the row's own `TK` seq, else to the
 transaction's last event seq, or to a clock value of its own if it appended no events.
 Inserted rows carry `change_seq = 0` until then, which no other transaction can see.
+
+`Tasks` is the public side (`repo.tasks`). Its `start`, `finish` and `recover` each compose one
+transaction per task in that order: `lock_novel`, the queue primitive, the kind's `TaskHandler`
+hook (tasks spec section 5), then `stamp`. A task whose kind has no registered handler is a
+programming error: those methods raise `UnregisteredTaskKindError` before writing anything.
 """
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -34,17 +40,35 @@ from sqlalchemy import (
 from novelhog import ids
 from novelhog.domain.errors import NotFound
 from novelhog.domain.payloads import TaskView
-from novelhog.domain.tasks import LIVE_STATES, StartResult, TaskKind, TaskState
+from novelhog.domain.tasks import (
+    LIVE_STATES,
+    Failed,
+    Outcome,
+    Retry,
+    Skip,
+    StartResult,
+    TaskKind,
+    TaskState,
+)
 from novelhog.ids import new_id
-from novelhog.repo import claims, db, events
+from novelhog.repo import claims, db, events, novels
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import event_clock, tasks
+from novelhog.repo.task_kinds import HandlerRegistry, TaskHandler, default_handlers
 
 PRUNE_BATCH = 500
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 _TOUCHED = "tasks_touched"
 _OUTCOMES = frozenset({TaskState.DONE, TaskState.FAILED, TaskState.SKIPPED})
+
+
+class Recovered(StrEnum):
+    """What `TaskQueue.recover` did to a task whose claim lapsed."""
+
+    CLAIM_CLEARED = "claim_cleared"
+    REQUEUED = "requeued"
+    MERGED = "merged"
 
 
 @dataclass(frozen=True)
@@ -124,6 +148,15 @@ def _find(conn: Connection, kind: TaskKind, entity_id: str, state: TaskState) ->
 def _get(conn: Connection, task_id: str) -> TaskRow | None:
     row = conn.execute(select(tasks).where(tasks.c.id == task_id)).first()
     return None if row is None else TaskRow.from_row(row)
+
+
+def _require(conn: Connection, task_id: str) -> TaskRow:
+    """The task this transaction just wrote; it cannot have vanished."""
+    task = _get(conn, task_id)
+    if task is None:
+        message = f"task {task_id} vanished inside its own transaction"
+        raise RuntimeError(message)
+    return task
 
 
 def _running_sibling() -> ColumnElement[bool]:
@@ -427,6 +460,56 @@ class TaskQueue:
             )
         return renewed == 1
 
+    def recover(self, conn: Connection, task: TaskRow) -> Recovered | None:
+        """Recover one task whose claim lapsed (tasks spec section 8, "Recovery").
+
+        A queued task: the claim is cleared (`CLAIM_CLEARED`; not a change of the Task object). A
+        running task: back to `queued` with `run_after` kept and the claim cleared (`REQUEUED`);
+        if another task is queued for the entity, the row merges into it (enqueue rules) and
+        becomes `cancelled` instead (`MERGED`). Returns None when the claim is no longer lapsed
+        (taken over or renewed meanwhile) or the row is gone.
+        """
+        now = self._clock()
+        lapsed = and_(
+            tasks.c.id == task.id, tasks.c.claimed_by.is_not(None), tasks.c.claimed_until < now
+        )
+        row = conn.execute(select(tasks).where(lapsed)).first()
+        if row is None:
+            return None
+        current = TaskRow.from_row(row)
+        if current.state is TaskState.QUEUED:
+            cleared = conn.execute(
+                update(tasks)
+                .where(lapsed, tasks.c.state == TaskState.QUEUED.value)
+                .values(claimed_by=None, claimed_until=None)
+            ).rowcount
+            return Recovered.CLAIM_CLEARED if cleared == 1 else None
+        if current.state is not TaskState.RUNNING:
+            return None
+        successor = _find(conn, current.kind, current.entity_id, TaskState.QUEUED)
+        values = _released(now)
+        if successor is None:
+            values["state"] = TaskState.QUEUED.value
+        else:
+            values |= {"state": TaskState.CANCELLED.value, "finished_at": now}
+        reset = conn.execute(
+            update(tasks).where(lapsed, tasks.c.state == TaskState.RUNNING.value).values(values)
+        ).rowcount
+        if reset != 1:
+            return None
+        _touch(conn, task.id)
+        if successor is None:
+            return Recovered.REQUEUED
+        self._merge(
+            conn,
+            successor,
+            priority=current.priority,
+            run_after=current.run_after,
+            emit_event=current.emit_event,
+            now=now,
+        )
+        return Recovered.MERGED
+
     def lapsed(self, now: datetime) -> list[TaskRow]:
         """Return the queued and running tasks whose claim lapsed before `now`, in `id` order."""
         with db.read(self._engine) as conn:
@@ -495,11 +578,7 @@ def _event_payload(conn: Connection, task_id: str) -> Callable[[], dict[str, obj
             message = "the event payload was built before the clock was taken"
             raise RuntimeError(message)
         conn.execute(update(tasks).where(tasks.c.id == task_id).values(change_seq=seq))
-        row = _get(conn, task_id)
-        if row is None:
-            message = f"task {task_id} vanished inside its own transaction"
-            raise RuntimeError(message)
-        return row.to_view().to_json()
+        return _require(conn, task_id).to_view().to_json()
 
     return build
 
@@ -540,12 +619,167 @@ class TaskPage:
     next_since: int
 
 
-class Tasks:
-    """The public tasks sub-repository (`repo.tasks`): the read API of tasks spec section 7."""
+class UnregisteredTaskKindError(LookupError):
+    """A task's kind has no registered handler (repo) or processor (worker): a programming error."""
 
-    def __init__(self, context: RepoContext) -> None:
+    def __init__(self, kind: TaskKind, half: str = "handler") -> None:
+        super().__init__(f"no task {half} is registered for kind {kind.value}")
+        self.kind = kind
+
+
+@dataclass(frozen=True)
+class Ready[W]:
+    """The task is running: `work` is the handler's work item, `task` the started row."""
+
+    work: W
+    task: TaskRow
+
+
+@dataclass(frozen=True)
+class Skipped:
+    """The handler's `begin` found the work no longer needed; the task is `skipped`."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class NotStarted:
+    """The queue did not start the task (`CANCELLED`, `DEFERRED` or `LOST`)."""
+
+    result: StartResult
+
+
+type StartOutcome[W] = Ready[W] | Skipped | NotStarted
+
+
+@dataclass(frozen=True)
+class TaskRecoveryReport:
+    """What `Tasks.recover` did: claims cleared, running tasks requeued or merged.
+
+    `recovered` holds the running tasks put back (requeued or merged), as they were before.
+    """
+
+    claims_cleared: int
+    requeued: int
+    merged: int
+    recovered: tuple[TaskRow, ...] = ()
+
+
+class Tasks:
+    """The public tasks sub-repository (`repo.tasks`).
+
+    Runs tasks for the worker (claim, start, finish, release, renew, recover; tasks spec
+    sections 5, 6 and 8) and serves the read API of section 7.
+    """
+
+    def __init__(self, context: RepoContext, handlers: HandlerRegistry | None = None) -> None:
         self._engine = context.engine
+        self._clock = context.clock
         self._queue = TaskQueue(context)
+        registry = default_handlers() if handlers is None else handlers
+        for kind, handler in registry.items():
+            if handler.kind is not kind:
+                message = f"handler for {handler.kind.value} registered as {kind.value}"
+                raise ValueError(message)
+        self._handlers = dict(registry)
+
+    def _handler(self, kind: TaskKind) -> TaskHandler[Any]:
+        handler = self._handlers.get(kind)
+        if handler is None:
+            raise UnregisteredTaskKindError(kind)
+        return handler
+
+    def claim(self, worker_id: str, ttl: int) -> TaskRow | None:
+        """Claim the first eligible queued task for `ttl` seconds; None when there is none."""
+        return self._queue.claim(worker_id, ttl)
+
+    def release(self, task: TaskRow, worker_id: str) -> bool:
+        """Clear this worker's claim on the claimed, unstarted task; False if not held."""
+        return self._queue.release(task, worker_id)
+
+    def renew(self, task: TaskRow, worker_id: str, ttl: int) -> bool:
+        """Heartbeat: extend this worker's claim by `ttl` seconds; False once it is lost."""
+        return self._queue.renew(task, worker_id, ttl)
+
+    def start(self, task: TaskRow, worker_id: str) -> StartOutcome[Any]:
+        """Start the claimed task and its handler in one transaction (tasks spec section 5).
+
+        `NotStarted(LOST)` when the novel is gone; `NotStarted(result)` when the queue did not
+        start it; `Skipped(reason)` when the handler's `begin` said `Skip` (the task is then
+        `skipped`); else `Ready` with the handler's work item, read after `begin`.
+        """
+        handler = self._handler(task.kind)
+        with db.write(self._engine) as conn:
+            if not novels.lock_novel(conn, task.novel_id):
+                return NotStarted(StartResult.LOST)
+            now = self._clock()
+            result = self._queue.start(conn, task, worker_id)
+            if result is not StartResult.OK:
+                self._queue.stamp(conn)
+                return NotStarted(result)
+            started = _require(conn, task.id)
+            begin = handler.begin(conn, started, now)
+            if isinstance(begin, Skip):
+                self._queue.finish(conn, started, worker_id, TaskState.SKIPPED)
+                self._queue.stamp(conn)
+                return Skipped(begin.reason)
+            work = handler.work(conn, started)
+            self._queue.stamp(conn)
+            return Ready(work, _require(conn, task.id))
+
+    def finish(self, task: TaskRow, worker_id: str, outcome: Outcome[Any]) -> bool:
+        """Fenced: record the run's outcome and let the handler complete it, in one transaction.
+
+        `Retry` puts the task back in the queue (`TaskQueue.retry`); `Done` and `Failed` end it.
+        The handler's `complete` runs only when that write applied. False, with nothing
+        changed, when the claim was lost or the novel is gone.
+        """
+        handler = self._handler(task.kind)
+        with db.write(self._engine) as conn:
+            if not novels.lock_novel(conn, task.novel_id):
+                return False
+            now = self._clock()
+            if isinstance(outcome, Retry):
+                fenced = self._queue.retry(
+                    conn, task, worker_id, run_after=outcome.run_after, error=outcome.error
+                )
+            elif isinstance(outcome, Failed):
+                fenced = self._queue.finish(conn, task, worker_id, TaskState.FAILED, outcome.error)
+            else:
+                fenced = self._queue.finish(conn, task, worker_id, TaskState.DONE)
+            if fenced:
+                handler.complete(conn, task, outcome, now)
+            self._queue.stamp(conn)
+        return fenced
+
+    def recover(self) -> TaskRecoveryReport:
+        """Recover every task whose claim lapsed, each in its own transaction (tasks spec 8).
+
+        A running task goes back to the queue (or merges into a queued sibling), then its
+        handler's `recover` resets the entity. A task whose novel is gone is skipped.
+        """
+        counts = dict.fromkeys(Recovered, 0)
+        recovered: list[TaskRow] = []
+        for task in self._queue.lapsed(self._clock()):
+            handler = self._handler(task.kind) if task.state is TaskState.RUNNING else None
+            with db.write(self._engine) as conn:
+                if not novels.lock_novel(conn, task.novel_id):
+                    continue
+                now = self._clock()
+                result = self._queue.recover(conn, task)
+                if result is None:
+                    continue
+                if handler is not None and result is not Recovered.CLAIM_CLEARED:
+                    handler.recover(conn, task, now)
+                    recovered.append(task)
+                self._queue.stamp(conn)
+            counts[result] += 1
+        return TaskRecoveryReport(
+            claims_cleared=counts[Recovered.CLAIM_CLEARED],
+            requeued=counts[Recovered.REQUEUED],
+            merged=counts[Recovered.MERGED],
+            recovered=tuple(recovered),
+        )
 
     def get(self, task_id: str) -> TaskView:
         """Return one task; raise `NotFound` for an unknown, malformed or pruned ID."""

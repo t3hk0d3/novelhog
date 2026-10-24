@@ -2,21 +2,31 @@
 
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, event, func, insert, select, update
+from sqlalchemy import Connection, delete, event, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from novelhog.domain.tasks import StartResult, TaskKind, TaskState
-from novelhog.repo import Repo, db
+from novelhog.domain.tasks import Done, Failed, Retry, Skip, StartResult, TaskKind, TaskState
+from novelhog.repo import Busy, Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import events, novels, tasks
-from novelhog.repo.tasks import TaskQueue, TaskRow
+from novelhog.repo.tasks import (
+    NotStarted,
+    Ready,
+    Skipped,
+    TaskQueue,
+    TaskRecoveryReport,
+    TaskRow,
+    UnregisteredTaskKindError,
+)
 from tests.conftest import FakeClock
 from tests.integration.helpers import NOW, insert_host, novel_row
+from tests.integration.task_fakes import RecordingHandler, force_claim
 
 NOVEL = "NV000000000001"
 OTHER_NOVEL = "NV000000000002"
@@ -1276,3 +1286,405 @@ class TestListPollingWithoutGaps:
         assert before.items == []
         assert [item.id for item in after.items] == [task.id]
         assert after.items[0].change_seq > before.next_since
+
+
+# --- The public start, finish and recovery path (tasks spec sections 5 and 8) ---------------
+
+
+@pytest.fixture
+def handler() -> RecordingHandler:
+    return RecordingHandler()
+
+
+@pytest.fixture
+def handled(
+    repo: Repo,
+    queue: TaskQueue,
+    migrated_database: str,
+    clock: FakeClock,
+    handler: RecordingHandler,
+) -> Iterator[Repo]:
+    """A `Repo` with the recording handler registered for `REFRESH`, on the emptied database."""
+    handled_repo = Repo(migrated_database, clock=clock, handlers={REFRESH: handler})
+    yield handled_repo
+    handled_repo.engine.dispose()
+
+
+def claimed_task(repo: Repo, queue: TaskQueue, worker: str = ME, **options: Any) -> TaskRow:
+    """Enqueue a refresh task for NOVEL and claim it."""
+    task = enqueue(repo, queue, **options)
+    claimed = queue.claim(worker, TTL)
+    assert claimed is not None and claimed.id == task.id
+    return claimed
+
+
+def started_task(handled: Repo, queue: TaskQueue) -> TaskRow:
+    """Enqueue, claim and start a refresh task for NOVEL through the public path."""
+    outcome = handled.tasks.start(claimed_task(handled, queue), ME)
+    assert isinstance(outcome, Ready)
+    return outcome.task
+
+
+def novel_snapshot(repo: Repo) -> Any:
+    with db.read(repo.engine) as conn:
+        return conn.execute(select(novels).where(novels.c.id == NOVEL)).one()
+
+
+class TestTasksClaim:
+    def test_claim__claims_the_first_eligible_task_for_the_worker(
+        self, handled: Repo, queue: TaskQueue
+    ) -> None:
+        task = enqueue(handled, queue)
+
+        claimed = handled.tasks.claim(ME, TTL)
+
+        assert claimed is not None and claimed.id == task.id
+        assert claimed.claimed_by == ME
+
+    def test_claim__returns_none_when_nothing_is_claimable(self, handled: Repo) -> None:
+        assert handled.tasks.claim(ME, TTL) is None
+
+
+class TestTasksReleaseAndRenew:
+    def test_release__clears_this_workers_claim(self, handled: Repo, queue: TaskQueue) -> None:
+        task = claimed_task(handled, queue)
+
+        assert handled.tasks.release(task, ME) is True
+        assert get(handled, task.id).claimed_by is None
+
+    def test_renew__pushes_claimed_until(
+        self, handled: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        now = clock.advance(seconds=100)
+
+        assert handled.tasks.renew(task, ME, TTL) is True
+        assert get(handled, task.id).claimed_until == now + timedelta(seconds=TTL)
+
+
+class TestTasksStart__WhenTheQueueStartIsOkAndBeginSaysStarted:
+    def test_start__sets_the_task_running(self, handled: Repo, queue: TaskQueue) -> None:
+        task = claimed_task(handled, queue)
+
+        handled.tasks.start(task, ME)
+
+        row = get(handled, task.id)
+        assert (row.state, row.attempts, row.started_at) == (TaskState.RUNNING, 1, NOW)
+
+    def test_start__returns_ready_with_the_handlers_work_item_and_the_started_task(
+        self, handled: Repo, queue: TaskQueue
+    ) -> None:
+        task = claimed_task(handled, queue)
+
+        outcome = handled.tasks.start(task, ME)
+
+        assert outcome == Ready(work="https://example.com/novel", task=get(handled, task.id))
+
+    def test_start__runs_begin_and_work_in_starts_transaction(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        task = claimed_task(handled, queue)
+
+        handled.tasks.start(task, ME)
+
+        assert handler.calls == [
+            ("begin", task.id, TaskState.RUNNING),
+            ("work", task.id, TaskState.RUNNING),
+        ]
+
+    def test_start__rolls_back_with_the_handler(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        task = claimed_task(handled, queue)
+        handler.fail_in = "begin"
+
+        with pytest.raises(Busy):
+            handled.tasks.start(task, ME)
+
+        row = get(handled, task.id)
+        assert (row.state, row.attempts, row.claimed_by) == (TaskState.QUEUED, 0, ME)
+
+
+class TestTasksStart__WhenBeginSaysSkip:
+    def test_start__skips_the_task_with_finished_at(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        handler.begin_result = Skip("novel gone")
+        task = claimed_task(handled, queue)
+
+        handled.tasks.start(task, ME)
+
+        row = get(handled, task.id)
+        assert (row.state, row.finished_at, row.claimed_by) == (TaskState.SKIPPED, NOW, None)
+
+    def test_start__returns_skipped_with_the_reason(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        handler.begin_result = Skip("novel gone")
+
+        assert handled.tasks.start(claimed_task(handled, queue), ME) == Skipped("novel gone")
+
+    def test_start__leaves_the_entity_unchanged_and_reads_no_work(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        handler.begin_result = Skip("novel gone")
+        task = claimed_task(handled, queue)
+        before = novel_snapshot(handled)
+
+        handled.tasks.start(task, ME)
+
+        assert novel_snapshot(handled) == before
+        assert handler.hooks == ["begin"]
+
+
+class TestTasksStart__WhenTheQueueStartIsNotOk:
+    @pytest.fixture(params=["cancelled", "deferred", "lost"])
+    def case(
+        self, request: pytest.FixtureRequest, handled: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> tuple[TaskRow, StartResult]:
+        if request.param == "deferred":
+            # A sibling runs while this row stays queued and claimed: start the sibling first.
+            sibling = claimed_task(handled, queue)
+            assert start(handled, queue, sibling) is StartResult.OK
+            task = enqueue(handled, queue)
+            return force_claim(
+                handled, task.id, ME, NOW + timedelta(seconds=TTL)
+            ), StartResult.DEFERRED
+        task = claimed_task(handled, queue)
+        if request.param == "cancelled":
+            assert cancel(handled, queue)
+            return task, StartResult.CANCELLED
+        lapse(clock)
+        return task, StartResult.LOST
+
+    def test_start__returns_not_started_with_that_result(
+        self, handled: Repo, case: tuple[TaskRow, StartResult]
+    ) -> None:
+        task, result = case
+
+        assert handled.tasks.start(task, ME) == NotStarted(result)
+
+    def test_start__does_not_call_begin(
+        self, handled: Repo, handler: RecordingHandler, case: tuple[TaskRow, StartResult]
+    ) -> None:
+        task, _ = case
+
+        handled.tasks.start(task, ME)
+
+        assert handler.calls == []
+
+
+class TestTasksStart__WhenTheNovelIsGone:
+    def test_start__returns_not_started_lost(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        task = claimed_task(handled, queue)
+        with db.write(handled.engine) as conn:
+            assert lock_novel(conn, NOVEL)
+            queue.delete_for_novel(conn, NOVEL)
+            conn.execute(delete(novels).where(novels.c.id == NOVEL))
+
+        assert handled.tasks.start(task, ME) == NotStarted(StartResult.LOST)
+        assert handler.calls == []
+
+
+class TestTasksStart__WithoutARegisteredHandler:
+    def test_start__raises_and_leaves_the_task_alone(self, repo: Repo, queue: TaskQueue) -> None:
+        task = claimed_task(repo, queue)
+
+        with pytest.raises(UnregisteredTaskKindError):
+            repo.tasks.start(task, ME)
+
+        assert get(repo, task.id) == task
+
+
+class TestTasksFinish__WhenFenced:
+    def test_finish__done_ends_the_task_done(self, handled: Repo, queue: TaskQueue) -> None:
+        task = started_task(handled, queue)
+
+        assert handled.tasks.finish(task, ME, Done("ok")) is True
+        row = get(handled, task.id)
+        assert (row.state, row.error, row.finished_at) == (TaskState.DONE, None, NOW)
+
+    def test_finish__failed_ends_the_task_failed_with_its_error(
+        self, handled: Repo, queue: TaskQueue
+    ) -> None:
+        task = started_task(handled, queue)
+
+        assert handled.tasks.finish(task, ME, Failed("SiteError: 404")) is True
+        row = get(handled, task.id)
+        assert (row.state, row.error) == (TaskState.FAILED, "SiteError: 404")
+
+    def test_finish__retry_requeues_the_task_at_run_after(
+        self, handled: Repo, queue: TaskQueue
+    ) -> None:
+        task = started_task(handled, queue)
+        later = NOW + timedelta(hours=6)
+
+        assert handled.tasks.finish(task, ME, Retry(later, "InfrastructureError: dns")) is True
+        row = get(handled, task.id)
+        assert (row.state, row.run_after, row.error, row.claimed_by) == (
+            TaskState.QUEUED,
+            later,
+            "InfrastructureError: dns",
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        ("outcome", "state"),
+        [
+            (Done("ok"), TaskState.DONE),
+            (Failed("SiteError: 404"), TaskState.FAILED),
+            (Retry(NOW, "InfrastructureError: dns"), TaskState.QUEUED),
+        ],
+    )
+    def test_finish__calls_complete_with_the_outcome_in_the_same_transaction(
+        self,
+        handled: Repo,
+        queue: TaskQueue,
+        handler: RecordingHandler,
+        outcome: Any,
+        state: TaskState,
+    ) -> None:
+        task = started_task(handled, queue)
+
+        handled.tasks.finish(task, ME, outcome)
+
+        assert handler.calls[-1] == ("complete", task.id, state)
+        assert handler.outcomes == [outcome]
+
+    def test_finish__rolls_back_with_complete(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        task = started_task(handled, queue)
+        handler.fail_in = "complete"
+
+        with pytest.raises(Busy):
+            handled.tasks.finish(task, ME, Done("ok"))
+
+        assert get(handled, task.id) == task
+
+
+class TestTasksFinish__WhenTheClaimWasLost:
+    @pytest.mark.parametrize(
+        "outcome", [Done("ok"), Failed("SiteError: 404"), Retry(NOW, "InfrastructureError: dns")]
+    )
+    def test_finish__returns_false_changes_nothing_and_skips_complete(
+        self,
+        handled: Repo,
+        queue: TaskQueue,
+        handler: RecordingHandler,
+        clock: FakeClock,
+        outcome: Any,
+    ) -> None:
+        task = started_task(handled, queue)
+        lapse(clock)
+        handler.calls.clear()
+
+        assert handled.tasks.finish(task, ME, outcome) is False
+        assert get(handled, task.id) == task
+        assert handler.calls == []
+
+
+class TestTasksFinish__WhenTheNovelIsGone:
+    def test_finish__returns_false(self, handled: Repo, queue: TaskQueue) -> None:
+        task = started_task(handled, queue)
+        with db.write(handled.engine) as conn:
+            assert lock_novel(conn, NOVEL)
+            queue.delete_for_novel(conn, NOVEL)
+            conn.execute(delete(novels).where(novels.c.id == NOVEL))
+
+        assert handled.tasks.finish(task, ME, Done("ok")) is False
+
+
+class TestTasksRecover:
+    def test_recover__returns_a_lapsed_running_task_to_queued_with_run_after_kept(
+        self, handled: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        lapse(clock)
+
+        report = handled.tasks.recover()
+
+        row = get(handled, task.id)
+        assert (row.state, row.run_after, row.claimed_by, row.finished_at) == (
+            TaskState.QUEUED,
+            task.run_after,
+            None,
+            None,
+        )
+        assert report == TaskRecoveryReport(
+            claims_cleared=0, requeued=1, merged=0, recovered=(task,)
+        )
+
+    def test_recover__calls_handler_recover_after_the_task_is_queued(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        lapse(clock)
+
+        handled.tasks.recover()
+
+        assert handler.calls[-1] == ("recover", task.id, TaskState.QUEUED)
+
+    def test_recover__clears_only_the_claim_of_a_lapsed_claimed_queued_task(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler, clock: FakeClock
+    ) -> None:
+        task = claimed_task(handled, queue)
+        lapse(clock)
+
+        report = handled.tasks.recover()
+
+        assert get(handled, task.id) == replace(task, claimed_by=None, claimed_until=None)
+        assert report == TaskRecoveryReport(claims_cleared=1, requeued=0, merged=0)
+        assert handler.calls == []
+
+    def test_recover__merges_a_recovered_task_into_its_queued_sibling_and_cancels_it(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        sibling = enqueue(handled, queue, run_after=NOW + timedelta(hours=1))
+        lapse(clock)
+
+        report = handled.tasks.recover()
+
+        row = get(handled, task.id)
+        assert (row.state, row.finished_at, row.claimed_by) == (
+            TaskState.CANCELLED,
+            clock.current,
+            None,
+        )
+        assert [t.id for t in queued(handled)] == [sibling.id]
+        assert get(handled, sibling.id).run_after == task.run_after
+        assert report == TaskRecoveryReport(
+            claims_cleared=0, requeued=0, merged=1, recovered=(task,)
+        )
+        assert handler.calls[-1] == ("recover", task.id, TaskState.CANCELLED)
+
+    def test_recover__leaves_live_claims_alone(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        other = enqueue(handled, queue, DOWNLOAD, chapter(1), priority=100)
+        assert queue.claim(ME, TTL) is not None
+        other = get(handled, other.id)
+        clock.advance(seconds=TTL - 1)
+        handler.calls.clear()
+
+        report = handled.tasks.recover()
+
+        assert (get(handled, task.id), get(handled, other.id)) == (task, other)
+        assert report == TaskRecoveryReport(claims_cleared=0, requeued=0, merged=0)
+        assert handler.calls == []
+
+    def test_recover__stamps_the_recovered_task(
+        self, handled: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        task = started_task(handled, queue)
+        lapse(clock)
+        before = clock_value(handled)
+
+        handled.tasks.recover()
+
+        assert get(handled, task.id).change_seq > before
+        assert get(handled, task.id).updated_at == clock.current

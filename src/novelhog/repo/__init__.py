@@ -15,6 +15,7 @@ from novelhog.repo.hosts import Hosts
 from novelhog.repo.novels import Novels
 from novelhog.repo.settings import Settings
 from novelhog.repo.subscriptions import Subscriptions
+from novelhog.repo.task_kinds import HandlerRegistry
 from novelhog.repo.tasks import Tasks
 from novelhog.repo.trash import Trash
 from novelhog.repo.types import utcnow
@@ -33,7 +34,9 @@ class Repo:
         clock: Callable[[], datetime] = utcnow,
         static_base_url: str = "/static",
         refresh_min_interval: int = 21600,
+        handlers: HandlerRegistry | None = None,
     ) -> None:
+        """Open the database; `handlers` overrides the task handler registry (tests)."""
         self.engine = db.create_engine(url)
         self.clock = clock
         self.static_base_url = static_base_url
@@ -52,7 +55,7 @@ class Repo:
         self.novels = Novels(self.context)
         self.settings = Settings(self.context)
         self.subscriptions = Subscriptions(self.context)
-        self.tasks = Tasks(self.context)
+        self.tasks = Tasks(self.context, handlers)
         self.trash = Trash(self.context)
         self.work = Work(self.context)
 
