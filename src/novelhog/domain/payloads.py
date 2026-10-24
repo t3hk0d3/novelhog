@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.exports import ExportState, Format, format_for_mime
+from novelhog.domain.tasks import TaskKind, TaskState
 
 
 def format_time(value: datetime) -> str:
@@ -191,6 +192,45 @@ class ExportView:
             "url": self.url if ready else None,
             "created_at": format_time(self.created_at),
             "ready_at": _time(self.ready_at),
+        }
+
+
+@dataclass(frozen=True)
+class TaskView:
+    """The API `Task` object (tasks spec section 7): REST and SSE share this model."""
+
+    id: str
+    kind: TaskKind
+    entity_id: str
+    novel_id: str
+    state: TaskState
+    attempts: int
+    error: str | None
+    run_after: datetime
+    change_seq: int
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None
+
+    def to_json(self) -> dict[str, object]:
+        """Return the wire form of the task."""
+        return {
+            "id": self.id,
+            "kind": self.kind.value,
+            "entity_id": self.entity_id,
+            "novel_id": self.novel_id,
+            "state": self.state.value,
+            "attempts": self.attempts,
+            "error": self.error,
+            "run_after": format_time(self.run_after),
+            "change_seq": self.change_seq,
+            "created_at": format_time(self.created_at),
+            "updated_at": format_time(self.updated_at),
+            "started_at": _time(self.started_at),
+            "finished_at": _time(self.finished_at),
+            "duration_ms": self.duration_ms,
         }
 
 

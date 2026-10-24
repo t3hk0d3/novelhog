@@ -14,10 +14,12 @@ from novelhog.domain.payloads import (
     ExportView,
     NovelView,
     SubscriptionView,
+    TaskView,
     deleted_export,
     deleted_novel,
     format_time,
 )
+from novelhog.domain.tasks import TaskKind, TaskState
 
 T = datetime(2026, 10, 19, 12, 30, 5, 123456, tzinfo=UTC)
 TS = "2026-10-19T12:30:05.123Z"
@@ -187,6 +189,59 @@ class TestSubscriptionView__ToJson:
     def test_to_json__has_no_address(self) -> None:
         data = SubscriptionView("SBa", "webpush", None, T).to_json()
         assert data == {"id": "SBa", "channel": "webpush", "label": None, "created_at": TS}
+
+
+def task(**overrides: object) -> TaskView:
+    fields: dict[str, object] = {
+        "id": "TKa",
+        "kind": TaskKind.CHAPTER_DOWNLOAD,
+        "entity_id": "CHa",
+        "novel_id": "NVa",
+        "state": TaskState.DONE,
+        "attempts": 2,
+        "error": None,
+        "run_after": T,
+        "change_seq": 9,
+        "created_at": T,
+        "updated_at": T,
+        "started_at": T,
+        "finished_at": T,
+        "duration_ms": 1500,
+    }
+    return TaskView(**(fields | overrides))  # type: ignore[arg-type]
+
+
+class TestTaskView__ToJson:
+    def test_to_json__has_exactly_the_task_object_keys(self) -> None:
+        assert list(task().to_json()) == [
+            "id",
+            "kind",
+            "entity_id",
+            "novel_id",
+            "state",
+            "attempts",
+            "error",
+            "run_after",
+            "change_seq",
+            "created_at",
+            "updated_at",
+            "started_at",
+            "finished_at",
+            "duration_ms",
+        ]
+
+    def test_to_json__formats_timestamps_and_enum_values(self) -> None:
+        data = task().to_json()
+
+        assert data["kind"] == "chapter_download"
+        assert data["state"] == "done"
+        assert [data[k] for k in ("run_after", "created_at", "updated_at")] == [TS, TS, TS]
+        assert [data["started_at"], data["finished_at"]] == [TS, TS]
+
+    def test_to_json__keeps_null_timestamps_null(self) -> None:
+        data = task(started_at=None, finished_at=None, duration_ms=None).to_json()
+
+        assert [data["started_at"], data["finished_at"], data["duration_ms"]] == [None] * 3
 
 
 class TestDeleted:
