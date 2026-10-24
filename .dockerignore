@@ -1,0 +1,15 @@
+.git
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.import_linter_cache
+**/__pycache__
+web/node_modules
+web/dist
+.superpowers
+.design
+docs
+tests
+web/test-results
+web/playwright-report

@@ -1,0 +1,1 @@
+"""novelhog test suite."""
