@@ -296,13 +296,15 @@ import `worker` (import contract `repo-is-standalone`):
 class TaskHandler(Protocol):                        # repo/task_kinds/, transactional half
     kind: ClassVar[TaskKind]
     def begin(self, conn, task) -> Begin            # inside start's transaction
-    def complete(self, conn, task, outcome) -> None # inside finish's or retry's transaction
+    def complete(self, conn, task, outcome) -> object # inside finish's or retry's transaction;
+                                                      # returns a report for the worker to log (repo never logs)
     def recover(self, conn, task) -> None           # inside recovery's transaction (§8)
 
 class TaskProcessor(Protocol):                      # worker/tasks/, network half
     kind: ClassVar[TaskKind]
     def run(self, task, work, ctx) -> Outcome       # no transaction held
     def stored_keys(self, outcome) -> list[str]     # files run stored, trashed if the fence fails
+    def finished(self, task, outcome, report) -> None  # logs the handler's report after commit
 ```
 
 The public `repo.tasks.start(task, worker_id)` runs `TaskQueue.start` and the
