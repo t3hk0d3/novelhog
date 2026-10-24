@@ -492,9 +492,6 @@ TaskQueue
             - sets running, attempts + 1, started_at, clears error
         When the claim was lost or the task was cancelled
             - changes nothing and returns False
-    updated_at
-        - is set by insert, merge, start, finish, retry, cancel and recovery
-        - is not changed by claim, release or renew
     finish
         - sets done / failed (error) / skipped with finished_at, duration_ms, claim cleared
         When the claim was lost
@@ -507,6 +504,9 @@ TaskQueue
         - turns a queued task into cancelled; leaves a running task alone
     delete_for_novel
         - removes every task of the novel, no TK events
+    updated_at
+        - is set by insert, merge, start, finish, retry, cancel and recovery
+        - is not changed by claim, release or renew
     prune
         - deletes finished tasks older than TASK_RETENTION, keeps live and recent ones
 GET /api/v1/tasks
