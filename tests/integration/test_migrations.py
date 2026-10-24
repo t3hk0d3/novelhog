@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Engine, event, insert, inspect, select, text
+from sqlalchemy.exc import IntegrityError
 
 from novelhog.repo import SchemaOutdated, db
-from novelhog.repo.schema import chapters, event_clock, metadata, novels
-from tests.integration.helpers import chapter_row, insert_host, novel_row
+from novelhog.repo.schema import chapters, event_clock, events, metadata, novels
+from tests.integration.helpers import NOW, chapter_row, insert_host, novel_row
 
 
 @pytest.fixture
@@ -80,8 +82,8 @@ class TestMigrate__FromAnotherWorkingDirectory:
 _REBUILD = """
     from alembic import op
 
-    revision = "0002"
-    down_revision = "0001"
+    revision = "0003"
+    down_revision = "0002"
     branch_labels = None
     depends_on = None
 
@@ -101,7 +103,7 @@ def _script_location(tmp_path: Path, extra: str = "") -> Path:
     location = tmp_path / "migrations"
     shutil.copytree(db.MIGRATIONS_DIR, location, ignore=shutil.ignore_patterns("__pycache__"))
     body = textwrap.dedent(_REBUILD).format(extra=extra or "pass")
-    (location / "versions" / "0002_rebuild_novels.py").write_text(body)
+    (location / "versions" / "0003_rebuild_novels.py").write_text(body)
     return location
 
 
@@ -127,7 +129,7 @@ class TestMigrate__WithABatchRebuildOnSqlite:
     ) -> None:
         head = db.migrate(sqlite_with_data, script_location=_script_location(tmp_path))
 
-        assert head == "0002"
+        assert head == "0003"
         with db.read(sqlite_with_data) as connection:
             assert len(connection.execute(select(chapters.c.id)).all()) == 2
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
@@ -141,10 +143,54 @@ class TestMigrate__WithABatchRebuildOnSqlite:
             db.migrate(sqlite_with_data, script_location=location)
 
         state = db.revisions(sqlite_with_data)
-        assert state.current == "0001"
+        assert state.current == "0002"
         with db.read(sqlite_with_data) as connection:
             assert len(connection.execute(select(novels.c.id)).all()) == 1
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def _downgrade(engine: Engine, revision: str) -> None:
+    """Downgrade the database to `revision` through Alembic."""
+    config = db.alembic_config()
+    with engine.connect() as connection:
+        connection.execution_options(**{"novelhog_write": True})
+        config.attributes["connection"] = connection
+        command.downgrade(config, revision)
+
+
+class TestMigration0002__Tasks:
+    def test_upgrade__from_0001_creates_tasks_and_leaves_autogenerate_clean(
+        self, empty_engine: Engine
+    ) -> None:
+        db.migrate(empty_engine)
+        _downgrade(empty_engine, "0001")
+        assert "tasks" not in _tables(empty_engine)
+
+        db.migrate(empty_engine)
+
+        assert "tasks" in _tables(empty_engine)
+        with empty_engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection,
+                opts={"compare_type": True, "include_object": db.include_object},
+            )
+            assert compare_metadata(context, metadata) == []
+
+    def test_downgrade__to_0001_drops_tasks_and_restores_the_old_events_check(
+        self, empty_engine: Engine
+    ) -> None:
+        db.migrate(empty_engine)
+
+        _downgrade(empty_engine, "0001")
+
+        assert "tasks" not in _tables(empty_engine)
+        assert db.revisions(empty_engine).current == "0001"
+        with pytest.raises(IntegrityError), db.write(empty_engine) as connection:
+            connection.execute(
+                insert(events).values(
+                    seq=1, novel_id="NV000000000001", entity_id="TK000000000001", payload={}, at=NOW
+                )
+            )
 
 
 class TestRequireCurrent:
@@ -173,7 +219,7 @@ class TestRequireCurrent:
         with db.write(empty_engine) as connection:
             connection.execute(text("UPDATE alembic_version SET version_num = '9999'"))
 
-        with pytest.raises(SchemaOutdated, match="at 9999, this build needs 0001"):
+        with pytest.raises(SchemaOutdated, match="at 9999, this build needs 0002"):
             db.require_current(empty_engine)
 
     def test_revisions__reports_an_older_database_against_a_newer_build(
@@ -183,14 +229,14 @@ class TestRequireCurrent:
 
         state = db.revisions(empty_engine, script_location=_script_location(tmp_path))
 
-        assert (state.current, state.head, state.is_current) == ("0001", "0002", False)
+        assert (state.current, state.head, state.is_current) == ("0002", "0003", False)
 
     def test_require_current__raises_on_an_older_database(
         self, empty_engine: Engine, tmp_path: Path
     ) -> None:
         db.migrate(empty_engine)
 
-        with pytest.raises(SchemaOutdated, match="at 0001, this build needs 0002"):
+        with pytest.raises(SchemaOutdated, match="at 0002, this build needs 0003"):
             db.require_current(empty_engine, script_location=_script_location(tmp_path))
 
 
@@ -229,7 +275,8 @@ def _definitions(engine: Engine) -> dict[str, str]:
                     "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
                 )
             ).all()
-    return {name: re.sub(r"\s+", " ", sql or "") for name, sql in rows}
+    # SQLite quotes a table name after a batch rebuild; the quoting is not a difference.
+    return {name: re.sub(r"\s+", " ", (sql or "").replace('"', "")) for name, sql in rows}
 
 
 class TestMigrate__AgainstCreateAll:

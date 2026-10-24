@@ -208,6 +208,90 @@ subscriptions = Table(
     _id_check("ck_subscriptions_id", "SB"),
 )
 
+tasks = Table(
+    "tasks",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("kind", Text, nullable=False),
+    Column("entity_id", Text, nullable=False),
+    Column("novel_id", Text, ForeignKey("novels.id"), nullable=False),
+    Column("state", Text, nullable=False, server_default="queued"),
+    Column("priority", Integer, nullable=False),
+    Column("ordinal", Integer, nullable=False, server_default="0"),
+    Column("run_after", UTCDateTime, nullable=False),
+    Column("payload", _JSON, nullable=False, server_default="{}"),
+    Column("emit_event", Boolean, nullable=False, server_default=false()),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("error", Text),
+    Column("change_seq", _BIG, nullable=False),
+    Column("claimed_by", Text),
+    Column("claimed_until", UTCDateTime),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("updated_at", UTCDateTime, nullable=False),
+    Column("started_at", UTCDateTime),
+    Column("finished_at", UTCDateTime),
+    Column("duration_ms", Integer),
+    _id_check("ck_tasks_id", "TK"),
+    _claim_check("ck_tasks_claim"),
+    CheckConstraint(
+        "state IN ('queued', 'running', 'done', 'failed', 'skipped', 'cancelled')",
+        name="ck_tasks_state",
+    ),
+    CheckConstraint(
+        "(kind = 'novel_refresh' AND substr(entity_id, 1, 2) = 'NV') "
+        "OR (kind = 'chapter_download' AND substr(entity_id, 1, 2) = 'CH') "
+        "OR (kind = 'export_build' AND substr(entity_id, 1, 2) = 'EX')",
+        name="ck_tasks_kind",
+    ),
+    CheckConstraint(
+        "state <> 'running' OR (claimed_by IS NOT NULL AND started_at IS NOT NULL)",
+        name="ck_tasks_started",
+    ),
+    CheckConstraint(
+        "claimed_by IS NULL OR state IN ('queued', 'running')", name="ck_tasks_claim_state"
+    ),
+    CheckConstraint(
+        "(state IN ('done', 'failed', 'skipped', 'cancelled')) = (finished_at IS NOT NULL)",
+        name="ck_tasks_finished",
+    ),
+    CheckConstraint("state <> 'failed' OR error IS NOT NULL", name="ck_tasks_failed"),
+    Index(
+        "tasks_one_queued",
+        "kind",
+        "entity_id",
+        unique=True,
+        sqlite_where=text("state = 'queued'"),
+        postgresql_where=text("state = 'queued'"),
+    ),
+    Index(
+        "tasks_one_running",
+        "kind",
+        "entity_id",
+        unique=True,
+        sqlite_where=text("state = 'running'"),
+        postgresql_where=text("state = 'running'"),
+    ),
+    Index("tasks_by_entity", "entity_id", "created_at"),
+    Index("tasks_by_novel", "novel_id"),
+    Index(
+        "tasks_finished",
+        "finished_at",
+        sqlite_where=text("finished_at IS NOT NULL"),
+        postgresql_where=text("finished_at IS NOT NULL"),
+    ),
+    Index("tasks_changes", "change_seq"),
+)
+
+Index(
+    "tasks_queue",
+    tasks.c.priority.desc(),
+    tasks.c.run_after,
+    tasks.c.ordinal,
+    tasks.c.id,
+    sqlite_where=text("state = 'queued'"),
+    postgresql_where=text("state = 'queued'"),
+)
+
 event_clock = Table(
     "event_clock",
     metadata,
@@ -220,14 +304,10 @@ events = Table(
     metadata,
     Column("seq", _BIG, primary_key=True, autoincrement=False),
     Column("novel_id", Text, nullable=False),
-    Column(
-        "entity_id",
-        Text,
-        CheckConstraint("substr(entity_id, 1, 2) IN ('NV', 'CH', 'EX')", name="ck_events_entity"),
-        nullable=False,
-    ),
+    Column("entity_id", Text, nullable=False),
     Column("payload", _JSON, nullable=False),
     Column("at", UTCDateTime, nullable=False),
+    CheckConstraint("substr(entity_id, 1, 2) IN ('NV', 'CH', 'EX', 'TK')", name="ck_events_entity"),
     Index("events_by_novel", "novel_id", "seq"),
     Index("events_by_entity", "entity_id", "seq"),
 )
