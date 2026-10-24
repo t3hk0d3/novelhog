@@ -408,6 +408,13 @@ GET /api/v1/tasks/{task_id}
   and the task schema stays free to change.
 - Both routes follow v1's host and origin checks (v1 §5.9) and read-only
   database access like the other `GET` routes.
+- **Async endpoints do not return task IDs.** A task ID is not a stable handle
+  for the work a request started: "sync now" usually merges into the queued
+  refresh, a retry can move the work to another row, an export has no build
+  task while it waits, and queueing chapters creates one task per chapter. A
+  client follows the record instead: `TK` events with its `entity_id` (manual
+  syncs, first imports and builds set `emit_event`, §5.2), or
+  `GET /tasks?entity_id=<id>&state=queued&state=running`.
 
 ### Task events
 
@@ -645,6 +652,8 @@ API (unchanged contract)
   will revisit retention (last N per entity instead of 7 days) and whether
   scheduled refreshes emit events.
 - Routes that change tasks, and task kinds without a novel.
+- Returning the task from `POST /novels/{id}/sync`, if following it through
+  events proves awkward in the UI.
 - Pagination for `since` responses, and a counts endpoint for a header
   indicator, if live tasks grow too many to return on every poll.
 - Batch claims for downloads, and per-host queues or concurrency.
