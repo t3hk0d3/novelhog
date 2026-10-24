@@ -102,6 +102,7 @@ CREATE TABLE tasks (
     claimed_by    TEXT,
     claimed_until TIMESTAMP,
     created_at    TIMESTAMP NOT NULL,
+    updated_at    TIMESTAMP NOT NULL,              -- last change visible in the Task object (§7)
     started_at    TIMESTAMP,                       -- latest start
     finished_at   TIMESTAMP,
     duration_ms   INTEGER,                         -- finished_at − started_at of the last run
@@ -120,6 +121,7 @@ CREATE INDEX tasks_queue ON tasks (priority DESC, run_after, ordinal) WHERE stat
 CREATE INDEX tasks_by_entity ON tasks (entity_id, created_at);
 CREATE INDEX tasks_by_novel ON tasks (novel_id);
 CREATE INDEX tasks_finished ON tasks (finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX tasks_updated ON tasks (updated_at);
 ```
 
 - One queued task per entity and kind: enqueueing again **merges** into the
@@ -130,6 +132,10 @@ CREATE INDEX tasks_finished ON tasks (finished_at) WHERE finished_at IS NOT NULL
   (this is v1's `sync_requested`).
 - `novel_id` is there for the v1 lock order (§4 "Lock order") and for
   deleting a novel's tasks. Plain foreign key, no cascade (v1 §4).
+- `updated_at` is set on insert and by every write that changes a field of the
+  Task object (§7): an enqueue merge, start, finish, retry, cancel, recovery.
+  `claim`, `release` and `renew` touch only the claim, which is not exposed, and
+  leave it alone.
 - `payload` is `{}` for every kind in this spec. It exists for later request
   parameters, for example a forced full re-fetch.
 
@@ -194,7 +200,7 @@ are their own transaction.
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
 | `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), finished_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks, newest `created_at` first, and the total count (API, §7). |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -335,6 +341,7 @@ attempts     int
 error        string | null   last error, kept across retries
 run_after    timestamp
 created_at   timestamp
+updated_at   timestamp       last change to any field above
 started_at   timestamp | null
 finished_at  timestamp | null
 duration_ms  int | null
@@ -355,12 +362,14 @@ GET /api/v1/tasks/{task_id}
   `{items: Task[], total: int}`, newest `created_at` first (ties by `id`).
   Every filter is optional and combines with AND. `state` may repeat
   (`state=queued&state=running` = live tasks). `limit` is at most 500.
-- `since=<timestamp>` (RFC 3339) returns every live task plus the finished
-  tasks with `finished_at >= since`. It drops only finished tasks that finished
-  earlier, so it combines with the other filters: `state=failed&since=…` = tasks
-  that failed since then. A `since` in the future returns only live tasks. A
-  client that polls passes its previous request time and gets what is pending
-  plus what finished in between.
+- `since=<timestamp>` (RFC 3339) returns every live task plus every task with
+  `updated_at >= since`, whatever its state: one that started, finished,
+  failed, was skipped, cancelled or retried since then. It drops only tasks
+  that are finished and unchanged since `since`, so it combines with the other
+  filters: `state=failed&since=…` = tasks that failed since then. A `since` in
+  the future returns only live tasks. A client that polls passes its previous
+  request time and gets what is pending plus everything that changed in
+  between.
 - A malformed filter value (an ID with the wrong prefix or format, an unknown
   `kind` or `state`, a `since` that is not an RFC 3339 timestamp, `limit` out
   of range) → `422 validation_error`. A well-formed
@@ -482,6 +491,9 @@ TaskQueue
             - sets running, attempts + 1, started_at, clears error
         When the claim was lost or the task was cancelled
             - changes nothing and returns False
+    updated_at
+        - is set by insert, merge, start, finish, retry, cancel and recovery
+        - is not changed by claim, release or renew
     finish
         - sets done / failed (error) / skipped with finished_at, duration_ms, claim cleared
         When the claim was lost
@@ -505,7 +517,8 @@ GET /api/v1/tasks
         - pages the list; total counts all matches
     With since
         - returns every queued and running task
-        - returns finished tasks with finished_at >= since, not older ones
+        - returns tasks with updated_at >= since in any state (done, failed, skipped, cancelled)
+        - leaves out finished tasks whose last change is before since
         - combined with state, returns only matches of both (state=failed&since=… = failed since then)
         - a since in the future returns only live tasks
     With a malformed filter value, a since that is not RFC 3339, or limit above 500
