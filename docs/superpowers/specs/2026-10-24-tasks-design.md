@@ -121,6 +121,7 @@ CREATE INDEX tasks_queue ON tasks (priority DESC, run_after, ordinal) WHERE stat
 CREATE INDEX tasks_by_entity ON tasks (entity_id, created_at);
 CREATE INDEX tasks_by_novel ON tasks (novel_id);
 CREATE INDEX tasks_finished ON tasks (finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX tasks_updated ON tasks (updated_at);                -- unscoped since (global task page)
 ```
 
 - One queued task per entity and kind: enqueueing again **merges** into the
