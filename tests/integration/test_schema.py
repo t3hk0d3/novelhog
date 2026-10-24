@@ -40,8 +40,6 @@ class TestClaimColumns:
         [
             (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_by": "w1"}),
             (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_until": NOW}),
-            (exports, export_row(), {"claimed_by": "w1", "state": "building"}),
-            (exports, export_row(), {"claimed_until": NOW}),
             (
                 consumers,
                 {"name": "notifier", "last_seq": 0, "updated_at": NOW},
@@ -60,7 +58,6 @@ class TestClaimColumns:
         setups = {
             novels: insert_host,
             chapters: _insert_host_and_novel,
-            exports: insert_novel_with_chapter,
             consumers: None,
         }
         _expect_rejected(repo, setups[table], insert(table).values(**(row | claim)))

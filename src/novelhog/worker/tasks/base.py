@@ -39,7 +39,10 @@ type HeartbeatFactory = Callable[[Callable[[], bool], float], AbstractContextMan
 
 @dataclass(frozen=True)
 class TaskContext:
-    """The dependencies a processor's `run` may use: the same as v1's worker stages."""
+    """The dependencies a processor's `run` may use: the same as v1's worker stages.
+
+    `beat` is the running task's heartbeat; the runner sets it for each `run` (None otherwise).
+    """
 
     adapter: WorkerAdapter
     fetcher: ImageSource
@@ -51,6 +54,7 @@ class TaskContext:
     rng: random.Random
     heartbeat: HeartbeatFactory
     clock: Callable[[], datetime]
+    beat: Beat | None = None
 
 
 class TaskProcessor[W, R](Protocol):

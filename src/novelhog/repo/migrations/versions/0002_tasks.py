@@ -4,6 +4,10 @@ Novels: each novel gets one queued `novel_refresh` task at its `next_refresh_at`
 it to the request time for a requested sync), then the novels' queue and claim columns go.
 Downgrade restores them from the refresh tasks.
 
+Exports: `building` exports go back to `waiting`, each buildable waiting export gets one queued
+`export_build` task at its `created_at`, then the exports' claim columns and checks go. Downgrade
+sets `building` exports back to `waiting` and restores the columns and checks.
+
 Revision ID: 0002
 Revises: 0001
 Create Date: 2026-10-24
@@ -34,6 +38,12 @@ _NEW_PREFIXES = "substr(entity_id, 1, 2) IN ('NV', 'CH', 'EX', 'TK')"
 
 _REFRESH = "novel_refresh"
 _PRIORITY_REFRESH = 300
+_BUILD = "export_build"
+_PRIORITY_BUILD = 200
+_EXPORTS_CLAIM = "ck_exports_claim"
+_EXPORTS_BUILDING = "ck_exports_building"
+_EXPORTS_BUILDING_CHECK = "(state = 'building') = (claimed_by IS NOT NULL)"
+_CLAIM_CHECK = "(claimed_by IS NULL) = (claimed_until IS NULL)"
 _NOVELS_DUE = "novels_due_refresh"
 _NOVELS_CLAIM = "ck_novels_claim"
 
@@ -42,6 +52,23 @@ _novels = sa.table(
     "novels",
     sa.column("id", sa.Text),
     sa.column("next_refresh_at", UTCDateTime),
+)
+_chapters = sa.table(
+    "chapters",
+    sa.column("id", sa.Text),
+    sa.column("novel_id", sa.Text),
+    sa.column("position", sa.Integer),
+    sa.column("state", sa.Text),
+)
+_exports = sa.table(
+    "exports",
+    sa.column("id", sa.Text),
+    sa.column("novel_id", sa.Text),
+    sa.column("first_chapter_id", sa.Text),
+    sa.column("last_chapter_id", sa.Text),
+    sa.column("skip_missing", sa.Boolean),
+    sa.column("state", sa.Text),
+    sa.column("created_at", UTCDateTime),
 )
 _tasks = sa.table(
     "tasks",
@@ -219,6 +246,181 @@ def _restore_novel_queue_columns(now: datetime) -> None:
         batch.create_index(_NOVELS_DUE, ["next_refresh_at"])
 
 
+def _reset_building_exports(*, clear_claims: bool) -> None:
+    """Exports `building` go back to `waiting`: their build restarts (tasks spec 9).
+
+    With `clear_claims` (upgrade, while v1's claim columns and `ck_exports_building` still exist)
+    the claims are cleared in the same statement.
+    """
+    table = _exports
+    values: dict[str, object] = {"state": "waiting"}
+    if clear_claims:
+        table = sa.table(
+            "exports",
+            sa.column("state", sa.Text),
+            sa.column("claimed_by", sa.Text),
+            sa.column("claimed_until", UTCDateTime),
+        )
+        values |= {"claimed_by": None, "claimed_until": None}
+    op.get_bind().execute(sa.update(table).where(table.c.state == "building").values(values))
+
+
+def _buildable() -> sa.ColumnElement[bool]:
+    """A waiting export whose range may be built (v1 spec 6.5), as this revision defines it.
+
+    A frozen copy of `repo.exports._buildable` over this revision's tables: skip_missing, an end
+    chapter without a position, or every positioned chapter between the ends downloaded.
+    """
+
+    def end(chapter_id: sa.ColumnElement[str]) -> sa.ScalarSelect[int]:
+        position = sa.select(_chapters.c.position).where(_chapters.c.id == chapter_id)
+        return position.correlate(_exports).scalar_subquery()
+
+    first, last = end(_exports.c.first_chapter_id), end(_exports.c.last_chapter_id)
+    other = _chapters.alias("other")
+    incomplete = sa.exists().where(
+        other.c.novel_id == _exports.c.novel_id,
+        other.c.position.is_not(None),
+        other.c.state != "downloaded",
+        sa.or_(
+            sa.and_(other.c.position >= first, other.c.position <= last),
+            sa.and_(other.c.position >= last, other.c.position <= first),
+        ),
+    )
+    return sa.and_(
+        _exports.c.state == "waiting",
+        sa.or_(_exports.c.skip_missing, first.is_(None), last.is_(None), ~incomplete),
+    )
+
+
+def _fill_build_tasks(migration: _Migration) -> None:
+    """One queued build task per buildable waiting export at its `created_at` (tasks spec 9)."""
+    conn = op.get_bind()
+    buildable = conn.execute(
+        sa.select(_exports.c.id, _exports.c.novel_id, _exports.c.created_at)
+        .where(_buildable())
+        .order_by(_exports.c.id)
+    ).all()
+    if not buildable:
+        return
+    seq = migration.change_seq()
+    conn.execute(
+        sa.insert(_tasks),
+        [
+            {
+                "id": new_id("TK"),
+                "kind": _BUILD,
+                "entity_id": export.id,
+                "novel_id": export.novel_id,
+                "state": "queued",
+                "priority": _PRIORITY_BUILD,
+                "ordinal": 0,
+                "run_after": export.created_at,
+                "payload": {},
+                "emit_event": False,
+                "attempts": 0,
+                "change_seq": seq,
+                "created_at": export.created_at,
+                "updated_at": migration.now,
+            }
+            for export in buildable
+        ],
+    )
+
+
+def _key_of(table: str, column: str) -> sa.Column[str]:
+    """A column object to reference from a batch table that has no metadata of its own."""
+    return sa.Table(table, sa.MetaData(), sa.Column(column, sa.Text, primary_key=True)).c[column]
+
+
+def _v1_export_columns() -> sa.Table:
+    """`exports` as revision 0001 created it, without the constraints that outlive this revision.
+
+    Like `_v1_novel_columns`: the SQLite batch rebuild copies this, and `_kept_export_constraints`
+    adds the rest in the order `metadata.create_all` uses.
+    """
+    waiting = sa.text("state = 'waiting'")
+    active = sa.text("state IN ('waiting', 'building')")
+    return sa.Table(
+        "exports",
+        sa.MetaData(),
+        sa.Column("id", sa.Text, primary_key=True),
+        sa.Column("novel_id", sa.Text, nullable=False),
+        sa.Column("first_chapter_id", sa.Text, nullable=False),
+        sa.Column("last_chapter_id", sa.Text, nullable=False),
+        sa.Column("skip_missing", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("mime", sa.Text, nullable=False),
+        sa.Column("filename", sa.Text, nullable=False),
+        sa.Column("state", sa.Text, nullable=False, server_default="waiting"),
+        sa.Column("error", sa.Text),
+        sa.Column("storage_key", sa.Text),
+        sa.Column(
+            "size_bytes", _BIG, sa.CheckConstraint("size_bytes >= 0", name="ck_exports_size")
+        ),
+        sa.Column("waited", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("claimed_by", sa.Text),
+        sa.Column("claimed_until", UTCDateTime),
+        sa.Column("created_at", UTCDateTime, nullable=False),
+        sa.Column("ready_at", UTCDateTime),
+        sa.CheckConstraint(_CLAIM_CHECK, name=_EXPORTS_CLAIM),
+        sa.CheckConstraint(_EXPORTS_BUILDING_CHECK, name=_EXPORTS_BUILDING),
+        sa.Index("exports_by_novel", "novel_id", "created_at"),
+        sa.Index("exports_waiting", "created_at", sqlite_where=waiting),
+        sa.Index(
+            "exports_active",
+            "novel_id",
+            "first_chapter_id",
+            "last_chapter_id",
+            "mime",
+            "skip_missing",
+            unique=True,
+            sqlite_where=active,
+        ),
+    )
+
+
+def _kept_export_constraints() -> tuple[sa.Constraint, ...]:
+    return (
+        sa.CheckConstraint("length(id) = 14 AND substr(id, 1, 2) = 'EX'", name="ck_exports_id"),
+        sa.CheckConstraint(
+            "state IN ('waiting', 'building', 'ready', 'failed')", name="ck_exports_state"
+        ),
+        sa.CheckConstraint(
+            "(state = 'ready') = (storage_key IS NOT NULL AND size_bytes IS NOT NULL)",
+            name="ck_exports_ready",
+        ),
+        sa.CheckConstraint("(state = 'failed') = (error IS NOT NULL)", name="ck_exports_failed"),
+        sa.ForeignKeyConstraint(["novel_id"], [_key_of("novels", "id")]),
+        sa.ForeignKeyConstraint(["first_chapter_id"], [_key_of("chapters", "id")]),
+        sa.ForeignKeyConstraint(["last_chapter_id"], [_key_of("chapters", "id")]),
+        sa.UniqueConstraint("storage_key"),
+    )
+
+
+def _drop_export_claim_columns() -> None:
+    sqlite = op.get_bind().dialect.name == "sqlite"
+    with op.batch_alter_table(
+        "exports",
+        copy_from=_v1_export_columns() if sqlite else None,
+        table_args=_kept_export_constraints() if sqlite else (),
+    ) as batch:
+        batch.drop_constraint(_EXPORTS_BUILDING, type_="check")
+        batch.drop_constraint(_EXPORTS_CLAIM, type_="check")
+        batch.drop_column("claimed_by")
+        batch.drop_column("claimed_until")
+
+
+def _restore_export_claim_columns() -> None:
+    """Restore v1's export claim columns, all empty, and their checks (no export is building)."""
+    _reset_building_exports(clear_claims=False)
+    with op.batch_alter_table("exports") as batch:
+        batch.add_column(sa.Column("claimed_by", sa.Text))
+        batch.add_column(sa.Column("claimed_until", UTCDateTime))
+    with op.batch_alter_table("exports") as batch:
+        batch.create_check_constraint(_EXPORTS_CLAIM, _CLAIM_CHECK)
+        batch.create_check_constraint(_EXPORTS_BUILDING, _EXPORTS_BUILDING_CHECK)
+
+
 def _widen_events_check(condition: str) -> None:
     with op.batch_alter_table("events") as batch:
         batch.drop_constraint(_EVENTS_CHECK, type_="check")
@@ -314,10 +516,14 @@ def upgrade() -> None:
 
     migration = _Migration()
     _fill_refresh_tasks(migration)
+    _reset_building_exports(clear_claims=True)
+    _fill_build_tasks(migration)
     _drop_novel_queue_columns()
+    _drop_export_claim_columns()
 
 
 def downgrade() -> None:
+    _restore_export_claim_columns()
     _restore_novel_queue_columns(datetime.now(UTC))
     op.execute("DELETE FROM events WHERE substr(entity_id, 1, 2) = 'TK'")
     _widen_events_check(_OLD_PREFIXES)

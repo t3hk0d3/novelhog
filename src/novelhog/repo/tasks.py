@@ -2,7 +2,9 @@
 
 `TaskQueue` is internal to `repo`. Its methods that take a `Connection` write inside the caller's
 transaction, which follows the lock order (tasks spec section 4, "Lock order"): `lock_novel`
-first, then every entity and task row write, then the events, then `TaskQueue.stamp` last.
+first, then every entity and task row write, then the events, then `TaskQueue.stamp` last. The
+module functions `enqueue` and `cancel` are the same writes with the writer's `now` given, for
+entity helpers that take a `Connection` and a time but hold no `TaskQueue` (`exports`).
 `claim`, `release`, `renew`, `lapsed` and `prune` are their own transactions and are exempt.
 
 Change cursor: every write that changes a field of the Task object records the row as touched in
@@ -187,6 +189,107 @@ class Recovery:
     task: TaskRow
 
 
+def enqueue(  # noqa: PLR0913  (the enqueue parameters of tasks spec section 4)
+    conn: Connection,
+    kind: TaskKind,
+    entity_id: str,
+    novel_id: str,
+    *,
+    priority: int,
+    ordinal: int = 0,
+    run_after: datetime,
+    emit_event: bool = False,
+    payload: Mapping[str, object] = {},  # noqa: B006  (read-only default)
+    now: datetime,
+) -> TaskRow:
+    """Insert a queued task, or merge into the queued task of `(kind, entity_id)`.
+
+    The caller's transaction holds `lock_novel` and calls `TaskQueue.stamp` last. A merge sets
+    `run_after = min`, `priority = max` and `emit_event = OR`, and keeps the claim, `created_at`
+    and `payload`. The returned row's `change_seq` is the value before `stamp` (0 for an insert).
+    `now` is the writer's clock (`created_at`, `updated_at`).
+    """
+    current = _find(conn, kind, entity_id, TaskState.QUEUED)
+    if current is not None:
+        return _merge(
+            conn,
+            current,
+            priority=priority,
+            run_after=run_after,
+            emit_event=emit_event,
+            now=now,
+        )
+    row = conn.execute(
+        insert(tasks)
+        .values(
+            id=new_id("TK"),
+            kind=kind.value,
+            entity_id=entity_id,
+            novel_id=novel_id,
+            state=TaskState.QUEUED.value,
+            priority=priority,
+            ordinal=ordinal,
+            run_after=run_after,
+            payload=dict(payload),
+            emit_event=emit_event,
+            attempts=0,
+            change_seq=0,
+            created_at=now,
+            updated_at=now,
+        )
+        .returning(*tasks.c)
+    ).one()
+    task = TaskRow.from_row(row)
+    _touch(conn, task.id)
+    return task
+
+
+def _merge(
+    conn: Connection,
+    current: TaskRow,
+    *,
+    priority: int,
+    run_after: datetime,
+    emit_event: bool,
+    now: datetime,
+) -> TaskRow:
+    """Merge an enqueue into the queued task `current`; only a new `run_after` is visible."""
+    values: dict[str, object] = {
+        "priority": max(current.priority, priority),
+        "emit_event": current.emit_event or emit_event,
+    }
+    moved = run_after < current.run_after
+    if moved:
+        values |= {"run_after": run_after, "updated_at": now}
+    row = conn.execute(
+        update(tasks).where(tasks.c.id == current.id).values(values).returning(*tasks.c)
+    ).one()
+    if moved:
+        _touch(conn, current.id)
+    return TaskRow.from_row(row)
+
+
+def cancel(conn: Connection, kind: TaskKind, entity_id: str, *, now: datetime) -> bool:
+    """Turn the queued task of `(kind, entity_id)` into `cancelled`; a running one stays.
+
+    The caller's transaction holds `lock_novel` and calls `TaskQueue.stamp` last.
+    """
+    task_id = conn.execute(
+        update(tasks)
+        .where(
+            tasks.c.kind == kind.value,
+            tasks.c.entity_id == entity_id,
+            tasks.c.state == TaskState.QUEUED.value,
+        )
+        .values(state=TaskState.CANCELLED.value, finished_at=now, **_released(now))
+        .returning(tasks.c.id)
+    ).scalar_one_or_none()
+    if task_id is None:
+        return False
+    _touch(conn, task_id)
+    return True
+
+
 class TaskQueue:
     """Queue primitives over the `tasks` table (tasks spec section 4, "Operations")."""
 
@@ -207,71 +310,19 @@ class TaskQueue:
         emit_event: bool = False,
         payload: Mapping[str, object] = {},  # noqa: B006  (read-only default)
     ) -> TaskRow:
-        """Insert a queued task, or merge into the queued task of `(kind, entity_id)`.
-
-        A merge sets `run_after = min`, `priority = max` and `emit_event = OR`, and keeps the
-        claim, `created_at` and `payload`. The returned row's `change_seq` is the value before
-        `stamp` (0 for an insert).
-        """
-        now = self._clock()
-        current = _find(conn, kind, entity_id, TaskState.QUEUED)
-        if current is not None:
-            return self._merge(
-                conn,
-                current,
-                priority=priority,
-                run_after=run_after,
-                emit_event=emit_event,
-                now=now,
-            )
-        row = conn.execute(
-            insert(tasks)
-            .values(
-                id=new_id("TK"),
-                kind=kind.value,
-                entity_id=entity_id,
-                novel_id=novel_id,
-                state=TaskState.QUEUED.value,
-                priority=priority,
-                ordinal=ordinal,
-                run_after=run_after,
-                payload=dict(payload),
-                emit_event=emit_event,
-                attempts=0,
-                change_seq=0,
-                created_at=now,
-                updated_at=now,
-            )
-            .returning(*tasks.c)
-        ).one()
-        task = TaskRow.from_row(row)
-        _touch(conn, task.id)
-        return task
-
-    def _merge(
-        self,
-        conn: Connection,
-        current: TaskRow,
-        *,
-        priority: int,
-        run_after: datetime,
-        emit_event: bool,
-        now: datetime,
-    ) -> TaskRow:
-        """Merge an enqueue into the queued task `current`; only a new `run_after` is visible."""
-        values: dict[str, object] = {
-            "priority": max(current.priority, priority),
-            "emit_event": current.emit_event or emit_event,
-        }
-        moved = run_after < current.run_after
-        if moved:
-            values |= {"run_after": run_after, "updated_at": now}
-        row = conn.execute(
-            update(tasks).where(tasks.c.id == current.id).values(values).returning(*tasks.c)
-        ).one()
-        if moved:
-            _touch(conn, current.id)
-        return TaskRow.from_row(row)
+        """Insert a queued task, or merge into the queued one; see the module function `enqueue`."""
+        return enqueue(
+            conn,
+            kind,
+            entity_id,
+            novel_id,
+            priority=priority,
+            ordinal=ordinal,
+            run_after=run_after,
+            emit_event=emit_event,
+            payload=payload,
+            now=self._clock(),
+        )
 
     def queued(self, conn: Connection, kind: TaskKind, entity_id: str) -> TaskRow | None:
         """The queued task of `(kind, entity_id)`, if there is one."""
@@ -279,21 +330,7 @@ class TaskQueue:
 
     def cancel(self, conn: Connection, kind: TaskKind, entity_id: str) -> bool:
         """Turn the queued task of `(kind, entity_id)` into `cancelled`; a running one stays."""
-        now = self._clock()
-        task_id = conn.execute(
-            update(tasks)
-            .where(
-                tasks.c.kind == kind.value,
-                tasks.c.entity_id == entity_id,
-                tasks.c.state == TaskState.QUEUED.value,
-            )
-            .values(state=TaskState.CANCELLED.value, finished_at=now, **_released(now))
-            .returning(tasks.c.id)
-        ).scalar_one_or_none()
-        if task_id is None:
-            return False
-        _touch(conn, task_id)
-        return True
+        return cancel(conn, kind, entity_id, now=self._clock())
 
     def delete_for_novel(self, conn: Connection, novel_id: str) -> None:
         """Delete every task of the novel in `id` order (`DELETE /novels`); no cursor, no events."""
@@ -439,7 +476,7 @@ class TaskQueue:
             return False
         _touch(conn, task.id)
         if successor is not None:
-            self._merge(
+            _merge(
                 conn,
                 successor,
                 priority=current.priority,
@@ -513,7 +550,7 @@ class TaskQueue:
         _touch(conn, task.id)
         if successor is None:
             return Recovery(Recovered.REQUEUED, current)
-        self._merge(
+        _merge(
             conn,
             successor,
             priority=current.priority,

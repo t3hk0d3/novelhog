@@ -148,8 +148,6 @@ exports = Table(
         CheckConstraint("size_bytes >= 0", name="ck_exports_size"),
     ),
     Column("waited", Boolean, nullable=False, server_default=false()),
-    Column("claimed_by", Text),
-    Column("claimed_until", UTCDateTime),
     Column("created_at", UTCDateTime, nullable=False),
     Column("ready_at", UTCDateTime),
     _id_check("ck_exports_id", "EX"),
@@ -159,8 +157,6 @@ exports = Table(
         name="ck_exports_ready",
     ),
     CheckConstraint("(state = 'failed') = (error IS NOT NULL)", name="ck_exports_failed"),
-    _claim_check("ck_exports_claim"),
-    CheckConstraint("(state = 'building') = (claimed_by IS NOT NULL)", name="ck_exports_building"),
     Index("exports_by_novel", "novel_id", "created_at"),
     Index(
         "exports_waiting",

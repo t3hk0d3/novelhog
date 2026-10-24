@@ -371,16 +371,7 @@ class TestPatch__DequeueNeededByAWaitingExport:
         self, repo: Repo, novel_id: str
     ) -> None:
         add_chapters(repo, novel_id, [PENDING])
-        add_export(
-            repo,
-            novel_id,
-            "EX000000000001",
-            1,
-            1,
-            state="building",
-            claimed_by="w1",
-            claimed_until=repo.clock() + timedelta(minutes=5),
-        )
+        add_export(repo, novel_id, "EX000000000001", 1, 1, state="building")
         add_export(
             repo, novel_id, "EX000000000002", 1, 1, state="ready", storage_key="k", size_bytes=1
         )

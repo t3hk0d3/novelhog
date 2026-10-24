@@ -365,6 +365,167 @@ class TestMigration0002__NovelsDowngrade:
             connection.execute(insert(_V1_NOVELS).values(**_v1_novel(5, None)))
 
 
+_V1_EXPORTS = sa.table(
+    "exports",
+    sa.column("id", sa.Text),
+    sa.column("novel_id", sa.Text),
+    sa.column("first_chapter_id", sa.Text),
+    sa.column("last_chapter_id", sa.Text),
+    sa.column("skip_missing", sa.Boolean),
+    sa.column("mime", sa.Text),
+    sa.column("filename", sa.Text),
+    sa.column("state", sa.Text),
+    sa.column("claimed_by", sa.Text),
+    sa.column("claimed_until", UTCDateTime),
+    sa.column("storage_key", sa.Text),
+    sa.column("size_bytes", sa.Integer),
+    sa.column("ready_at", UTCDateTime),
+    sa.column("created_at", UTCDateTime),
+)
+NOVEL_1 = "NV000000000001"
+
+
+def _ch(position: int) -> str:
+    return f"CH{position:012d}"
+
+
+def _v1_export(n: int, first: int, last: int, **values: Any) -> dict[str, Any]:
+    return {
+        "id": f"EX{n:012d}",
+        "novel_id": NOVEL_1,
+        "first_chapter_id": _ch(first),
+        "last_chapter_id": _ch(last),
+        "skip_missing": False,
+        "mime": "application/epub+zip",
+        "filename": f"novel-{n}.epub",
+        "state": "waiting",
+        "claimed_by": None,
+        "claimed_until": None,
+        "storage_key": None,
+        "size_bytes": None,
+        "ready_at": None,
+        "created_at": NOW + timedelta(minutes=n),
+    } | values
+
+
+@pytest.fixture
+def v1_exports_engine(v1_engine: Engine) -> Engine:
+    """Revision 0001 with chapters 1-2 downloaded and 3 not requested, and exports of them.
+
+    EX1 (1-2) is buildable, EX2 (1-3) waits for chapter 3, EX3 (2-3) is `skip_missing`, EX4 (2-2)
+    is building under a claim, EX5 (1-1) is ready.
+    """
+    with db.write(v1_engine) as connection:
+        for position, state in ((1, "downloaded"), (2, "downloaded"), (3, "not_requested")):
+            connection.execute(
+                insert(chapters).values(
+                    **chapter_row(
+                        id=_ch(position),
+                        novel_id=NOVEL_1,
+                        url=f"https://example.com/novel/1/{position}",
+                        position=position,
+                        state=state,
+                    )
+                )
+            )
+        connection.execute(
+            insert(_V1_EXPORTS),
+            [
+                _v1_export(1, 1, 2),
+                _v1_export(2, 1, 3),
+                _v1_export(3, 2, 3, skip_missing=True),
+                _v1_export(4, 2, 2, state="building", claimed_by="w", claimed_until=LATER),
+                _v1_export(5, 1, 1, state="ready", storage_key="k", size_bytes=1, ready_at=NOW),
+            ],
+        )
+    return v1_engine
+
+
+def _build_tasks(engine: Engine) -> dict[str, Any]:
+    with db.read(engine) as connection:
+        rows = connection.execute(select(tasks).where(tasks.c.kind == "export_build")).all()
+    return {row.entity_id: row for row in rows}
+
+
+def _export_states(engine: Engine) -> dict[str, str]:
+    with db.read(engine) as connection:
+        return dict(connection.execute(select(_V1_EXPORTS.c.id, _V1_EXPORTS.c.state)).all())
+
+
+class TestMigration0002__Exports:
+    def test_upgrade__sets_building_exports_back_to_waiting(
+        self, v1_exports_engine: Engine
+    ) -> None:
+        db.migrate(v1_exports_engine)
+
+        states = _export_states(v1_exports_engine)
+        assert states.pop("EX000000000005") == "ready"
+        assert set(states.values()) == {"waiting"}
+
+    def test_upgrade__gives_each_buildable_waiting_export_a_build_task_at_its_created_at(
+        self, v1_exports_engine: Engine
+    ) -> None:
+        db.migrate(v1_exports_engine)
+
+        found = _build_tasks(v1_exports_engine)
+        assert sorted(found) == [f"EX{n:012d}" for n in (1, 3, 4)]
+        for n in (1, 3, 4):
+            task = found[f"EX{n:012d}"]
+            at = NOW + timedelta(minutes=n)
+            assert (task.state, task.run_after, task.created_at) == ("queued", at, at)
+            assert (task.priority, task.emit_event, task.claimed_by) == (200, False, None)
+
+    def test_upgrade__stamps_build_tasks_with_the_migration_clock_value(
+        self, v1_exports_engine: Engine
+    ) -> None:
+        db.migrate(v1_exports_engine)
+
+        with db.read(v1_exports_engine) as connection:
+            clock = connection.execute(select(event_clock.c.seq)).scalar_one()
+        assert {t.change_seq for t in _build_tasks(v1_exports_engine).values()} == {clock}
+
+    def test_upgrade__drops_the_export_claim_columns(self, v1_exports_engine: Engine) -> None:
+        db.migrate(v1_exports_engine)
+
+        columns = {c["name"] for c in inspect(v1_exports_engine).get_columns("exports")}
+        assert columns.isdisjoint({"claimed_by", "claimed_until"})
+
+
+class TestMigration0002__ExportsDowngrade:
+    @pytest.fixture
+    def downgraded(self, v1_exports_engine: Engine) -> Engine:
+        """Upgraded, then EX1's build running (export building), EX3's queued, then downgraded."""
+        db.migrate(v1_exports_engine)
+        with db.write(v1_exports_engine) as connection:
+            connection.execute(
+                update(tasks)
+                .where(tasks.c.entity_id == "EX000000000001")
+                .values(state="running", claimed_by="w", claimed_until=LATER, started_at=NOW)
+            )
+            connection.execute(
+                update(_V1_EXPORTS)
+                .where(_V1_EXPORTS.c.id == "EX000000000001")
+                .values(state="building")
+            )
+        _downgrade(v1_exports_engine, "0001")
+        return v1_exports_engine
+
+    def test_downgrade__sets_building_exports_back_to_waiting_without_claims(
+        self, downgraded: Engine
+    ) -> None:
+        with db.read(downgraded) as connection:
+            rows = connection.execute(
+                select(_V1_EXPORTS.c.state, _V1_EXPORTS.c.claimed_by, _V1_EXPORTS.c.claimed_until)
+            ).all()
+        assert set(rows) == {("waiting", None, None), ("ready", None, None)}
+
+    def test_downgrade__restores_the_v1_export_checks(self, downgraded: Engine) -> None:
+        with pytest.raises(IntegrityError), db.write(downgraded) as connection:
+            connection.execute(insert(_V1_EXPORTS).values(**_v1_export(6, 3, 3, state="building")))
+        with pytest.raises(IntegrityError), db.write(downgraded) as connection:
+            connection.execute(insert(_V1_EXPORTS).values(**_v1_export(7, 3, 3, claimed_by="w")))
+
+
 class TestRequireCurrent:
     def test_require_current__returns_on_a_database_at_head(self, empty_engine: Engine) -> None:
         db.migrate(empty_engine)

@@ -12,7 +12,8 @@
 4. the processor's `run` works under a heartbeat that renews the claim every `CLAIM_TTL / 3`; an
    exception is recorded as `Failed('<Type>: <summary>')`;
 5. `repo.tasks.finish` records the outcome and the processor's `finished` logs the handler's
-   report; when the fence fails the result is discarded and the files `run` stored are trashed.
+   report (a `finished` that raises is logged as `task_error` and the step goes on); when the
+   fence fails the result is discarded and the files `run` stored are trashed.
 
 A `Retry` outcome, or a start or finish transaction that itself fails, raises `RunnerBackoff`
 so the loop backs off; the task then keeps its claim until recovery puts it back.
@@ -20,6 +21,7 @@ Every transition logs one `task_<verb>` line with `task_id`, `kind`, `entity_id`
 """
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from structlog.typing import FilteringBoundLogger
@@ -159,9 +161,9 @@ class Runner:
         raised: Exception | None = None
         with self._ctx.heartbeat(
             lambda: self._repo.tasks.renew(task, self._worker_id, self._ttl), self._ttl / 3
-        ):
+        ) as beat:
             try:
-                outcome = processor.run(task, started.work, self._ctx)
+                outcome = processor.run(task, started.work, replace(self._ctx, beat=beat))
             except Exception as error:  # noqa: BLE001 - any failure of the work fails the task
                 raised = error
                 outcome = Failed(summarize(error))
@@ -175,6 +177,9 @@ class Runner:
             self._repo.trash.discard(processor.stored_keys(outcome))
         else:
             _log_finished(logger, outcome, finished, raised)
-            processor.finished(task, outcome, finished.report)
+            try:
+                processor.finished(task, outcome, finished.report)
+            except Exception as error:  # noqa: BLE001 - the hook only logs; the task is recorded
+                logger.error("task_error", stage="finished", error=summarize(error), exc_info=True)
         if isinstance(outcome, Retry):
             raise RunnerBackoff

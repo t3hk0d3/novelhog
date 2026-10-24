@@ -145,6 +145,7 @@ def create_app(
             settings.database_url,
             static_base_url=settings.static_base_url,
             refresh_min_interval=settings.refresh_min_interval,
+            refresh_max_interval=settings.refresh_max_interval,
         )
 
     @asynccontextmanager

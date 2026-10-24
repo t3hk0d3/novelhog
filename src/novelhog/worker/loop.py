@@ -7,13 +7,12 @@ when it did work:
 2. `_dispatch_notifications` (always runs, never returns early; a failure is logged; keeps
    dispatching while full batches come back, for up to `DISPATCH_BUDGET_S`),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
-4. claim and run one task (`Runner.step`, tasks spec section 6; refreshes are tasks),
-5. `_build_export` (claim and build a ready export),
-6. download a batch of pending chapters,
-7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
+4. claim and run one task (`Runner.step`, tasks spec section 6; refreshes and builds are tasks),
+5. download a batch of pending chapters,
+6. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
    when the notifier is still behind (so the loop does not sleep).
 
-Stages 5-6 are v1's and leave as their kinds move to tasks. A `RunnerBackoff` from stage 4 backs
+Stage 5 is v1's and leaves when downloads move to tasks. A `RunnerBackoff` from stage 4 backs
 the loop off like a failed step; the runner has logged the task event, so the loop logs nothing.
 """
 
@@ -30,7 +29,7 @@ from novelhog.config import Settings
 from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
-from novelhog.worker import builds, downloads, maintenance, refresh, runtime
+from novelhog.worker import downloads, maintenance, refresh, runtime
 from novelhog.worker.downloads import ImageSource
 from novelhog.worker.reachability import Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
@@ -40,11 +39,11 @@ from novelhog.worker.tasks.base import ProcessorRegistry, TaskContext, WorkerAda
 MAINTENANCE_INTERVAL = timedelta(hours=1)
 DISPATCH_BUDGET_S = 2.0
 
-StepResult = Literal["task", "build", "download", "notify", "idle"]
+StepResult = Literal["task", "download", "notify", "idle"]
 
 
 class Worker:
-    """Runs recover, task, build and download steps until asked to stop."""
+    """Runs recover, task and download steps until asked to stop."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -133,8 +132,6 @@ class Worker:
         self._empty_trash()
         if self._runner.step():
             return "task"
-        if self._build_export():
-            return "build"
         if self._download_batch():
             return "download"
         self._maintain()
@@ -190,22 +187,6 @@ class Worker:
             log.get(worker_id=self._settings.worker_id).error(
                 "maintenance_failed", error=f"{type(error).__name__}: {error}", exc_info=True
             )
-
-    def _build_export(self) -> bool:
-        """Claim and build a ready export; True if one was built."""
-        settings = self._settings
-        claim = self._repo.exports.claim_ready(settings.worker_id, settings.claim_ttl)
-        if claim is None:
-            return False
-        builds.build(
-            self._repo,
-            ChapterStore(self._repo),
-            self._storage,
-            claim,
-            settings=settings,
-            tmp_dir=settings.data_dir / "tmp",
-        )
-        return True
 
     def _download_batch(self) -> bool:
         settings = self._settings

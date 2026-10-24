@@ -34,6 +34,7 @@ class Repo:
         clock: Callable[[], datetime] = utcnow,
         static_base_url: str = "/static",
         refresh_min_interval: int = 21600,
+        refresh_max_interval: int = 2592000,
         handlers: HandlerRegistry | None = None,
     ) -> None:
         """Open the database; `handlers` overrides the task handler registry (tests)."""
@@ -45,6 +46,7 @@ class Repo:
             clock=clock,
             static_base_url=static_base_url,
             refresh_min_interval=refresh_min_interval,
+            refresh_max_interval=refresh_max_interval,
         )
         self.chapters = Chapters(self.context)
         self.consumers = Consumers(self.context)

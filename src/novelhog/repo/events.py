@@ -100,6 +100,10 @@ def emit_novel_change(
     inside `append`. `failed_export_ids` are exports the same transaction just moved to `failed`
     (a user dequeue, spec section 5.5); they are no longer waiting, so they get their `EX` event
     here, once, after the others.
+
+    Every caller first queues the builds the change made buildable, before this first append
+    (`exports.enqueue_buildable` with `exports.affected_waiting`, tasks spec 5.1), and calls
+    `TaskQueue.stamp` after it.
     """
     # Imported here: novels, chapters and exports import this module.
     from novelhog.repo import chapters, exports, novels  # noqa: PLC0415

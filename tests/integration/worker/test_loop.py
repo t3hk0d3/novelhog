@@ -76,14 +76,6 @@ class TestStep__OrderOfWork:
         assert worker.step() == "download"
         assert chapter_of(repo, chapter_id).state == "downloaded"
 
-    def test_step__returns_build_when_an_export_was_built(
-        self, novel_id: str, worker: Worker, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(Worker, "_build_export", lambda self: True)
-
-        assert worker.step() == "task"
-        assert worker.step() == "build"
-
     def test_step__runs_notification_dispatch_before_the_work(
         self, novel_id: str, worker: Worker, monkeypatch: pytest.MonkeyPatch
     ) -> None:

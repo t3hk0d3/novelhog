@@ -447,6 +447,30 @@ class TestRunnerStep__WhenTheFinishTransactionFails:
         assert report.requeued == 1
 
 
+class TestRunnerStep__WhenFinishedRaises:
+    @pytest.fixture
+    def logs(
+        self, runner: Runner, processor: RecordingProcessor, task: TaskRow,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[Any]:  # fmt: skip
+        def broken(*_: object) -> None:
+            message = "hook broke"
+            raise ValueError(message)
+
+        monkeypatch.setattr(processor, "finished", broken)
+        with capture_logs() as logs:
+            assert runner.step() is True
+        return logs
+
+    def test_step__logs_task_error_with_the_traceback(self, logs: list[Any], task: TaskRow) -> None:
+        error = entry(logs, "task_error")
+        assert (error["stage"], error["error"]) == ("finished", "ValueError: hook broke")
+        assert error["exc_info"] is True
+
+    def test_step__keeps_the_task_done(self, handled: Repo, logs: list[Any], task: TaskRow) -> None:
+        assert task_row(handled, task.id).state is TaskState.DONE
+
+
 class TestRunnerStep__WhileRunIsWorking:
     def test_step__renews_the_claim_every_third_of_the_ttl(
         self, handled: Repo, runner: Runner, processor: RecordingProcessor, task: TaskRow,
@@ -466,6 +490,14 @@ class TestRunnerStep__WhileRunIsWorking:
         assert [beat.interval_s for beat in beats] == [TTL / 3]
         assert renewed == [True]
         assert task_row(handled, task.id).state is TaskState.DONE
+
+    def test_step__hands_run_the_heartbeat_as_ctx_beat(
+        self, runner: Runner, processor: RecordingProcessor, task: TaskRow,
+        beats: list[FakeHeartbeat],
+    ) -> None:  # fmt: skip
+        runner.step()
+
+        assert [ctx.beat for ctx in processor.contexts] == beats
 
 
 class TestRunnerStep__OnStop:

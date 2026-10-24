@@ -35,6 +35,7 @@ from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import chapters, novels
 from novelhog.repo.schema import events as events_table
+from novelhog.repo.tasks import TaskQueue
 
 MAX_LIMIT = 5000
 _ERROR_BATCH = 500
@@ -317,6 +318,7 @@ class Chapters:
         self._engine = context.engine
         self._clock = context.clock
         self._static_base_url = context.static_base_url
+        self._queue = TaskQueue(context)
 
     def list(
         self,
@@ -380,7 +382,9 @@ class Chapters:
         Appends one `CH` event per updated chapter, one `NV` and the affected `EX` events.
 
         Dequeuing (`not_requested`) fails the novel's waiting, non-`skip_missing` exports whose
-        range contains a dequeued chapter (spec section 5.5); the TOC sync never does.
+        range contains a dequeued chapter (spec section 5.5) and cancels their queued builds; the
+        TOC sync never does. Waiting exports the change made buildable get their build queued
+        (tasks spec 5.1).
         """
         if target not in CLIENT_TARGETS:
             raise ValidationFailed(  # noqa: TRY003
@@ -395,19 +399,23 @@ class Chapters:
             ).scalar_one()
             positions = resolve_selector(selector, total)
             result = _transition(conn, novel_id, positions, target, now=now)
-            failed: list[str] = []
-            if target is ChapterState.NOT_REQUESTED and result.changed_ids:
-                # Imported here: exports imports this module.
-                from novelhog.repo import exports  # noqa: PLC0415
+            if not result.changed_ids:
+                return PatchResult(updated=result.updated, skipped=result.skipped)
+            # Imported here: exports imports this module.
+            from novelhog.repo import exports  # noqa: PLC0415
 
-                failed = exports.fail_cancelled(conn, novel_id, result.changed_ids)
-            if result.changed_ids:
-                events.emit_novel_change(
-                    conn,
-                    novel_id,
-                    result.changed_ids,
-                    now=now,
-                    static_base_url=self._static_base_url,
-                    failed_export_ids=failed,
-                )
+            failed: list[str] = []
+            if target is ChapterState.NOT_REQUESTED:
+                failed = exports.fail_cancelled(conn, novel_id, result.changed_ids, now)
+            affected = exports.affected_waiting(conn, novel_id, result.changed_ids)
+            exports.enqueue_buildable(conn, novel_id, affected, now)
+            events.emit_novel_change(
+                conn,
+                novel_id,
+                result.changed_ids,
+                now=now,
+                static_base_url=self._static_base_url,
+                failed_export_ids=failed,
+            )
+            self._queue.stamp(conn)
             return PatchResult(updated=result.updated, skipped=result.skipped)

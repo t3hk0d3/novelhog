@@ -1,7 +1,6 @@
 """The storage trash repository (spec section 4)."""
 
 import threading
-from datetime import timedelta
 
 from sqlalchemy import delete, select, update
 
@@ -17,8 +16,6 @@ from tests.integration.helpers import (
     insert_novel_with_chapter,
     trash_keys,
 )
-
-LATER = timedelta(days=1)
 
 
 def put(repo: Repo, keys: list[str]) -> None:
@@ -133,7 +130,7 @@ class TestDiscard__RacingFinish:
     def test_discard__waits_for_a_finish_in_flight_and_then_skips_the_key(self, repo: Repo) -> None:
         key = f"exports/{NOVEL_ID}/EX000000000001/n.epub"
         with db.write(repo.engine) as conn:
-            insert_export(conn, state="building", claimed_by="b", claimed_until=NOW + LATER)
+            insert_export(conn, state="building")
         started = threading.Event()
         errors: list[BaseException] = []
 
@@ -154,8 +151,6 @@ class TestDiscard__RacingFinish:
                     storage_key=key,
                     size_bytes=1,
                     ready_at=NOW,
-                    claimed_by=None,
-                    claimed_until=None,
                 )
             )
             conn.execute(delete(storage_trash).where(storage_trash.c.key == key))

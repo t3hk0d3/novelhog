@@ -507,9 +507,8 @@ class TestRecover:
         assert (
             report.chapters_requeued,
             report.chapters_freed,
-            report.exports_reset,
             report.consumers_freed,
-        ) == (0, 0, 0, 0)
+        ) == (0, 0, 0)
         assert event_count(repo) == before
         assert row_of(repo, cid(1)).state == "downloading"
         assert row_of(repo, cid(2)).claimed_by == ME

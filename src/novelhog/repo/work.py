@@ -1,9 +1,9 @@
 """Download work: chapter claims, the download pipeline's writes and recovery (spec 4, 6.3, 6.4).
 
-Every per-novel write transaction follows the lock order of spec section 4: `lock_novel`
-first (a missing novel means a lost claim), then the child rows, then the events via
-`events.emit_novel_change`. Cross-novel statements (the batch claim, heartbeat renewals and
-the recovery scans) are exempt.
+Every per-novel write transaction follows the lock order of tasks spec section 4: `lock_novel`
+first (a missing novel means a lost claim), then the child rows and the build enqueues of tasks
+spec 5.1, then the events via `events.emit_novel_change`, then `TaskQueue.stamp`. Cross-novel
+statements (the batch claim, heartbeat renewals and the recovery scans) are exempt.
 """
 
 from collections.abc import Mapping, Sequence
@@ -13,13 +13,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import Connection, and_, case, select, update
 
 from novelhog.domain.chapters import ChapterState
-from novelhog.domain.exports import ExportState
 from novelhog.repo import claims, contents, db, events
 from novelhog.repo import exports as export_repo
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import chapters, consumers, novels
-from novelhog.repo.schema import exports as exports_table
+from novelhog.repo.tasks import TaskQueue
 
 _PENDING = ChapterState.PENDING.value
 _DOWNLOADING = ChapterState.DOWNLOADING.value
@@ -47,7 +46,6 @@ class RecoveryReport:
 
     chapters_requeued: int
     chapters_freed: int
-    exports_reset: int = 0
     consumers_freed: int = 0
 
 
@@ -74,6 +72,7 @@ class Work:
         self._engine = context.engine
         self._clock = context.clock
         self._static_base_url = context.static_base_url
+        self._queue = TaskQueue(context)
 
     def _emit(
         self,
@@ -83,9 +82,16 @@ class Work:
         now: datetime,
         errors: Mapping[str, tuple[str, datetime]] | None = None,
     ) -> None:
+        """End a chapter change: queue the builds it made buildable, append events, stamp tasks.
+
+        Called last in the transaction, after every chapter row write.
+        """
+        affected = export_repo.affected_waiting(conn, novel_id, changed)
+        export_repo.enqueue_buildable(conn, novel_id, affected, now)
         events.emit_novel_change(
             conn, novel_id, changed, now=now, static_base_url=self._static_base_url, errors=errors
         )
+        self._queue.stamp(conn)
 
     def claim_batch(self, worker_id: str, size: int, ttl: int) -> list[ChapterClaim]:
         """Claim up to `size` pending chapters of any novel for `ttl` seconds; no events.
@@ -263,20 +269,18 @@ class Work:
         return [chapter_id for chapter_id in chapter_ids if chapter_id in owned_ids]
 
     def recover(self) -> RecoveryReport:
-        """Reset every lapsed claim of chapters and exports (spec section 4, "Recovery").
+        """Reset every lapsed chapter claim (spec section 4, "Recovery").
 
-        Refreshes are tasks; `Tasks.recover` recovers them.
+        Refreshes and builds are tasks; `Tasks.recover` recovers them.
 
         Also frees consumers whose claim lapsed (no events).
         """
         now = self._clock()
         requeued, freed = self._recover_chapters(now)
-        exports_reset = self._recover_exports(now)
         consumers_freed = self._recover_consumers(now)
         return RecoveryReport(
             chapters_requeued=requeued,
             chapters_freed=freed,
-            exports_reset=exports_reset,
             consumers_freed=consumers_freed,
         )
 
@@ -288,35 +292,6 @@ class Work:
                 .where(consumers.c.claimed_by.is_not(None), consumers.c.claimed_until < now)
                 .values(claimed_by=None, claimed_until=None)
             ).rowcount
-
-    def _recover_exports(self, now: datetime) -> int:
-        """Return expired `building` exports to `waiting` and append an `EX` event for each."""
-        with db.read(self._engine) as conn:
-            lapsed = [
-                (row.id, row.novel_id)
-                for row in claims.expired(conn, exports_table, now)
-                if row.state == ExportState.BUILDING.value
-            ]
-        reset = 0
-        for export_id, novel_id in lapsed:
-            with db.write(self._engine) as conn:
-                if not lock_novel(conn, novel_id):
-                    continue
-                released = conn.execute(
-                    update(exports_table)
-                    .where(
-                        exports_table.c.id == export_id,
-                        exports_table.c.state == ExportState.BUILDING.value,
-                        exports_table.c.claimed_until < now,
-                    )
-                    .values(state=ExportState.WAITING.value, claimed_by=None, claimed_until=None)
-                ).rowcount
-                if released:
-                    events.append(
-                        conn, novel_id, export_id, self._export_payload(conn, export_id), now=now
-                    )
-                    reset += 1
-        return reset
 
     def _recover_chapters(self, now: datetime) -> tuple[int, int]:
         """Requeue expired `downloading` chapters (with events); free expired `pending` ones."""
@@ -347,9 +322,3 @@ class Work:
             requeued += sum(1 for row in rows if row.state == _PENDING)
             freed += sum(1 for row in rows if row.state != _PENDING)
         return requeued, freed
-
-    def _export_payload(self, conn: Connection, export_id: str) -> events.Payload:
-        """A lazy `EX` payload: the export's snapshot, built after the event clock is taken."""
-        return lambda: export_repo.snapshot(
-            conn, export_id, static_base_url=self._static_base_url
-        ).to_json()

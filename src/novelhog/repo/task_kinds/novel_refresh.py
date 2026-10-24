@@ -26,7 +26,7 @@ from novelhog.domain.tasks import (
     TaskKind,
 )
 from novelhog.repo import chapters as chapter_repo
-from novelhog.repo import events, hosts, novels
+from novelhog.repo import events, exports, hosts, novels
 from novelhog.repo.chapters import TocDiff
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import chapters
@@ -89,6 +89,9 @@ class NovelRefreshHandler:
 
     def __init__(self, context: RepoContext) -> None:
         self._static_base_url = context.static_base_url
+        self._min_s = context.refresh_min_interval
+        self._max_s = context.refresh_max_interval
+        self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._queue = TaskQueue(context)
 
     def work(self, conn: Connection, task: TaskRow) -> NovelClaim:
@@ -152,13 +155,20 @@ class NovelRefreshHandler:
         """The lapsed refresh went back to the queue: the `NV` event shows `syncing` off."""
         self._emit(conn, task.entity_id, now)
 
-    @staticmethod
     def _result(
-        conn: Connection, row: Any, outcome: Done[Any] | Failed[Any], now: datetime
+        self, conn: Connection, row: Any, outcome: Done[Any] | Failed[Any], now: datetime
     ) -> tuple[TocDiff, dict[str, object], datetime]:
-        """The diff, the novel's new values and the successor's due time (v1 section 6.2)."""
+        """The diff, the novel's new values and the successor's due time (v1 section 6.2).
+
+        A `Failed` without a `SyncFailed` (the runner's `Failed` when `run` raised) is a site
+        error, as v1 treats any sync exception: the interval backs off and the initial import
+        gets `import_error`. A `Done` without a `SyncSucceeded` is a programming error.
+        """
         result = outcome.result
-        if isinstance(outcome, Done) and isinstance(result, SyncSucceeded):
+        if isinstance(outcome, Done):
+            if not isinstance(result, SyncSucceeded):
+                message = f"novel_refresh cannot complete with {outcome!r}"
+                raise TypeError(message)
             diff = chapter_repo.apply_toc(
                 conn,
                 row.id,
@@ -183,13 +193,23 @@ class NovelRefreshHandler:
                 "refresh_interval": interval,
             }
             return diff, values, now + timedelta(seconds=jittered(interval, result.rng))
-        if isinstance(result, SyncFailed):
-            values = {"refresh_interval": result.interval}
-            if result.import_error is not None:
-                values["import_error"] = result.import_error
-            return _EMPTY, values, result.next_at
-        # A failure without a schedule (the processor always gives one): keep the interval.
-        return _EMPTY, {}, now + timedelta(seconds=row.refresh_interval)
+        if not isinstance(result, SyncFailed):
+            # The runner's `Failed` for a `run` that raised: a site error (v1 section 6.2).
+            interval = next_interval(
+                row.refresh_interval,
+                found_new=False,
+                failed=True,
+                min_s=self._min_s,
+                max_s=self._max_s,
+            )
+            initial = row.last_refreshed_at is None
+            next_at = now + timedelta(seconds=jittered(interval, self._rng))
+            error = outcome.error if initial else None
+            result = SyncFailed(error, interval, next_at)
+        values = {"refresh_interval": result.interval}
+        if result.import_error is not None:
+            values["import_error"] = result.import_error
+        return _EMPTY, values, result.next_at
 
     @staticmethod
     def _touch(conn: Connection, novel_id: str, values: dict[str, object], now: datetime) -> None:
@@ -200,6 +220,9 @@ class NovelRefreshHandler:
         )
 
     def _events(self, conn: Connection, novel_id: str, diff: TocDiff, now: datetime) -> None:
+        """Queue the builds the diff made buildable (tasks spec 5.1), then append the events."""
+        affected = exports.affected_waiting(conn, novel_id, diff.changed_ids)
+        exports.enqueue_buildable(conn, novel_id, affected, now)
         events.emit_novel_change(
             conn,
             novel_id,

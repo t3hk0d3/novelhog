@@ -6,16 +6,17 @@ The tests of the generic task path inject these through `Repo(handlers=...)` and
 """
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
 from sqlalchemy import Connection, select, update
 
 from novelhog.domain.tasks import Begin, Done, Outcome, Started, TaskKind, TaskState
 from novelhog.repo import Busy, Repo, db
+from novelhog.repo.exports import ExportClaim
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import novels, tasks
-from novelhog.repo.tasks import TaskRow
+from novelhog.repo.tasks import Ready, TaskRow
 from novelhog.worker.tasks.base import TaskContext
 
 KIND = TaskKind.NOVEL_REFRESH
@@ -85,9 +86,11 @@ class RecordingProcessor:
         self.during: Callable[[], object] | None = None
         self.keys: list[str] = []
         self.reports: list[object] = []
+        self.contexts: list[TaskContext] = []
 
     def run(self, task: TaskRow, work: object, ctx: TaskContext) -> Outcome[Any]:
         self.runs.append((task.id, work))
+        self.contexts.append(ctx)
         if self.during is not None:
             self.during()
         if self.error is not None:
@@ -131,3 +134,29 @@ def force_claim(repo: Repo, task_id: str, owner: str, until: datetime) -> TaskRo
             update(tasks).where(tasks.c.id == task_id).values(claimed_by=owner, claimed_until=until)
         )
     return task_row(repo, task_id)
+
+
+def tasks_of(repo: Repo, entity_id: str) -> list[TaskRow]:
+    """Every task of the entity, oldest first."""
+    with db.read(repo.engine) as conn:
+        rows = conn.execute(
+            select(tasks)
+            .where(tasks.c.entity_id == entity_id)
+            .order_by(tasks.c.created_at, tasks.c.id)
+        )
+        return [TaskRow.from_row(row) for row in rows]
+
+
+def live_task(repo: Repo, entity_id: str, state: TaskState = TaskState.QUEUED) -> TaskRow:
+    """The entity's one task in `state` (queued by default)."""
+    [task] = [task for task in tasks_of(repo, entity_id) if task.state is state]
+    return task
+
+
+def start_build(repo: Repo, export_id: str, worker: str, ttl: int = 300) -> Ready[ExportClaim]:
+    """Claim the export's queued build for `worker` (whatever else is queued) and start it."""
+    queued = live_task(repo, export_id)
+    claimed = force_claim(repo, queued.id, worker, repo.clock() + timedelta(seconds=ttl))
+    started = repo.tasks.start(claimed, worker)
+    assert isinstance(started, Ready)
+    return started
