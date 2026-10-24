@@ -345,7 +345,8 @@ class TaskQueue:
             values["error"] = None
         elif error is not None:
             values["error"] = error
-        conn.execute(update(tasks).where(tasks.c.id == task.id).values(values))
+        if not _fenced_running_update(conn, task.id, worker_id, now, values):
+            return False
         _touch(conn, task.id)
         return True
 
@@ -372,7 +373,8 @@ class TaskQueue:
             ended |= {"state": TaskState.QUEUED.value, "run_after": run_after}
         else:
             ended |= {"state": TaskState.CANCELLED.value, "finished_at": now}
-        conn.execute(update(tasks).where(tasks.c.id == task.id).values(ended))
+        if not _fenced_running_update(conn, task.id, worker_id, now, ended):
+            return False
         _touch(conn, task.id)
         if successor is not None:
             self._merge(
@@ -442,6 +444,21 @@ class TaskQueue:
         if seq is None:
             seq = events.take_clock(conn)
         conn.execute(update(tasks).where(tasks.c.id.in_(list(touched))).values(change_seq=seq))
+
+
+def _fenced_running_update(
+    conn: Connection, task_id: str, worker_id: str, now: datetime, values: Mapping[str, object]
+) -> bool:
+    """Apply `values` only while the task is running and owned by `worker_id` (v1 fencing)."""
+    return claims.fenced_update(
+        conn,
+        tasks,
+        task_id,
+        owner=worker_id,
+        now=now,
+        values=values,
+        where=tasks.c.state == TaskState.RUNNING.value,
+    )
 
 
 def _delete_batch(conn: Connection, condition: ColumnElement[bool]) -> int:

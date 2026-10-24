@@ -169,6 +169,17 @@ def lapse(clock: FakeClock) -> None:
     clock.advance(seconds=TTL + 1)
 
 
+def take_over(repo: Repo, task: TaskRow) -> TaskRow:
+    """Give the running task a live claim of another worker and return the new row."""
+    with db.write(repo.engine) as conn:
+        conn.execute(
+            update(tasks)
+            .where(tasks.c.id == task.id)
+            .values(claimed_by=OTHER, claimed_until=NOW + timedelta(seconds=TTL))
+        )
+    return get(repo, task.id)
+
+
 class _Ordered:
     """Run `first` in a held write transaction, then `second` while it is held; release both.
 
@@ -659,6 +670,14 @@ class TestFinish__WhenTheClaimWasLost:
         assert get(repo, task.id) == task
 
 
+class TestFinish__WhenAnotherWorkerHoldsALiveClaim:
+    def test_finish__changes_nothing_and_returns_false(self, repo: Repo, queue: TaskQueue) -> None:
+        task = take_over(repo, running(repo, queue))
+
+        assert finish(repo, queue, task, TaskState.DONE) is False
+        assert get(repo, task.id) == task
+
+
 class TestRetry:
     def test_retry__returns_the_row_to_queued_with_run_after_error_and_duration(
         self, repo: Repo, queue: TaskQueue, clock: FakeClock
@@ -727,6 +746,23 @@ class TestRetry__WhenTheClaimWasLost:
 
         assert retry(repo, queue, task, run_after=NOW, error="Timeout: slow") is False
         assert get(repo, task.id) == task
+
+
+class TestRetry__WhenAnotherWorkerHoldsALiveClaim:
+    def test_retry__changes_nothing_and_returns_false(self, repo: Repo, queue: TaskQueue) -> None:
+        task = take_over(repo, running(repo, queue))
+
+        assert retry(repo, queue, task, run_after=NOW, error="Timeout: slow") is False
+        assert get(repo, task.id) == task
+
+    def test_retry__with_a_queued_successor_changes_nothing_and_returns_false(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        task = take_over(repo, running(repo, queue))
+        successor = get(repo, enqueue(repo, queue, run_after=NOW + timedelta(hours=1)).id)
+
+        assert retry(repo, queue, task, run_after=NOW, error="Timeout: slow") is False
+        assert (get(repo, task.id), get(repo, successor.id)) == (task, successor)
 
 
 class TestCancel:
