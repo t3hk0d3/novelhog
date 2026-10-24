@@ -39,10 +39,10 @@ class TestSince:
         assert [e.seq for e in repo.events.since(0, novel_id=OTHER, limit=2)] == [1, 3]
 
     def test_since__derives_kind_from_the_entity_prefix(self, repo: Repo) -> None:
-        for entity in (NOVEL, "CH000000000001", "EX000000000001"):
+        for entity in (NOVEL, "CH000000000001", "EX000000000001", "TK000000000001"):
             _add(repo, entity)
         rows = repo.events.since(0)
-        assert [e.kind for e in rows] == ["novel", "chapter", "export"]
+        assert [e.kind for e in rows] == ["novel", "chapter", "export", "task"]
         assert rows[0].payload == {"id": NOVEL}
         assert rows[0].at == repo.clock()
 
@@ -61,16 +61,63 @@ class TestReplayStatus:
         _add(repo, NOVEL)
         assert repo.events.replay_status(2) == "resync"
 
-    def test_replay_status__resync_when_the_row_was_pruned(self, repo: Repo) -> None:
-        _add(repo, NOVEL)
-        _add(repo, NOVEL)
-        with db.write(repo.engine) as conn:
-            conn.execute(delete(events_table).where(events_table.c.seq == 1))
-        assert repo.events.replay_status(1) == "resync"
-
-    def test_replay_status__resync_when_the_row_is_older_than_max_age(
+    def test_replay_status__resync_when_the_row_was_pruned_and_the_next_one_is_old(
         self, repo: Repo, clock: FakeClock
     ) -> None:
+        _add(repo, NOVEL)
+        _add(repo, NOVEL)
+        clock.advance(seconds=101)
+        with db.write(repo.engine) as conn:
+            conn.execute(delete(events_table).where(events_table.c.seq == 1))
+        assert repo.events.replay_status(1, max_age_s=100) == "resync"
+
+    def test_replay_status__ok_for_a_seq_without_a_row_when_the_next_row_is_young(
+        self, repo: Repo
+    ) -> None:
+        _add(repo, NOVEL)
+        with db.write(repo.engine) as conn:
+            event_log.take_clock(conn)  # seq 2: a task-only transaction, no row
+        _add(repo, NOVEL)
+        assert repo.events.replay_status(2) == "ok"
+
+    def test_replay_status__ok_for_a_seq_without_a_row_at_the_latest_value(
+        self, repo: Repo
+    ) -> None:
+        _add(repo, NOVEL)
+        with db.write(repo.engine) as conn:
+            event_log.take_clock(conn)
+        assert repo.events.replay_status(2) == "ok"
+
+    def test_replay_status__resync_for_a_seq_without_a_row_when_the_next_row_is_old(
+        self, repo: Repo, clock: FakeClock
+    ) -> None:
+        with db.write(repo.engine) as conn:
+            event_log.take_clock(conn)  # seq 1: no row
+        _add(repo, NOVEL)
+        clock.advance(seconds=101)
+        assert repo.events.replay_status(1, max_age_s=100) == "resync"
+
+    def test_replay_status__resync_for_a_seq_without_a_row_when_too_many_rows_follow(
+        self, repo: Repo
+    ) -> None:
+        with db.write(repo.engine) as conn:
+            event_log.take_clock(conn)
+        for _ in range(3):
+            _add(repo, NOVEL)
+        assert repo.events.replay_status(1, max_rows=3) == "ok"
+        assert repo.events.replay_status(1, max_rows=2) == "resync"
+
+    def test_replay_status__resync_for_a_seq_above_the_clock_even_after_row_less_values(
+        self, repo: Repo
+    ) -> None:
+        with db.write(repo.engine) as conn:
+            event_log.take_clock(conn)
+        assert repo.events.replay_status(2) == "resync"
+
+    def test_replay_status__resync_when_the_next_row_is_older_than_max_age(
+        self, repo: Repo, clock: FakeClock
+    ) -> None:
+        _add(repo, NOVEL)
         _add(repo, NOVEL)
         clock.advance(seconds=101)
         assert repo.events.replay_status(1, max_age_s=100) == "resync"

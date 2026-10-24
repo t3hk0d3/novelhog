@@ -6,12 +6,13 @@ first, then every entity and task row write, then the events, then `TaskQueue.st
 `claim`, `release`, `renew`, `lapsed` and `prune` are their own transactions and are exempt.
 
 Change cursor: every write that changes a field of the Task object records the row as touched in
-the transaction (see `db.transaction_info`); `stamp` then sets `change_seq` on the touched rows to
-the transaction's last event seq, or to a clock value of its own if it appended no events.
+the transaction (see `db.transaction_info`); `stamp` then appends a `TK` event for each touched row
+with `emit_event` and sets `change_seq` on the touched rows: to the row's own `TK` seq, else to the
+transaction's last event seq, or to a clock value of its own if it appended no events.
 Inserted rows carry `change_seq = 0` until then, which no other transaction can see.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -431,19 +432,60 @@ class TaskQueue:
                 return deleted
 
     def stamp(self, conn: Connection) -> None:
-        """Write the change cursor; call it last in every task-writing transaction.
+        """Write the task events and the change cursor; call it last in a task-writing transaction.
 
-        Sets `change_seq` on the rows this transaction touched to its last event seq, or takes one
-        clock value of its own if it appended no events. The touched rows are already locked by
-        this transaction, so no new row lock is taken.
+        Appends one `TK` event per touched row with `emit_event`, in touch order; the row's
+        `change_seq` is the seq of its own event. The other touched rows take the transaction's
+        last event seq (the `TK` events included), or one clock value of their own if it appended
+        no events. The touched rows are already locked by this transaction, so no new row lock is
+        taken.
         """
         touched: dict[str, None] = db.transaction_info(conn).pop(_TOUCHED, {})
         if not touched:
             return
+        now = self._clock()
+        rows = {
+            row.id: row
+            for row in conn.execute(
+                select(tasks.c.id, tasks.c.novel_id, tasks.c.emit_event).where(
+                    tasks.c.id.in_(list(touched))
+                )
+            )
+        }
+        quiet: list[str] = []
+        for task_id in touched:
+            row = rows[task_id]
+            if row.emit_event:
+                events.append(conn, row.novel_id, task_id, _event_payload(conn, task_id), now=now)
+            else:
+                quiet.append(task_id)
+        if not quiet:
+            return
         seq = events.last_seq(conn)
         if seq is None:
             seq = events.take_clock(conn)
-        conn.execute(update(tasks).where(tasks.c.id.in_(list(touched))).values(change_seq=seq))
+        conn.execute(update(tasks).where(tasks.c.id.in_(quiet)).values(change_seq=seq))
+
+
+def _event_payload(conn: Connection, task_id: str) -> Callable[[], dict[str, object]]:
+    """The payload of a task's `TK` event, built once `events.append` took the seq.
+
+    It sets the row's `change_seq` to that seq, then returns the row's `Task` object.
+    """
+
+    def build() -> dict[str, object]:
+        seq = events.last_seq(conn)
+        if seq is None:
+            message = "the event payload was built before the clock was taken"
+            raise RuntimeError(message)
+        conn.execute(update(tasks).where(tasks.c.id == task_id).values(change_seq=seq))
+        row = _get(conn, task_id)
+        if row is None:
+            message = f"task {task_id} vanished inside its own transaction"
+            raise RuntimeError(message)
+        return row.to_view().to_json()
+
+    return build
 
 
 def _fenced_running_update(

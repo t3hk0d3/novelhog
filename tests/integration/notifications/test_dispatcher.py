@@ -340,3 +340,22 @@ class TestDispatch__WhenTheHeartbeatReportsALostClaim:
         assert (report.advanced, report.lost) == (False, True)
         assert repo.consumers.release("notifier", "w1") is True
         assert repo.consumers.claim("notifier", "w2", 60) == before
+
+
+class TestDispatchTaskEvents:
+    def test_dispatch__advances_past_task_events_and_sends_nothing_for_them(
+        self, repo: Repo
+    ) -> None:
+        novel_id = _start(repo)
+        _subscribe(repo, "a")
+        with db.write(repo.engine) as conn:
+            task_seq = event_log.append(
+                conn, novel_id, "TK000000000001", {"state": "done"}, now=repo.clock()
+            )
+        channel = FakeChannel()
+
+        report = _run(repo, channel)
+
+        assert channel.sent == []
+        assert report.advanced
+        assert repo.consumers.claim("notifier", "w2", 60) == task_seq
