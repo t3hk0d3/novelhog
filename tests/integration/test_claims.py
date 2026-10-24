@@ -423,6 +423,46 @@ class TestClaim__Validation:
         assert _ids(_claim(engine, "w1", n=3, priority=[jobs.c.rank.desc()])) == [1, 2, 3]
 
 
+class TestClaim__WithRecheck:
+    def test_claim__a_row_that_fails_recheck_when_the_update_runs_is_not_claimed(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1, note="changed"), _job(2, note=None))
+
+        rows = _claim(engine, "w1", n=2, recheck=jobs.c.note.is_(None))
+
+        assert _ids(rows) == [2]
+        assert _state(engine, 1).claimed_by is None
+
+    def test_claim__a_row_changed_by_a_concurrent_transaction_is_not_claimed(
+        self, engine: Engine
+    ) -> None:
+        if engine.dialect.name != "postgresql":
+            pytest.skip("SQLite serialises writers; the blocked claim only happens on Postgres")
+        _add_jobs(engine, _job(1))
+        outcome: list[list[int]] = []
+        failures: list[BaseException] = []
+
+        def blocked_claim() -> None:
+            try:
+                outcome.append(_ids(_claim(engine, "b", recheck=jobs.c.note.is_(None))))
+            except BaseException as error:  # noqa: BLE001  (re-raised in the main thread)
+                failures.append(error)
+
+        with db.write(engine) as connection:
+            connection.execute(jobs.update().where(jobs.c.id == 1).values(note="changed"))
+            thread = threading.Thread(target=blocked_claim)
+            thread.start()
+            thread.join(timeout=1)
+            assert thread.is_alive(), "the claim should block on the concurrent update's row lock"
+        thread.join(timeout=30)
+
+        if failures:
+            raise failures[0]
+        assert outcome == [[]]
+        assert _state(engine, 1).claimed_by is None
+
+
 class TestRenew:
     def test_renew__pushes_expiry_forward_only_on_rows_owned_by_owner(self, engine: Engine) -> None:
         _add_jobs(engine, _job(1), _job(2), _job(3))

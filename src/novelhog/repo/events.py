@@ -27,6 +27,27 @@ _KINDS: dict[str, Literal["novel", "chapter", "export"]] = {
 
 Payload = dict[str, object] | Callable[[], dict[str, object]]
 
+_LAST_SEQ = "events_last_seq"
+
+
+def take_clock(conn: Connection) -> int:
+    """Take the next value of `event_clock` without writing an event row, and return it.
+
+    The clock row stays locked until the transaction ends, as with `append`, so the same lock
+    order applies: call it last. The task change cursor uses it in transactions without events
+    (tasks spec section 4, "Change cursor").
+    """
+    statement = update(event_clock).values(seq=event_clock.c.seq + 1).returning(event_clock.c.seq)
+    seq = int(conn.execute(statement.where(event_clock.c.id == 1)).scalar_one())
+    db.transaction_info(conn)[_LAST_SEQ] = seq
+    return seq
+
+
+def last_seq(conn: Connection) -> int | None:
+    """The last clock value this transaction took (by `append` or `take_clock`), or None."""
+    seq: int | None = db.transaction_info(conn).get(_LAST_SEQ)
+    return seq
+
 
 def append(
     conn: Connection, novel_id: str, entity_id: str, payload: Payload, *, now: datetime
@@ -45,15 +66,14 @@ def append(
     lock may be taken after the first `append`. Taking the clock first in one transaction and
     last in another deadlocks on Postgres.
     """
-    statement = update(event_clock).values(seq=event_clock.c.seq + 1).returning(event_clock.c.seq)
-    seq = conn.execute(statement.where(event_clock.c.id == 1)).scalar_one()
+    seq = take_clock(conn)
     data = payload() if callable(payload) else payload
     conn.execute(
         insert(events_table).values(
             seq=seq, novel_id=novel_id, entity_id=entity_id, payload=data, at=now
         )
     )
-    return int(seq)
+    return seq
 
 
 def emit_novel_change(
