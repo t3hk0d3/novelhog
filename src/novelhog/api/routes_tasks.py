@@ -16,6 +16,7 @@ router = APIRouter()
 RepoDep = Annotated[Repo, Depends(get_repo)]
 
 _BODY = "[a-z0-9]{12}"
+_MAX_INT = 2**63 - 1  # signed 64-bit: larger values overflow the database
 _ERRORS: dict[int | str, dict[str, Any]] = {404: {"model": ErrorBody}}
 
 
@@ -31,8 +32,8 @@ def list_tasks(  # noqa: PLR0913  (the query parameters of the route)
     entity_id: Annotated[str | None, Query(pattern=f"^(NV|CH|EX){_BODY}$")] = None,
     kind: Annotated[list[TaskKind] | None, Query()] = None,
     state: Annotated[list[TaskState] | None, Query()] = None,
-    since: Annotated[int | None, Query(ge=0)] = None,
-    offset: Annotated[int | None, Query(ge=0)] = None,
+    since: Annotated[int | None, Query(ge=0, le=_MAX_INT)] = None,
+    offset: Annotated[int | None, Query(ge=0, le=_MAX_INT)] = None,
     limit: Annotated[int | None, Query(ge=1, le=MAX_LIMIT)] = None,
 ) -> TaskList:
     """Return tasks in claim order; with `since`, every live task and every change since then."""
