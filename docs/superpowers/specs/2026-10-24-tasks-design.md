@@ -168,7 +168,7 @@ The API objects (v1 §5.2) do not change. `next_refresh_at`, `syncing` and
 
 ### Ordering
 
-Claim order is `priority DESC, run_after ASC, ordinal ASC`, among queued tasks
+Claim order is `priority DESC, run_after ASC, ordinal ASC, id ASC`, among queued tasks
 with `run_after <= now` and no claim, or a lapsed one. Base priorities keep
 v1's order (v1 §6.1: refreshes, then builds, then downloads):
 
@@ -204,7 +204,7 @@ are their own transaction.
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`. |
 | `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks and the total count (API, §7), ordered `run_after ASC, priority DESC, ordinal ASC, id ASC`; with `changed_since`, every live task plus tasks with `updated_at >= changed_since`, unpaged. |
+| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_since=None, offset, limit) -> tuple[list[TaskRow], int]` | Matching tasks and the total count (API, §7), in claim order (`priority DESC, run_after ASC, ordinal ASC, id ASC`, §4); with `changed_since`, every live task plus tasks with `updated_at >= changed_since`, unpaged. |
 
 Every fenced method changes nothing and returns `False` (or `None`) when the
 claim was lost. The caller then throws its result away and logs it, as in v1.
@@ -363,12 +363,11 @@ GET /api/v1/tasks/{task_id}
 ```
 
 - `GET /tasks?novel_id=&entity_id=&kind=&state=&since=&offset=0&limit=50` →
-  `{items: Task[], total: int, next_since: timestamp}`, ordered by
-  `run_after` (earliest first), then `priority` (highest first), then
-  `ordinal`, then `id`. The same order applies with `since`. Within one
-  `run_after` this is the claim order (§4); across different `run_after`
-  values it is not, because the worker takes a due higher-priority task before
-  an older lower-priority one.
+  `{items: Task[], total: int, next_since: timestamp}`, in the worker's claim
+  order (§4 "Ordering"): `priority` (highest first), then `run_after`
+  (earliest first), then `ordinal`, then `id`. Queued tasks therefore appear
+  in the order the worker will take them once due. The same order applies
+  with `since`.
   Every filter is optional and combines with AND. `state` may repeat
   (`state=queued&state=running` = live tasks). `limit` is at most 500.
 - `since=<timestamp>` (RFC 3339) returns every live task plus every task with
@@ -540,7 +539,7 @@ TaskQueue
         - deletes finished tasks older than TASK_RETENTION, keeps live and recent ones
 GET /api/v1/tasks
     Without filters
-        - returns {items, total, next_since} ordered by run_after ASC, priority DESC, ordinal ASC, id ASC
+        - returns {items, total, next_since} in claim order: priority DESC, run_after ASC, ordinal ASC, id ASC
         - next_since is the database clock at query time
     With novel_id, entity_id, kind and state filters
         - returns only matching tasks; repeated state means any of them
