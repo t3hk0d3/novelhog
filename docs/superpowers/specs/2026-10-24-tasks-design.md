@@ -286,16 +286,31 @@ and `prune` may still meet on the same finished rows; deleting in `id` order
 keeps that to a rare `Busy` (`503 database_busy`), the class of conflict v1
 already accepts.
 
-## 5. Processors (`worker/tasks/`)
+## 5. Processors
+
+Each kind has two halves, because the worker never holds a transaction (v1
+styleguide: no public `repo` method takes a `Connection`) and `repo` must not
+import `worker` (import contract `repo-is-standalone`):
 
 ```
-class TaskProcessor(Protocol):
+class TaskHandler(Protocol):                        # repo/task_kinds/, transactional half
     kind: ClassVar[TaskKind]
     def begin(self, conn, task) -> Begin            # inside start's transaction
-    def run(self, task, ctx) -> Outcome             # network work, no transaction held
     def complete(self, conn, task, outcome) -> None # inside finish's or retry's transaction
     def recover(self, conn, task) -> None           # inside recovery's transaction (§8)
+
+class TaskProcessor(Protocol):                      # worker/tasks/, network half
+    kind: ClassVar[TaskKind]
+    def run(self, task, work, ctx) -> Outcome       # no transaction held
+    def stored_keys(self, outcome) -> list[str]     # files run stored, trashed if the fence fails
 ```
+
+The public `repo.tasks.start(task, worker_id)` runs `TaskQueue.start` and the
+handler's `begin` in one transaction and returns the start result together with
+the kind's work item (v1's `NovelClaim`, `ChapterClaim` or `ExportClaim`, read
+in that transaction). `repo.tasks.finish(task, worker_id, outcome)` runs
+`finish` or `retry` and the handler's `complete` in one transaction. The
+processor's `run` gets the work item. Below, "processor" means both halves.
 
 - `Begin` is either `Started`, or `Skip(reason)` when the task is no longer
   needed. The check runs inside `start`'s transaction, under `lock_novel`, so it
@@ -593,7 +608,9 @@ mode with foreign keys off). Stop the workers before upgrading.
 | Path | Change |
 |---|---|
 | `repo/schema.py`, `repo/migrations/` | `tasks` table, column drops (§3, §9) |
-| `repo/tasks.py` | new: `TaskQueue` (§4) |
+| `repo/tasks.py` | new: `TaskQueue` (§4), internal; public `Tasks` (`repo.tasks`) composing start, finish, recovery, repair and the read API |
+| `repo/task_kinds/{base,novel_refresh,chapter_download,export_build}.py` | new: `TaskHandler` protocol and the three handlers (§5); they take over the transactional parts of v1's `finish_sync`, `work.start/complete/fail/requeue` and `exports._started/finish/fail` |
+| `domain/tasks.py` | new: `TaskKind`, `TaskState`, priorities, `Begin`, `Outcome` |
 | `repo/claims.py` | claim's outer `WHERE` can repeat an eligibility condition (§4 `claim`) |
 | `repo/work.py` | loses `claim_batch` and chapter/novel/export recovery; keeps consumer recovery |
 | `repo/chapters.py`, `novels.py`, `exports.py` | entity transitions call `TaskQueue` in the same transaction; derived fields via join; build enqueueing (§5.1) |
@@ -603,7 +620,7 @@ mode with foreign keys off). Stop the workers before upgrading.
 | `api/routes_events.py` | streams `task` events |
 | `notifications/rules.py`, `notifications/dispatcher.py` | skip `TK` events |
 | `web/src/api/events.ts` | `task` stays out of `EVENT_NAMES`; the event type documents it |
-| `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py` | new: protocol and the three processors; they take over the bodies of `worker/refresh.py`, `downloads.py`, `builds.py` |
+| `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py` | new: `TaskProcessor` protocol and the three processors' `run`; they take over the network parts of `worker/refresh.py`, `downloads.py`, `builds.py` |
 | `worker/runner.py` | new: `run_task`, processor registry, per-host politeness |
 | `worker/loop.py` | stages 4–6 replaced by the runner; repair on its own interval (§6) |
 | `worker/maintenance.py` | retention and repair (§8) |
