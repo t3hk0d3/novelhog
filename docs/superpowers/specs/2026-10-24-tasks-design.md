@@ -83,8 +83,8 @@ How the two kinds of state relate:
 | Entity state (v1 name) | Task that must exist |
 |---|---|
 | chapter `pending` (has a position) | a `queued` `chapter_download` task for the chapter |
-| chapter `downloading` | a `running` `chapter_download` task for the chapter |
-| chapter in any other state, or without a position | no live `chapter_download` task |
+| chapter `downloading` (with or without a position) | a `running` `chapter_download` task for the chapter; a sync that removes a chapter mid-download leaves it `downloading` without a position, and the download still completes (v1) |
+| chapter `not_requested`, `downloaded` or `error`, or `pending` without a position | no live `chapter_download` task |
 | export `waiting` and buildable (v1 §6.5) | a live `export_build` task for the export |
 | export `building` | a `running` `export_build` task for the export |
 | export `ready` or `failed` | no live `export_build` task |
@@ -218,17 +218,28 @@ Every write that changes a field of the Task object (§7) sets the row's
 `change_seq` from `event_clock`, the v1 counter that already orders `events`
 (v1 §4 "Commit order = seq order"):
 
-- The transaction takes the next clock value **after** its other row writes and
-  its `events.append` calls, as its last step, and stores it on the task rows it
-  changed. Those rows are already locked by the transaction's earlier write, so
-  this takes no new row lock and keeps the v1 lock order. A transaction that
-  appends no events still takes one clock value.
+- A changed task row's `change_seq` is the seq of its own `TK` event if it gets
+  one (§7), else the seq of the last event the transaction appends. A
+  transaction that appends no events takes one clock value of its own, as its
+  last step, without an event row. The values are written as the transaction's
+  last statements, on task rows the transaction already wrote and so already
+  holds; this takes no new row lock and keeps the v1 lock order.
+- An inserted task row gets `change_seq = 0` as a placeholder and its real
+  value at the end of the same transaction; the placeholder is never visible
+  to other transactions.
+- A `TK` event's payload is built inside `append`, after its seq is taken, so
+  it carries the `change_seq` that the row ends up with.
 - The clock row stays locked until commit, so on Postgres task changes commit
   in `change_seq` order; SQLite serialises writers anyway. A reader that has
   seen clock value `n` will never later find a committed task change with
   `change_seq <= n` that it did not see.
 - Task and event seqs share one number space. A client may compare a task's
   `change_seq` with the SSE stream's event ids.
+- **Clock values without an event row** (transactions without events, the
+  migration, §9) are valid SSE resume points: `events.replay_status` treats a
+  `Last-Event-ID` at or below the latest seq that has no row like any other
+  seq and judges age and count from the first row after it, instead of
+  answering `resync` (v1 §5.7 changes accordingly).
 
 ### Operations
 
@@ -243,10 +254,10 @@ condition (v1 §4) and returns `False` when it matched no row.
 | `cancel(conn, kind, entity_id) -> bool` | Queued task → `cancelled` (claim cleared, `finished_at` set). A running task is not touched. |
 | `delete_for_novel(conn, novel_id)` | Deletes every task of the novel, in `id` order (`DELETE /novels`, v1 §5.3). Writes no task events. |
 | `claim(worker_id, ttl) -> TaskRow \| None` | One compare-and-set statement through `repo/claims.py` (v1 §4) with the eligibility of "Ordering". The outer `WHERE` repeats `state = 'queued' AND run_after <= :now` besides "free or expired", so a task cancelled meanwhile is never claimed; `repo/claims.py` gains this option. The task stays `queued`. Writes no events. Exempt from the lock order, like v1's batch claim. |
-| `start(conn, task, worker_id) -> StartResult` | Queued and owned, and no running task of the same `(kind, entity_id)` → `running`, `attempts + 1`, `started_at = now`; `error` is kept. Returns `Started`; `Cancelled` (the task was cancelled after the claim); `Busy` (a sibling is running: the claim is released, the task stays queued); or `Lost` (claim lapsed or row gone). |
+| `start(conn, task, worker_id) -> StartResult` | Queued and owned, and no running task of the same `(kind, entity_id)` → `running`, `attempts + 1`, `started_at = now`; `error` is kept. Returns `StartResult.OK`; `Cancelled` (the task was cancelled after the claim); `Deferred` (a sibling is running: the claim is released, the task stays queued); or `Lost` (claim lapsed or row gone). |
 | `finish(conn, task, worker_id, outcome) -> bool` | Fenced: running and owned → `done` (`error` cleared), `failed` (with `error`) or `skipped`, with `finished_at` and `duration_ms` set and the claim cleared. |
-| `retry(conn, task, worker_id, *, run_after, error) -> bool` | Fenced: running and owned → the same row back to `queued`, claim cleared, `run_after` and `error` set. If another task was queued for the same entity meanwhile, this row merges into it (enqueue rules) and becomes `cancelled`. |
-| `release(task, worker_id) -> bool` | Fenced: queued, claimed by me → claim cleared. Used on stop and on `Busy`. |
+| `retry(conn, task, worker_id, *, run_after, error) -> bool` | Fenced: running and owned → the same row back to `queued`, claim cleared, `run_after` and `error` set, `duration_ms` set for the run just ended, `finished_at` left NULL. If another task was queued for the same entity meanwhile, this row merges into it (enqueue rules) and becomes `cancelled`. |
+| `release(task, worker_id) -> bool` | Fenced: queued, claimed by me → claim cleared. Used on stop and on `Deferred`. |
 | `renew(task, worker_id, ttl) -> bool` | Heartbeat (v1 §4, unchanged). |
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`, in `id` order, in batches of 500. |
@@ -264,8 +275,11 @@ transaction that writes a task row (except `claim`, `release`, `renew` and
 order:
 
 1. takes `lock_novel(task.novel_id)` first;
-2. writes the task and entity rows;
-3. calls `events.append`, then takes the change cursor (above), last.
+2. writes the entity rows and **all** task rows, including enqueues that follow
+   from the change (the refresh successor, §5.1 builds, cancels), before the
+   first `events.append`; derived fields in the snapshots (§2) depend on them;
+3. appends the entity events (`CH`, then `NV`, then `EX`), then the `TK` events,
+   then writes the change cursor (above), last.
 
 This is v1 §4 "Lock order", with tasks added as child rows. `delete_for_novel`
 and `prune` may still meet on the same finished rows; deleting in `id` order
@@ -298,7 +312,7 @@ class TaskProcessor(Protocol):
 
 | Processor | `begin`: still needed when … / entity change on start | `complete` |
 |---|---|---|
-| `NovelRefreshProcessor` | the novel exists / none, but an `NV` event (`syncing` turns on) | v1 §6.2 `finish_sync` without its scheduling and claim parts: the TOC diff, title, language, cover, `import_error`, interval and `last_refreshed_at`, and the `NV`/`CH`/`EX` events. Its fence is the task fence. Then the successor: if a queued refresh task exists (a manual sync came in), it stays as it is, due now; otherwise one is enqueued at v1's next time (`now + interval ± 10 %`, or as v1 §6.2 gives). `Retry` (infrastructure error): the same row is re-queued at `now + REFRESH_MIN_INTERVAL`, interval unchanged, and an `NV` event is appended. A cover stored by `run` whose `complete` did not run is trashed, as in v1. |
+| `NovelRefreshProcessor` | the novel exists / none, but an `NV` event (`syncing` turns on) | v1 §6.2 `finish_sync` without its scheduling and claim parts: the TOC diff, title, language, cover, `import_error`, interval and `last_refreshed_at`. Its fence is the task fence. Next, still before any event (§4 "Lock order"), the successor: if a queued refresh task exists (a manual sync came in), it stays as it is, due now; otherwise one is enqueued at v1's next time (`now + interval ± 10 %`, or as v1 §6.2 gives). Last, the `CH`/`NV`/`EX` events, so the `NV` snapshot shows the successor's `next_refresh_at`. `Retry` (infrastructure error): the same row is re-queued at `now + REFRESH_MIN_INTERVAL`, interval unchanged, and an `NV` event is appended. A cover stored by `run` whose `complete` did not run is trashed, as in v1. |
 | `ChapterDownloadProcessor` | the chapter is `pending` and has a position / `pending` → `downloading` | v1 §6.4 `complete` and `fail`. `Retry` (infrastructure error, or site unreachable below the threshold): `downloading` → `pending` with the task re-queued, `run_after` kept; but a chapter that lost its position meanwhile goes to `not_requested` and the task is cancelled instead (v1 `_back_in_line`). |
 | `ExportBuildProcessor` | the export is `waiting` and buildable (v1 §6.5) / `waiting` → `building` | v1 §6.5 `finish` and `fail`. No `Retry`: as in v1, any error fails the export. A stored key whose `finish` did not run is trashed, as in v1. |
 
@@ -314,7 +328,9 @@ positioned chapter in the range downloaded. This covers downloads, failures,
 dequeues, and syncs that move, add or remove chapters. Creating an export that
 is already buildable enqueues its build in the same transaction. v1's "a
 cancelled chapter that a waiting export needs fails the export" stays as it is.
-The merge rule makes a repeated enqueue harmless.
+The enqueues happen before the transaction's first `events.append` (§4 "Lock
+order"); the new builds' `TK` events follow the entity events. The merge rule
+makes a repeated enqueue harmless.
 
 ### 5.2 Callers that set `emit_event`
 
@@ -348,12 +364,13 @@ loop until stop requested:
 run_task(task):
     processor = processors[task.kind]
     if task.kind == chapter_download:
+        host = the task's novel host                              # read with the claim
         stop.wait(until last_fetch[host] + request_delay(host))   # politeness per host (§1.1)
         if stop requested: queue.release(task); return
     in one transaction (lock_novel → rows → events → cursor):
         result = queue.start(task)
         if result is Cancelled: log task_cancelled; return       # info: an ordinary dequeue
-        if result is Busy: log task_deferred; return             # sibling running; claim released
+        if result is Deferred: log task_deferred; return         # sibling running; claim released
         if result is Lost: log task_lost; return
         begin = processor.begin(task)
         if begin is Skip: queue.finish(task, skipped); log task_skipped; return
@@ -362,9 +379,8 @@ run_task(task):
     if task.kind == chapter_download: last_fetch[host] = now
     in one transaction:
         fenced = queue.retry(...) if outcome is Retry else queue.finish(...)
-        if fenced: processor.complete(task, outcome)
+        if fenced: processor.complete(task, outcome); log task_finished
         else: log task_lost (and trash what run stored)
-    log task_finished
     if outcome is Retry: raise to the loop's backoff (v1 §6.1, unchanged)
 ```
 
@@ -372,13 +388,15 @@ run_task(task):
   a batch of downloads. Downloads therefore cost one claim statement each. That
   is accepted; batching is future work.
 - `last_fetch` is per worker and in memory, like `Reachability`.
+  `request_delay(host)` is v1's `max(REQUEST_DELAY, adapter.request_delay(host))`,
+  seconds against a `CLAIM_TTL` of minutes, so the wait needs no heartbeat.
 - On stop: a task that was claimed but not started is released. A running task
   finishes first (v1 §6.1, unchanged).
 - Site-unreachable counting (v1 §6.1) is unchanged. `Reachability` stays per
   worker and in memory, and the processors decide between `Retry` and `Failed`
   exactly as v1's stages do.
-- **A start or finish transaction that itself fails** (`Busy`, an unexpected
-  error) is logged as `task_error` and raised to the loop's backoff. The task
+- **A start or finish transaction that itself fails** (`repo.Busy`, an
+  unexpected error) is logged as `task_error` and raised to the loop's backoff. The task
   keeps its claim (claimed or running) until `CLAIM_TTL` lapses; recovery then
   puts it back (§8), and the result of `run` is lost, as in v1.
 
@@ -452,8 +470,9 @@ GET /api/v1/tasks/{task_id}
       with `since` → `422 validation_error`; `total = len(items)`. Pagination
       can be added later if responses grow too big.
     - **Vanished tasks.** Because the response is complete, a live task the
-      client holds that is not in it no longer exists (its novel was deleted):
-      the client drops it. Finished tasks removed by retention simply stop
+      client holds that is not in it no longer matches the filter; with no
+      `state` filter that means it no longer exists (its novel was deleted),
+      and the client drops it. Finished tasks removed by retention simply stop
       being returned.
     - **Filters.** `novel_id`, `entity_id`, `kind` and `state` filter the
       combined set: `state=failed&since=…` = tasks that failed since then, with
@@ -524,15 +543,17 @@ GET /api/v1/tasks/{task_id}
   | Problem | Fix |
   |---|---|
   | chapter `pending` with a position and no live download task | enqueue (user-queued priority: an auto-queued release loses its head start, accepted) |
-  | chapter `pending` or `downloading` without a position | → `not_requested`, cancel its live task |
-  | chapter `downloading` with no running task | → `pending`, enqueue |
+  | chapter `pending` without a position | → `not_requested`, cancel its queued task |
+  | chapter `downloading` with no running task | → `pending` and enqueue, or `not_requested` without a position |
   | export `waiting` and buildable, no live build task | enqueue |
   | export `building` with no running build task | → `waiting`; enqueue if buildable |
   | novel with no live refresh task | enqueue at `last_refreshed_at + refresh_interval`, or now if never refreshed |
-  | live task whose entity is gone or finished (chapter `not_requested`, `downloaded` or `error`; export `ready` or `failed`) | → `cancelled` |
+  | queued task whose entity is gone or finished (chapter `not_requested`, `downloaded` or `error`; export `ready` or `failed`) | → `cancelled` |
 
-  A running task counts as present until its claim lapses and recovery handles
-  it, so repair never resets the entity of a task a worker is still running.
+  Repair never touches a running task, nor the entity of one, while its claim
+  is valid: a running task counts as present until its claim lapses and
+  recovery handles it. A chapter that a sync removed mid-download is therefore
+  not a problem; its download completes as in v1.
 
 ## 9. Migration
 
@@ -543,9 +564,9 @@ mode with foreign keys off). Stop the workers before upgrading.
 2. Fill it from the v1 columns, dropping all claims. Every migrated task gets
    `emit_event = false`, `updated_at` = the migration time, and `change_seq` =
    one new `event_clock` value taken for the whole migration.
-   - each novel → one queued refresh task: `run_after = now` if
-     `sync_requested`, else `next_refresh_at`; `created_at` = the migration
-     time;
+   - each novel → one queued refresh task: `run_after = next_refresh_at`
+     (v1 already set it to the request time when `sync_requested`);
+     `created_at` = the migration time;
    - each chapter `pending` or `downloading` **with a position** → one queued
      download task: `created_at = run_after = queued_at`, priority 110 or 100
      from `priority`, `ordinal = position`; a `downloading` chapter becomes
@@ -563,8 +584,8 @@ mode with foreign keys off). Stop the workers before upgrading.
    without a position), exports `building` → `waiting`.
 2. Restore the columns: `next_refresh_at` from the novel's queued refresh task,
    else its running one, else now; `sync_requested = false`; `queued_at` and
-   `priority` (110 → 1, 100 → 0) from each pending chapter's live download task;
-   all claims empty.
+   `priority` (110 → 1, 100 → 0) from each pending chapter's live download task,
+   else `queued_at = updated_at` and `priority = 0`; all claims empty.
 3. Delete `TK` events, restore v1's checks and indexes, drop `tasks`.
 
 ## 10. Code layout
@@ -576,7 +597,7 @@ mode with foreign keys off). Stop the workers before upgrading.
 | `repo/claims.py` | claim's outer `WHERE` can repeat an eligibility condition (§4 `claim`) |
 | `repo/work.py` | loses `claim_batch` and chapter/novel/export recovery; keeps consumer recovery |
 | `repo/chapters.py`, `novels.py`, `exports.py` | entity transitions call `TaskQueue` in the same transaction; derived fields via join; build enqueueing (§5.1) |
-| `repo/events.py` | `TK → task` event kind; change cursor helper (§4) |
+| `repo/events.py` | `TK → task` event kind; change cursor helper; `replay_status` accepts a seq without a row (§4) |
 | `domain/payloads.py` | `TaskPayload`; `NovelPayload`/`ChapterPayload` read derived fields |
 | `api/routes_tasks.py`, `api/schemas.py` | new: the two read-only routes and the `Task` schema (§7) |
 | `api/routes_events.py` | streams `task` events |
@@ -620,11 +641,11 @@ TaskQueue
         - writes no events and leaves change_seq and updated_at alone
     start
         When queued and owned
-            - sets running, attempts + 1, started_at; keeps error; returns Started
+            - sets running, attempts + 1, started_at; keeps error; returns OK
         When the task was cancelled after the claim
             - changes nothing and returns Cancelled
         When a sibling of the same (kind, entity) is running
-            - releases the claim, keeps the task queued and returns Busy
+            - releases the claim, keeps the task queued and returns Deferred
         When the claim was lost
             - changes nothing and returns Lost
     finish
@@ -632,7 +653,8 @@ TaskQueue
         When the claim was lost
             - changes nothing and returns False
     retry
-        - returns the same row to queued with run_after and error set, claim cleared; returns True
+        - returns the same row to queued with run_after, error and duration_ms set, finished_at NULL, claim
+          cleared; returns True
         When another queued task for the entity appeared meanwhile
             - merges into it and cancels the retried row
         When the claim was lost
@@ -645,9 +667,11 @@ TaskQueue
         - removes every task of the novel, no TK events
     change cursor
         - every insert, merge, start, finish, retry, cancel, recovery and repair sets change_seq
-          to a fresh event_clock value taken last in the transaction
+        - change_seq is the row's own TK event seq, else the transaction's last event seq
+        - a TK event payload's change_seq equals the row's change_seq after commit
         - change_seq order equals commit order on Postgres (two concurrent writers)
-        - a transaction without events still takes a clock value
+        - a transaction without events takes one clock value of its own
+        - an inserted row never shows change_seq 0 to another transaction
         - claim, release and renew do not change it
     updated_at
         - is set by the same writes as change_seq, from the writer's clock
@@ -693,6 +717,8 @@ Task events
         - no TK events
     SSE
         - streams a TK event as event: task with its seq as id
+        - a reconnect with a Last-Event-ID that has no event row (task-only transaction, migration) replays,
+          it does not resync
     Notifier
         - dispatch advances past TK events and sends nothing for them
     Pruning
@@ -706,7 +732,7 @@ Derived fields and entity events
     - syncing is false once the running task's claim lapsed, before recovery
     - chapter queued_at is the live download task's created_at; enqueue and cancel append CH events
 Runner.run_task
-    When start returns Cancelled, Busy or Lost
+    When start returns Cancelled, Deferred or Lost
         - logs task_cancelled / task_deferred / task_lost; run is not called
     When begin says Skip
         - task becomes skipped, run is not called, entity unchanged
@@ -717,7 +743,7 @@ Runner.run_task
     When run returns Retry
         - task queued with run_after, entity reset, loop backs off
     When the claim is lost during run
-        - result discarded, task_lost logged, entity not overwritten, stored files trashed
+        - result discarded, only task_lost logged, entity not overwritten, stored files trashed
     When the start or finish transaction fails
         - task_error logged, loop backs off, task recovered after CLAIM_TTL
     On stop
@@ -729,7 +755,8 @@ NovelRefreshProcessor
     - "still needed" = the novel exists
     On Done or Failed
         - applies the TOC diff, title, cover, import_error and interval of v1 finish_sync
-        - enqueues the successor at v1's next refresh time
+        - enqueues the successor at v1's next refresh time, before the NV event
+        - the NV event's next_refresh_at is the successor's run_after
     When a manual sync was queued during the run
         - the queued task stays due now; no second successor
     On Retry
@@ -743,7 +770,9 @@ ChapterDownloadProcessor
     When the chapter was dequeued after claim
         - start returns Cancelled
     When a sync removed the chapter after claim
-        - task skipped
+        - start returns Cancelled (the sync's dequeue cancelled the task)
+    When a sync removed the chapter mid-download
+        - the download completes and stores the content (v1); repair does not touch it
     On Done / Failed
         - v1 complete / fail
     On Retry
@@ -765,6 +794,8 @@ Build enqueueing
     - last missing chapter downloaded → build task queued
     - a sync moves an undownloaded chapter out of the range → build task queued
     - a sync removes an end chapter → build task queued; the build fails "Range changed upstream"
+    - a sync returns a removed downloaded chapter into the range, completing it → build task queued
+    - build enqueues come before the transaction's first event; their TK events follow the entity events
     - builds of two exports run oldest created_at first
     - needed chapter cancelled → export failed (v1), no build task
 Recovery
@@ -780,18 +811,19 @@ Repair (maintenance)
     - a fix whose condition no longer holds in its own transaction does nothing
     - a novel that is syncing is not touched
     - a building export with a valid running claim is not reset
+    - a running task is never cancelled by repair, even when its entity is gone or finished
     - a consistent database produces no repairs
 Configuration
     - NOVELHOG_BATCH_SIZE set → worker starts and logs config_ignored once
 Migration (SQLite and Postgres)
-    - novels get a queued refresh at next_refresh_at, or now if sync_requested
+    - novels get a queued refresh at next_refresh_at
     - positioned pending and downloading chapters get download tasks with created_at = run_after = queued_at,
       priority from v1 priority; downloading ones come back pending
     - unpositioned pending or downloading chapters become not_requested without a task
     - building exports come back waiting; buildable waiting exports get build tasks at their created_at
     - Chapter.queued_at and Novel.next_refresh_at have the same values before and after
     - downgrade with queued and running tasks restores next_refresh_at, sync_requested, queued_at and priority
-      and passes v1's checks
+      and passes v1's checks, also for a pending chapter without a live task
     - autogenerate against schema.metadata reports no differences
 ```
 
