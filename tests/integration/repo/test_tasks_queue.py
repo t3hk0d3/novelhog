@@ -1677,6 +1677,27 @@ class TestTasksRecover:
         assert report == TaskRecoveryReport(claims_cleared=0, requeued=0, merged=0)
         assert handler.calls == []
 
+    def test_recover__decides_on_the_row_read_in_its_transaction_not_the_lapsed_snapshot(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler, clock: FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        claimed = claimed_task(handled, queue)
+        lapse(clock)
+        stale = handled.tasks._queue.lapsed(clock())  # noqa: SLF001  (queued, claim lapsed)
+        clock.advance(seconds=-(TTL + 1))
+        assert isinstance(handled.tasks.start(claimed, ME), Ready)
+        task = get(handled, claimed.id)
+        lapse(clock)
+        monkeypatch.setattr(handled.tasks._queue, "lapsed", lambda now: stale)  # noqa: SLF001
+
+        report = handled.tasks.recover()
+
+        assert [t.state for t in stale] == [TaskState.QUEUED]
+        assert handler.calls[-1] == ("recover", task.id, TaskState.QUEUED)
+        assert report == TaskRecoveryReport(
+            claims_cleared=0, requeued=1, merged=0, recovered=(task,)
+        )
+
     def test_recover__stamps_the_recovered_task(
         self, handled: Repo, queue: TaskQueue, clock: FakeClock
     ) -> None:

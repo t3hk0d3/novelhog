@@ -14,7 +14,7 @@ Inserted rows carry `change_seq = 0` until then, which no other transaction can 
 `Tasks` is the public side (`repo.tasks`). Its `start`, `finish` and `recover` each compose one
 transaction per task in that order: `lock_novel`, the queue primitive, the kind's `TaskHandler`
 hook (tasks spec section 5), then `stamp`. A task whose kind has no registered handler is a
-programming error: those methods raise `UnregisteredTaskKindError` before writing anything.
+programming error: those methods raise `UnregisteredTaskKindError` and write nothing.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -177,6 +177,14 @@ def _duration_ms(task: TaskRow, now: datetime) -> int | None:
 
 def _released(now: datetime) -> dict[str, object]:
     return {"claimed_by": None, "claimed_until": None, "updated_at": now}
+
+
+@dataclass(frozen=True)
+class Recovery:
+    """What `TaskQueue.recover` did, and the task as its transaction read it before the reset."""
+
+    result: Recovered
+    task: TaskRow
 
 
 class TaskQueue:
@@ -460,14 +468,15 @@ class TaskQueue:
             )
         return renewed == 1
 
-    def recover(self, conn: Connection, task: TaskRow) -> Recovered | None:
+    def recover(self, conn: Connection, task: TaskRow) -> Recovery | None:
         """Recover one task whose claim lapsed (tasks spec section 8, "Recovery").
 
         A queued task: the claim is cleared (`CLAIM_CLEARED`; not a change of the Task object). A
         running task: back to `queued` with `run_after` kept and the claim cleared (`REQUEUED`);
         if another task is queued for the entity, the row merges into it (enqueue rules) and
-        becomes `cancelled` instead (`MERGED`). Returns None when the claim is no longer lapsed
-        (taken over or renewed meanwhile) or the row is gone.
+        becomes `cancelled` instead (`MERGED`). The decision is made on the row as this
+        transaction reads it, which the result carries; `task` only names it. Returns None when
+        the claim is no longer lapsed (taken over or renewed meanwhile) or the row is gone.
         """
         now = self._clock()
         lapsed = and_(
@@ -483,7 +492,7 @@ class TaskQueue:
                 .where(lapsed, tasks.c.state == TaskState.QUEUED.value)
                 .values(claimed_by=None, claimed_until=None)
             ).rowcount
-            return Recovered.CLAIM_CLEARED if cleared == 1 else None
+            return Recovery(Recovered.CLAIM_CLEARED, current) if cleared == 1 else None
         if current.state is not TaskState.RUNNING:
             return None
         successor = _find(conn, current.kind, current.entity_id, TaskState.QUEUED)
@@ -499,7 +508,7 @@ class TaskQueue:
             return None
         _touch(conn, task.id)
         if successor is None:
-            return Recovered.REQUEUED
+            return Recovery(Recovered.REQUEUED, current)
         self._merge(
             conn,
             successor,
@@ -508,7 +517,7 @@ class TaskQueue:
             emit_event=current.emit_event,
             now=now,
         )
-        return Recovered.MERGED
+        return Recovery(Recovered.MERGED, current)
 
     def lapsed(self, now: datetime) -> list[TaskRow]:
         """Return the queued and running tasks whose claim lapsed before `now`, in `id` order."""
@@ -656,7 +665,8 @@ type StartOutcome[W] = Ready[W] | Skipped | NotStarted
 class TaskRecoveryReport:
     """What `Tasks.recover` did: claims cleared, running tasks requeued or merged.
 
-    `recovered` holds the running tasks put back (requeued or merged), as they were before.
+    `recovered` holds the running tasks put back (requeued or merged), as recovery's
+    transaction read them before the reset.
     """
 
     claims_cleared: int
@@ -760,20 +770,20 @@ class Tasks:
         """
         counts = dict.fromkeys(Recovered, 0)
         recovered: list[TaskRow] = []
-        for task in self._queue.lapsed(self._clock()):
-            handler = self._handler(task.kind) if task.state is TaskState.RUNNING else None
+        for lapsed in self._queue.lapsed(self._clock()):
             with db.write(self._engine) as conn:
-                if not novels.lock_novel(conn, task.novel_id):
+                if not novels.lock_novel(conn, lapsed.novel_id):
                     continue
                 now = self._clock()
-                result = self._queue.recover(conn, task)
-                if result is None:
+                recovery = self._queue.recover(conn, lapsed)
+                if recovery is None:
                     continue
-                if handler is not None and result is not Recovered.CLAIM_CLEARED:
-                    handler.recover(conn, task, now)
-                    recovered.append(task)
+                if recovery.result is not Recovered.CLAIM_CLEARED:
+                    # Decided on the row read in this transaction: `lapsed` may be stale.
+                    self._handler(recovery.task.kind).recover(conn, recovery.task, now)
+                    recovered.append(recovery.task)
                 self._queue.stamp(conn)
-            counts[result] += 1
+            counts[recovery.result] += 1
         return TaskRecoveryReport(
             claims_cleared=counts[Recovered.CLAIM_CLEARED],
             requeued=counts[Recovered.REQUEUED],
