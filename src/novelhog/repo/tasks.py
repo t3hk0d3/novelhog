@@ -12,21 +12,37 @@ transaction's last event seq, or to a clock value of its own if it appended no e
 Inserted rows carry `change_seq = 0` until then, which no other transaction can see.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, Connection, Row, and_, delete, exists, insert, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Connection,
+    Row,
+    and_,
+    delete,
+    exists,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 
+from novelhog import ids
+from novelhog.domain.errors import NotFound
 from novelhog.domain.payloads import TaskView
-from novelhog.domain.tasks import StartResult, TaskKind, TaskState
+from novelhog.domain.tasks import LIVE_STATES, StartResult, TaskKind, TaskState
 from novelhog.ids import new_id
 from novelhog.repo import claims, db, events
 from novelhog.repo.context import RepoContext
-from novelhog.repo.schema import tasks
+from novelhog.repo.schema import event_clock, tasks
 
 PRUNE_BATCH = 500
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 500
 _TOUCHED = "tasks_touched"
 _OUTCOMES = frozenset({TaskState.DONE, TaskState.FAILED, TaskState.SKIPPED})
 
@@ -513,3 +529,78 @@ def _delete_batch(conn: Connection, condition: ColumnElement[bool]) -> int:
     if ids:
         conn.execute(delete(tasks).where(tasks.c.id.in_(ids)))
     return len(ids)
+
+
+@dataclass(frozen=True)
+class TaskPage:
+    """A list of tasks in claim order, the number of matches and the cursor to poll from."""
+
+    items: list[TaskView]
+    total: int
+    next_since: int
+
+
+class Tasks:
+    """The public tasks sub-repository (`repo.tasks`): the read API of tasks spec section 7."""
+
+    def __init__(self, context: RepoContext) -> None:
+        self._engine = context.engine
+        self._queue = TaskQueue(context)
+
+    def get(self, task_id: str) -> TaskView:
+        """Return one task; raise `NotFound` for an unknown, malformed or pruned ID."""
+        if not ids.is_valid(task_id, "TK"):
+            raise NotFound("task", task_id)
+        with db.read(self._engine) as conn:
+            task = _get(conn, task_id)
+        if task is None:
+            raise NotFound("task", task_id)
+        return task.to_view()
+
+    def list(  # noqa: PLR0913  (the filters of `GET /tasks`)
+        self,
+        *,
+        novel_id: str | None = None,
+        entity_id: str | None = None,
+        kinds: Sequence[TaskKind] = (),
+        states: Sequence[TaskState] = (),
+        since: int | None = None,
+        offset: int = 0,
+        limit: int = DEFAULT_LIMIT,
+    ) -> TaskPage:
+        """Return matching tasks in claim order, their count and the clock read before the query.
+
+        With `since`, the result is every live task plus every task with `change_seq > since`,
+        unpaged (`offset` and `limit` are ignored).
+        """
+        where: list[ColumnElement[bool]] = []
+        if novel_id is not None:
+            where.append(tasks.c.novel_id == novel_id)
+        if entity_id is not None:
+            where.append(tasks.c.entity_id == entity_id)
+        if kinds:
+            where.append(tasks.c.kind.in_([kind.value for kind in kinds]))
+        if states:
+            where.append(tasks.c.state.in_([state.value for state in states]))
+        if since is not None:
+            live = tasks.c.state.in_([state.value for state in LIVE_STATES])
+            where.append(or_(live, tasks.c.change_seq > since))
+        statement = (
+            select(tasks)
+            .where(*where)
+            .order_by(tasks.c.priority.desc(), tasks.c.run_after, tasks.c.ordinal, tasks.c.id)
+        )
+        if since is None:
+            statement = statement.offset(max(offset, 0)).limit(min(max(limit, 0), MAX_LIMIT))
+        with db.read(self._engine) as conn:
+            # The cursor is read first: a change that commits after it is found by the next poll.
+            clock = int(
+                conn.execute(select(event_clock.c.seq).where(event_clock.c.id == 1)).scalar_one()
+            )
+            items = [TaskRow.from_row(row).to_view() for row in conn.execute(statement)]
+            total = len(items)
+            if since is None:
+                total = int(
+                    conn.execute(select(func.count()).select_from(tasks).where(*where)).scalar_one()
+                )
+        return TaskPage(items=items, total=total, next_since=clock)
