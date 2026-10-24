@@ -274,6 +274,26 @@ class TestRunnerStep__WhenRunReturnsDone:
         )
         assert entry(logs, "task_started")["attempts"] == 1
 
+    def test_step__logs_the_duration_stored_on_the_task(
+        self, handled: Repo, runner: Runner, processor: RecordingProcessor, task: TaskRow,
+        clock: FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # fmt: skip
+        processor.during = lambda: clock.advance(seconds=2)
+        finish = handled.tasks.finish
+
+        def finish_then_tick(*args: Any) -> Any:
+            finished = finish(*args)
+            clock.advance(seconds=1)
+            return finished
+
+        monkeypatch.setattr(handled.tasks, "finish", finish_then_tick)
+
+        with capture_logs() as logs:
+            runner.step()
+
+        assert entry(logs, "task_finished")["duration_ms"] == 2000
+        assert task_row(handled, task.id).duration_ms == 2000
+
 
 class TestRunnerStep__WhenRunRaises:
     def test_step__fails_the_task_with_type_and_summary(

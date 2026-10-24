@@ -662,6 +662,13 @@ type StartOutcome[W] = Ready[W] | Skipped | NotStarted
 
 
 @dataclass(frozen=True)
+class Finished:
+    """A fenced finish: the task row as the finish transaction left it."""
+
+    task: TaskRow
+
+
+@dataclass(frozen=True)
 class TaskRecoveryReport:
     """What `Tasks.recover` did: claims cleared, running tasks requeued or merged.
 
@@ -737,17 +744,18 @@ class Tasks:
             self._queue.stamp(conn)
             return Ready(work, _require(conn, task.id))
 
-    def finish(self, task: TaskRow, worker_id: str, outcome: Outcome[Any]) -> bool:
+    def finish(self, task: TaskRow, worker_id: str, outcome: Outcome[Any]) -> Finished | None:
         """Fenced: record the run's outcome and let the handler complete it, in one transaction.
 
         `Retry` puts the task back in the queue (`TaskQueue.retry`); `Done` and `Failed` end it.
-        The handler's `complete` runs only when that write applied. False, with nothing
-        changed, when the claim was lost or the novel is gone.
+        The handler's `complete` runs only when that write applied. Returns the task row as the
+        transaction left it (its stored `duration_ms` included); None, with nothing changed,
+        when the claim was lost or the novel is gone.
         """
         handler = self._handler(task.kind)
         with db.write(self._engine) as conn:
             if not novels.lock_novel(conn, task.novel_id):
-                return False
+                return None
             now = self._clock()
             if isinstance(outcome, Retry):
                 fenced = self._queue.retry(
@@ -757,10 +765,11 @@ class Tasks:
                 fenced = self._queue.finish(conn, task, worker_id, TaskState.FAILED, outcome.error)
             else:
                 fenced = self._queue.finish(conn, task, worker_id, TaskState.DONE)
-            if fenced:
-                handler.complete(conn, task, outcome, now)
+            if not fenced:
+                return None
+            handler.complete(conn, task, outcome, now)
             self._queue.stamp(conn)
-        return fenced
+            return Finished(_require(conn, task.id))
 
     def recover(self) -> TaskRecoveryReport:
         """Recover every task whose claim lapsed, each in its own transaction (tasks spec 8).

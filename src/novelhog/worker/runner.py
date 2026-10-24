@@ -20,7 +20,6 @@ Every transition logs one `task_<verb>` line with `task_id`, `kind`, `entity_id`
 """
 
 from collections.abc import Mapping
-from datetime import timedelta
 from typing import Any
 
 from structlog.typing import FilteringBoundLogger
@@ -39,7 +38,6 @@ from novelhog.repo.tasks import (
 from novelhog.worker.errors import summarize
 from novelhog.worker.tasks.base import TaskContext, TaskProcessor
 
-_MILLISECOND = timedelta(milliseconds=1)
 _NOT_STARTED = {
     StartResult.CANCELLED: "task_cancelled",
     StartResult.DEFERRED: "task_deferred",
@@ -148,22 +146,20 @@ class Runner:
                 raised = error
                 outcome = Failed(summarize(error))
         try:
-            fenced = self._repo.tasks.finish(task, self._worker_id, outcome)
+            finished = self._repo.tasks.finish(task, self._worker_id, outcome)
         except Exception as error:
             logger.error("task_error", stage="finish", error=summarize(error), exc_info=True)
             raise RunnerBackoff from error
-        if not fenced:
+        if finished is None:
             logger.warning("task_lost", exc_info=raised)
             self._repo.trash.discard(processor.stored_keys(outcome))
         elif isinstance(outcome, Retry):
             logger.warning("task_retry", run_after=outcome.run_after, error=outcome.error)
         else:
-            finished_at = self._repo.clock()
-            started_at = task.started_at or finished_at
             logger.info(
                 "task_finished",
                 outcome=_outcome_name(outcome),
-                duration_ms=(finished_at - started_at) // _MILLISECOND,
+                duration_ms=finished.task.duration_ms,
                 error=outcome.error if isinstance(outcome, Failed) else None,
                 exc_info=raised,
             )

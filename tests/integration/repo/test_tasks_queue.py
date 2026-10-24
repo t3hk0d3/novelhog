@@ -16,6 +16,7 @@ from novelhog.repo import events as event_log
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import events, novels, tasks
 from novelhog.repo.tasks import (
+    Finished,
     NotStarted,
     Ready,
     Skipped,
@@ -1502,18 +1503,22 @@ class TestTasksFinish__WhenFenced:
     def test_finish__done_ends_the_task_done(self, handled: Repo, queue: TaskQueue) -> None:
         task = started_task(handled, queue)
 
-        assert handled.tasks.finish(task, ME, Done("ok")) is True
+        finished = handled.tasks.finish(task, ME, Done("ok"))
+
         row = get(handled, task.id)
         assert (row.state, row.error, row.finished_at) == (TaskState.DONE, None, NOW)
+        assert finished == Finished(row)
 
     def test_finish__failed_ends_the_task_failed_with_its_error(
         self, handled: Repo, queue: TaskQueue
     ) -> None:
         task = started_task(handled, queue)
 
-        assert handled.tasks.finish(task, ME, Failed("SiteError: 404")) is True
+        finished = handled.tasks.finish(task, ME, Failed("SiteError: 404"))
+
         row = get(handled, task.id)
         assert (row.state, row.error) == (TaskState.FAILED, "SiteError: 404")
+        assert finished == Finished(row)
 
     def test_finish__retry_requeues_the_task_at_run_after(
         self, handled: Repo, queue: TaskQueue
@@ -1521,8 +1526,10 @@ class TestTasksFinish__WhenFenced:
         task = started_task(handled, queue)
         later = NOW + timedelta(hours=6)
 
-        assert handled.tasks.finish(task, ME, Retry(later, "InfrastructureError: dns")) is True
+        finished = handled.tasks.finish(task, ME, Retry(later, "InfrastructureError: dns"))
+
         row = get(handled, task.id)
+        assert finished == Finished(row)
         assert (row.state, row.run_after, row.error, row.claimed_by) == (
             TaskState.QUEUED,
             later,
@@ -1569,7 +1576,7 @@ class TestTasksFinish__WhenTheClaimWasLost:
     @pytest.mark.parametrize(
         "outcome", [Done("ok"), Failed("SiteError: 404"), Retry(NOW, "InfrastructureError: dns")]
     )
-    def test_finish__returns_false_changes_nothing_and_skips_complete(
+    def test_finish__returns_none_changes_nothing_and_skips_complete(
         self,
         handled: Repo,
         queue: TaskQueue,
@@ -1581,20 +1588,20 @@ class TestTasksFinish__WhenTheClaimWasLost:
         lapse(clock)
         handler.calls.clear()
 
-        assert handled.tasks.finish(task, ME, outcome) is False
+        assert handled.tasks.finish(task, ME, outcome) is None
         assert get(handled, task.id) == task
         assert handler.calls == []
 
 
 class TestTasksFinish__WhenTheNovelIsGone:
-    def test_finish__returns_false(self, handled: Repo, queue: TaskQueue) -> None:
+    def test_finish__returns_none(self, handled: Repo, queue: TaskQueue) -> None:
         task = started_task(handled, queue)
         with db.write(handled.engine) as conn:
             assert lock_novel(conn, NOVEL)
             queue.delete_for_novel(conn, NOVEL)
             conn.execute(delete(novels).where(novels.c.id == NOVEL))
 
-        assert handled.tasks.finish(task, ME, Done("ok")) is False
+        assert handled.tasks.finish(task, ME, Done("ok")) is None
 
 
 class TestTasksRecover:
