@@ -207,9 +207,9 @@ class TestStep__Housekeeping:
     ) -> None:
         calls: list[object] = []
         monkeypatch.setattr(maintenance, "maintain", lambda _repo, *, now: calls.append(now))
-        monkeypatch.setattr(worker, "_download_batch", lambda: True)
+        monkeypatch.setattr(worker._runner, "step", lambda: True)  # noqa: SLF001
 
-        assert worker.step() == "download"
+        assert worker.step() == "task"
         assert calls == []
 
     def test_step__logs_a_maintenance_failure_and_waits_an_hour_to_retry(

@@ -18,9 +18,9 @@ from novelhog.config import Settings
 from novelhog.domain.tasks import Outcome, TaskKind
 from novelhog.repo.tasks import TaskRow
 from novelhog.storage import StaticStorage
-from novelhog.worker.downloads import ChapterAdapter, ImageSource
 from novelhog.worker.reachability import Reachability
 from novelhog.worker.refresh import TocAdapter
+from novelhog.worker.tasks.chapter_download import ChapterAdapter, ImageSource
 
 
 class WorkerAdapter(TocAdapter, ChapterAdapter, Protocol):

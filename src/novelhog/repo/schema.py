@@ -77,12 +77,8 @@ chapters = Table(
     Column("removed_at", UTCDateTime),
     Column("title", Text),
     Column("state", Text, nullable=False, server_default="not_requested"),
-    Column("priority", Boolean, nullable=False, server_default=false()),
     Column("has_images", Boolean, nullable=False, server_default=false()),
     Column("released_at", UTCDateTime),
-    Column("queued_at", UTCDateTime),
-    Column("claimed_by", Text),
-    Column("claimed_until", UTCDateTime),
     Column("updated_at", UTCDateTime, nullable=False),
     UniqueConstraint("novel_id", "url", name="uq_chapters_novel_url"),
     _id_check("ck_chapters_id", "CH"),
@@ -91,16 +87,6 @@ chapters = Table(
         name="ck_chapters_state",
     ),
     CheckConstraint('("position" IS NULL) = (removed_at IS NOT NULL)', name="ck_chapters_removed"),
-    CheckConstraint(
-        "(state IN ('pending', 'downloading')) = (queued_at IS NOT NULL)",
-        name="ck_chapters_queued",
-    ),
-    _claim_check("ck_chapters_claim"),
-    CheckConstraint(
-        "claimed_by IS NULL OR state IN ('pending', 'downloading')",
-        name="ck_chapters_claim_state",
-    ),
-    CheckConstraint("state <> 'downloading' OR claimed_by IS NOT NULL", name="ck_chapters_started"),
     Index("chapters_order", "novel_id", "position"),
     Index("chapters_state", "novel_id", "state"),
     Index(
@@ -110,15 +96,6 @@ chapters = Table(
         sqlite_where=text("released_at IS NOT NULL"),
         postgresql_where=text("released_at IS NOT NULL"),
     ),
-)
-
-Index(
-    "chapters_queue",
-    chapters.c.priority.desc(),
-    chapters.c.queued_at,
-    chapters.c.position,
-    sqlite_where=text("state = 'pending'"),
-    postgresql_where=text("state = 'pending'"),
 )
 
 chapter_contents = Table(

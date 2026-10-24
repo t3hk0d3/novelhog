@@ -3,6 +3,10 @@
 `queue` and `apply_toc` are internal helpers that take a `Connection`: the caller starts the
 transaction, calls `novels.lock_novel` first, and appends the events last with
 `events.emit_novel_change` (spec section 4, "Lock order").
+
+A chapter's download is a `chapter_download` task (tasks spec section 3). Every move to `pending`
+enqueues it and every move from `pending` to `not_requested` cancels it, in the same transaction,
+before the events. `queued_at` is derived: the live download task's `created_at`.
 """
 
 from collections.abc import Iterable, Sequence
@@ -11,7 +15,11 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    ColumnElement,
     Connection,
+    FromClause,
+    Select,
+    and_,
     bindparam,
     func,
     insert,
@@ -29,16 +37,22 @@ from novelhog.domain.chapters import (
 )
 from novelhog.domain.errors import NotFound, ValidationFailed
 from novelhog.domain.payloads import ChapterView
+from novelhog.domain.tasks import PRIORITY_RELEASE, PRIORITY_USER, TaskKind, TaskState
 from novelhog.domain.urls import normalize_url
 from novelhog.repo import db, events
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapters, novels
+from novelhog.repo.schema import chapters, novels, tasks
 from novelhog.repo.schema import events as events_table
-from novelhog.repo.tasks import TaskQueue
+
+# Imported after `novels`, which `tasks` itself imports.
+from novelhog.repo.tasks import TaskQueue, cancel_many, enqueue_many
 
 MAX_LIMIT = 5000
 _ERROR_BATCH = 500
+_DOWNLOAD = TaskKind.CHAPTER_DOWNLOAD
+_queued_download = tasks.alias("queued_download")
+_running_download = tasks.alias("running_download")
 
 
 @dataclass(frozen=True)
@@ -76,6 +90,49 @@ class TocDiff:
     def changed_ids(self) -> list[str]:
         """Every inserted, moved, removed or returned chapter, for `emit_novel_change`."""
         return [*self.inserted, *self.moved, *self.removed, *self.returned]
+
+
+def _download_task(alias: FromClause, state: TaskState) -> ColumnElement[bool]:
+    """Join condition: the chapter's download task in `state` (at most one, tasks spec 3)."""
+    return and_(
+        alias.c.kind == _DOWNLOAD.value,
+        alias.c.entity_id == chapters.c.id,
+        alias.c.state == state.value,
+    )
+
+
+def _select_chapters() -> Select[Any]:
+    """Chapter rows with the derived `queued_at`: the live download task's `created_at`."""
+    queued_at = func.coalesce(_queued_download.c.created_at, _running_download.c.created_at)
+    return select(chapters, queued_at.label("queued_at")).select_from(
+        chapters.outerjoin(
+            _queued_download, _download_task(_queued_download, TaskState.QUEUED)
+        ).outerjoin(_running_download, _download_task(_running_download, TaskState.RUNNING))
+    )
+
+
+def _enqueue_downloads(
+    conn: Connection,
+    novel_id: str,
+    positioned_ids: Sequence[tuple[str, int]],
+    *,
+    release: bool,
+    now: datetime,
+) -> None:
+    """Queue a download for each `(chapter id, position)`, due now (tasks spec section 4).
+
+    `release` gives an auto-queued release its higher priority. The caller holds `lock_novel`
+    and calls `TaskQueue.stamp` last.
+    """
+    priority = PRIORITY_RELEASE if release else PRIORITY_USER
+    enqueue_many(
+        conn, _DOWNLOAD, novel_id, positioned_ids, priority=priority, run_after=now, now=now
+    )
+
+
+def _cancel_downloads(conn: Connection, chapter_ids: Sequence[str], *, now: datetime) -> None:
+    """Cancel the queued download of each chapter; a running one is left to finish."""
+    cancel_many(conn, _DOWNLOAD, chapter_ids, now=now)
 
 
 def _parse_time(value: object) -> datetime:
@@ -148,7 +205,7 @@ def event_payload(
     A chapter in `error` takes its message from `errors` (a failure just recorded) or else
     carries the previous snapshot's over; removed chapters have a null `position`.
     """
-    row = conn.execute(select(chapters).where(chapters.c.id == chapter_id)).first()
+    row = conn.execute(_select_chapters().where(chapters.c.id == chapter_id)).first()
     if row is None:
         raise NotFound("chapter", chapter_id)
     error, error_at = None, None
@@ -169,9 +226,10 @@ def queue(
 ) -> QueuedChapters:
     """Move the chapters at `positions` to `pending` where the transition table allows it.
 
-    Sets `queued_at = now` and `priority = 0`; the stored content stays. Other chapters are
-    reported as skipped with their current state. Writes rows only; the caller appends events for
-    `changed_ids` (and must already hold `lock_novel`).
+    Each moved chapter gets its download task at user priority, due now; the stored content
+    stays. Other chapters are reported as skipped with their current state. Writes rows only; the
+    caller appends events for `changed_ids` (and must already hold `lock_novel`) and calls
+    `TaskQueue.stamp` last.
     """
     return _transition(conn, novel_id, positions, ChapterState.PENDING, now=now)
 
@@ -193,21 +251,16 @@ def _transition(
     movable_ids = {r.id for r in movable}
     skipped = [(r.position, ChapterState(r.state)) for r in found if r.id not in movable_ids]
     if movable:
-        values: dict[str, object]
-        if target is ChapterState.PENDING:
-            values = {"state": target.value, "queued_at": now, "priority": 0}
-        else:
-            values = {
-                "state": target.value,
-                "queued_at": None,
-                "claimed_by": None,
-                "claimed_until": None,
-            }
         conn.execute(
             update(chapters)
             .where(chapters.c.id.in_([r.id for r in movable]))
-            .values(**values, updated_at=now)
+            .values(state=target.value, updated_at=now)
         )
+        if target is ChapterState.PENDING:
+            positions_of = [(r.id, r.position) for r in movable]
+            _enqueue_downloads(conn, novel_id, positions_of, release=False, now=now)
+        else:
+            _cancel_downloads(conn, [r.id for r in movable], now=now)
     return QueuedChapters(
         updated=[r.position for r in movable],
         skipped=skipped,
@@ -226,11 +279,12 @@ def apply_toc(
 ) -> TocDiff:
     """Diff the TOC against the novel's chapter rows by normalised URL and write the changes.
 
-    New URLs are inserted (queued with priority 1 when the novel is followed and this is not the
-    initial import), known URLs take their new position (a removed one that came back gets its
-    position again), and missing URLs lose their position; a missing chapter that is `pending`
-    is also dequeued (spec section 6.2). Writes rows only; the caller holds `lock_novel` and
-    appends the events for `TocDiff.changed_ids` last.
+    New URLs are inserted (`pending` with a download task at release priority when the novel is
+    followed and this is not the initial import), known URLs take their new position (a removed
+    one that came back gets its position again), and missing URLs lose their position; a missing
+    chapter that is `pending` is also dequeued and its download task cancelled (spec section
+    6.2). Writes rows only; the caller holds `lock_novel`, appends the events for
+    `TocDiff.changed_ids` and calls `TaskQueue.stamp` last.
     """
     toc = list(dict.fromkeys(normalize_url(url) for url in urls))
     position_of = {url: index for index, url in enumerate(toc, start=1)}
@@ -250,14 +304,15 @@ def apply_toc(
                 "url": url,
                 "position": position_of[url],
                 "state": ChapterState.PENDING.value if queued else ChapterState.NOT_REQUESTED.value,
-                "priority": 1 if queued else 0,
                 "released_at": None if initial else now,
-                "queued_at": now if queued else None,
                 "updated_at": now,
             }
         )
     if new_rows:
         conn.execute(insert(chapters), new_rows)
+        if queued:
+            releases = [(r["id"], r["position"]) for r in new_rows]
+            _enqueue_downloads(conn, novel_id, releases, release=True, now=now)
 
     moved: list[str] = []
     returned: list[str] = []
@@ -292,13 +347,9 @@ def apply_toc(
         conn.execute(
             update(chapters)
             .where(chapters.c.id.in_(dequeued))
-            .values(
-                state=ChapterState.NOT_REQUESTED.value,
-                queued_at=None,
-                claimed_by=None,
-                claimed_until=None,
-            )
+            .values(state=ChapterState.NOT_REQUESTED.value)
         )
+        _cancel_downloads(conn, dequeued, now=now)
     by_position = {row.id: position_of[url] for url, row in existing.items() if url in position_of}
     new_ids = [r["id"] for r in new_rows]
     return TocDiff(
@@ -342,7 +393,7 @@ class Chapters:
                 raise NotFound("novel", novel_id)
             total = conn.execute(select(func.count()).select_from(chapters).where(where)).scalar()
             rows = conn.execute(
-                select(chapters)
+                _select_chapters()
                 .where(where)
                 .order_by(chapters.c.position)
                 .offset(max(offset, 0))
@@ -355,7 +406,7 @@ class Chapters:
         if not ids.is_valid(chapter_id, "CH"):
             raise NotFound("chapter", chapter_id)
         with db.read(self._engine) as conn:
-            row = conn.execute(select(chapters).where(chapters.c.id == chapter_id)).first()
+            row = conn.execute(_select_chapters().where(chapters.c.id == chapter_id)).first()
             if row is None or row.position is None:
                 raise NotFound("chapter", chapter_id)
             return _views(conn, [row])[0]

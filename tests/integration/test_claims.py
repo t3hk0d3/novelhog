@@ -34,7 +34,7 @@ from novelhog.repo.claims import (
 )
 from novelhog.repo.schema import chapters, consumers, exports, tasks
 from novelhog.repo.types import UTCDateTime
-from tests.integration.helpers import NOW, chapter_row, insert_novel_with_chapter
+from tests.integration.helpers import NOW
 
 TTL = timedelta(minutes=5)
 
@@ -361,49 +361,6 @@ class TestClaim__Statements:
 
         assert any(s.lstrip().upper().startswith("UPDATE") for s in statements)
         assert not any("FOR UPDATE" in s.upper() for s in statements)
-
-
-class TestClaim__OnChapters:
-    def test_claim__claims_pending_chapters_in_queue_order(self, repo: Repo) -> None:
-        with db.write(repo.engine) as connection:
-            insert_novel_with_chapter(connection)
-            queued = {"state": "pending", "queued_at": NOW}
-            connection.execute(
-                chapters.update().where(chapters.c.id == "CH000000000001").values(**queued)
-            )
-            for row in (
-                chapter_row(
-                    id="CH000000000002", url="https://example.com/novel/2", position=2, **queued
-                ),
-                chapter_row(
-                    id="CH000000000003",
-                    url="https://example.com/novel/3",
-                    position=3,
-                    priority=True,
-                    **queued,
-                ),
-                chapter_row(id="CH000000000004", url="https://example.com/novel/4", position=4),
-            ):
-                connection.execute(insert(chapters).values(**row))
-
-        with db.write(repo.engine) as connection:
-            rows = claim(
-                connection,
-                chapters,
-                eligible=chapters.c.state == "pending",
-                priority=[chapters.c.priority.desc(), chapters.c.queued_at, chapters.c.position],
-                owner="w1",
-                now=NOW,
-                ttl=TTL,
-                n=10,
-                returning=[chapters.c.id],
-            )
-
-        assert [row.id for row in rows] == ["CH000000000003", "CH000000000001", "CH000000000002"]
-        with db.read(repo.engine) as connection:
-            owners = dict(connection.execute(select(chapters.c.id, chapters.c.claimed_by)).all())
-        assert owners["CH000000000004"] is None
-        assert owners["CH000000000003"] == "w1"
 
 
 class TestClaim__Validation:

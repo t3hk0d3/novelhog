@@ -18,7 +18,7 @@ from sqlalchemy import select, update
 from novelhog import config
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
-from novelhog.domain.tasks import TaskKind, TaskState
+from novelhog.domain.tasks import PRIORITY_RELEASE, TaskKind, TaskState
 from novelhog.images import FetchedImage
 from novelhog.repo import Repo, db
 from novelhog.repo.schema import chapters, novels, tasks
@@ -34,6 +34,7 @@ from novelhog.worker.tasks.base import TaskContext
 from novelhog.worker.tasks.novel_refresh import NovelRefreshProcessor
 from tests.conftest import FakeClock
 from tests.integration.helpers import trash_keys
+from tests.integration.task_fakes import tasks_of
 
 HOST = "example.com"
 URL = "https://example.com/novel"
@@ -282,7 +283,11 @@ class TestRefresh__OnLaterSync:
         run.run()
 
         new = run.chapters(novel_id)[-1]
-        assert (new.state, new.priority, new.released_at) == ("pending", True, clock())
+        assert (new.state, new.released_at) == ("pending", clock())
+        [task] = tasks_of(repo, new.id)
+        assert (task.kind, task.state, task.priority) == (
+            TaskKind.CHAPTER_DOWNLOAD, TaskState.QUEUED, PRIORITY_RELEASE,
+        )  # fmt: skip
         assert run.novel(novel_id).refresh_interval == MIN
         assert run.last_nv(novel_id)["released"] == [3]
 

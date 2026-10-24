@@ -5,8 +5,9 @@
 1. the processor of the task's kind is looked up; a kind without one is a programming error,
    so the claim is released and `UnregisteredTaskKindError` raised (the loop logs it as
    `worker_step_failed`); the same happens when `repo.tasks` has no handler for the kind;
-2. `_wait_turn` runs before the task starts; on stop the claimed task is released instead
-   (politeness per host hooks in here in a later task);
+2. `_wait_turn` runs before the task starts: a download waits until its host's previous fetch
+   by this worker plus the request delay (per-host politeness, tasks spec section 6); on stop the
+   claimed task is released instead;
 3. `repo.tasks.start` starts it and runs the handler's `begin`; a task that was not started or
    is no longer needed is logged and left;
 4. the processor's `run` works under a heartbeat that renews the claim every `CLAIM_TTL / 3`; an
@@ -22,6 +23,7 @@ Every transition logs one `task_<verb>` line with `task_id`, `kind`, `entity_id`
 
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Any
 
 from structlog.typing import FilteringBoundLogger
@@ -102,6 +104,7 @@ class Runner:
         self._ctx = ctx
         self._worker_id = ctx.settings.worker_id
         self._ttl = ctx.settings.claim_ttl
+        self._last_fetch: dict[str, datetime] = {}
 
     def recover(self) -> TaskRecoveryReport:
         """Recover tasks whose claim lapsed and log `task_recovered` for each running one."""
@@ -127,7 +130,8 @@ class Runner:
         if processor is None:
             self._repo.tasks.release(task, self._worker_id)
             raise UnregisteredTaskKindError(task.kind, "processor")
-        if not self._wait_turn(task):
+        host = self._polite_host(task)
+        if not self._wait_turn(task, host):
             self._repo.tasks.release(task, self._worker_id)
             return
         logger = _task_logger(self._worker_id, task)
@@ -145,16 +149,36 @@ class Runner:
         if isinstance(started, Skipped):
             logger.info("task_skipped", reason=started.reason)
             return
-        self._run_started(processor, started)
+        self._run_started(processor, started, host)
 
-    def _wait_turn(self, task: TaskRow) -> bool:
+    def _polite_host(self, task: TaskRow) -> str | None:
+        """The host a download fetches from, read after the claim; None for other kinds.
+
+        Also None when the novel is gone (its start then reports `task_lost`).
+        """
+        if task.kind is not TaskKind.CHAPTER_DOWNLOAD:
+            return None
+        return self._repo.tasks.host_of(task)
+
+    def _wait_turn(self, task: TaskRow, host: str | None) -> bool:
         """Wait until the task may start; False when the worker is stopping.
 
-        The seam for per-host politeness (tasks spec section 6), which a later task adds.
+        A download waits until this worker's previous fetch from its host plus the request delay,
+        the larger of `REQUEST_DELAY` and the host's own (tasks spec section 6). The wait is
+        never longer than that delay, even if the clock went back.
         """
-        return not self._ctx.stop.is_set()
+        stop = self._ctx.stop
+        last = None if host is None else self._last_fetch.get(host)
+        if host is not None and last is not None:
+            delay = max(self._ctx.settings.request_delay, self._ctx.adapter.request_delay(host))
+            remaining = (last + timedelta(seconds=delay) - self._ctx.clock()).total_seconds()
+            if remaining > 0:
+                stop.wait(min(remaining, delay))
+        return not stop.is_set()
 
-    def _run_started(self, processor: TaskProcessor[Any, Any], started: Ready[Any]) -> None:
+    def _run_started(
+        self, processor: TaskProcessor[Any, Any], started: Ready[Any], host: str | None
+    ) -> None:
         task = started.task
         logger = _task_logger(self._worker_id, task)
         logger.info("task_started")
@@ -167,6 +191,8 @@ class Runner:
             except Exception as error:  # noqa: BLE001 - any failure of the work fails the task
                 raised = error
                 outcome = Failed(summarize(error))
+        if host is not None:
+            self._last_fetch[host] = self._ctx.clock()
         try:
             finished = self._repo.tasks.finish(task, self._worker_id, outcome)
         except Exception as error:

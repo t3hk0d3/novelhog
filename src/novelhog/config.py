@@ -10,11 +10,16 @@ from typing import Literal
 _PREFIX = "NOVELHOG_"
 _TRUE = frozenset({"true", "1"})
 _FALSE = frozenset({"false", "0"})
+_REMOVED = ("BATCH_SIZE",)
+"""Variables earlier versions read: a set one is ignored and reported in `Settings.ignored`."""
 
 
 @dataclass(frozen=True)
 class Settings:
-    """Immutable settings for the API, the worker and the CLI."""
+    """Immutable settings for the API, the worker and the CLI.
+
+    `ignored` names the removed variables that are set; the worker logs `config_ignored` for each.
+    """
 
     data_dir: Path
     database_url: str
@@ -27,7 +32,6 @@ class Settings:
     static_base_url: str
     refresh_min_interval: int
     refresh_max_interval: int
-    batch_size: int
     claim_ttl: int
     idle_sleep: int
     request_delay: float
@@ -38,6 +42,7 @@ class Settings:
     allow_private_fetch: bool
     worker_id: str
     http_port: int
+    ignored: tuple[str, ...] = ()
 
     @property
     def static_dir(self) -> Path:
@@ -121,7 +126,6 @@ def load(env: Mapping[str, str] = os.environ) -> Settings:
         static_base_url=_text(env, "STATIC_BASE_URL", "/static"),
         refresh_min_interval=_int(env, "REFRESH_MIN_INTERVAL", 21600),
         refresh_max_interval=_int(env, "REFRESH_MAX_INTERVAL", 2592000),
-        batch_size=_int(env, "BATCH_SIZE", 10),
         claim_ttl=_int(env, "CLAIM_TTL", 300),
         idle_sleep=_int(env, "IDLE_SLEEP", 30),
         request_delay=_float(env, "REQUEST_DELAY", 1.0),
@@ -132,4 +136,5 @@ def load(env: Mapping[str, str] = os.environ) -> Settings:
         allow_private_fetch=_bool(env, "ALLOW_PRIVATE_FETCH", False),
         worker_id=_text(env, "WORKER_ID", f"{socket.gethostname()}:{os.getpid()}"),
         http_port=_int(env, "HTTP_PORT", 8080),
+        ignored=tuple(_PREFIX + name for name in _REMOVED if _get(env, name) is not None),
     )

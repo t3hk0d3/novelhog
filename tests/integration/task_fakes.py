@@ -153,10 +153,20 @@ def live_task(repo: Repo, entity_id: str, state: TaskState = TaskState.QUEUED) -
     return task
 
 
+def claim_task(repo: Repo, entity_id: str, worker: str, ttl: int = 300) -> TaskRow:
+    """Claim the entity's queued task for `worker`, whatever else is queued."""
+    queued = live_task(repo, entity_id)
+    return force_claim(repo, queued.id, worker, repo.clock() + timedelta(seconds=ttl))
+
+
+def start_task(repo: Repo, entity_id: str, worker: str, ttl: int = 300) -> Ready[Any]:
+    """Claim the entity's queued task for `worker` (whatever else is queued) and start it."""
+    started = repo.tasks.start(claim_task(repo, entity_id, worker, ttl), worker)
+    assert isinstance(started, Ready)
+    return started
+
+
 def start_build(repo: Repo, export_id: str, worker: str, ttl: int = 300) -> Ready[ExportClaim]:
     """Claim the export's queued build for `worker` (whatever else is queued) and start it."""
-    queued = live_task(repo, export_id)
-    claimed = force_claim(repo, queued.id, worker, repo.clock() + timedelta(seconds=ttl))
-    started = repo.tasks.start(claimed, worker)
-    assert isinstance(started, Ready)
+    started: Ready[ExportClaim] = start_task(repo, export_id, worker, ttl)
     return started

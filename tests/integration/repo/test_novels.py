@@ -191,13 +191,8 @@ class TestGetAndList:
             novel.id,
             [
                 {"state": "downloaded"},
-                {"state": "pending", "queued_at": released},
-                {
-                    "state": "downloading",
-                    "queued_at": released,
-                    "claimed_by": "w",
-                    "claimed_until": released,
-                },
+                {"state": "pending"},
+                {"state": "downloading"},
                 {"state": "error"},
                 {"state": "not_requested"},
                 {"state": "downloaded", "position": None, "removed_at": released},

@@ -131,7 +131,7 @@ def runner(make_runner: Callable[..., Runner]) -> Runner:
 
 
 def add_downloaded(repo: Repo, novel: str, at: int, title: str | None = None) -> str:
-    chapter_id = add_chapter(repo, novel, at, state="downloaded", queued_at=None, title=title)
+    chapter_id = add_chapter(repo, novel, at, state="downloaded", title=title)
     with db.write(repo.engine) as conn:
         contents_repo.put(conn, chapter_id, f"Body of {at}", repo.clock())
     return chapter_id
@@ -340,7 +340,7 @@ class TestBuild__SkipMissing:
         self, repo: Repo, novel_id: str, storage: HookedStorage, runner: Runner
     ) -> None:
         add_downloaded(repo, novel_id, 1)
-        add_chapter(repo, novel_id, 2, state="not_requested", queued_at=None)
+        add_chapter(repo, novel_id, 2, state="not_requested")
         add_downloaded(repo, novel_id, 3)
         view = create_export(repo, novel_id, 1, 3, skip_missing=True)
 
@@ -430,7 +430,7 @@ def make_worker(
 
 
 class TestStep__WithAReadyExport:
-    def test_step__builds_before_starting_another_download_batch(
+    def test_step__builds_before_starting_another_download(
         self, repo: Repo, novel_id: str, settings: Settings, tmp_path: Path
     ) -> None:
         worker = make_worker(repo, FakeAdapter(), settings, tmp_path, RecordingStop())
@@ -441,7 +441,8 @@ class TestStep__WithAReadyExport:
         assert worker.step() == "task"
         assert repo.exports.get(novel_id, view.id).state is ExportState.READY
         assert chapter_of(repo, "CH000000000002").state == "pending"
-        assert worker.step() == "download"
+        assert worker.step() == "task"
+        assert chapter_of(repo, "CH000000000002").state == "downloaded"
 
 
 class TestEndToEnd__ExportWithMissingChapters:
@@ -451,13 +452,13 @@ class TestEndToEnd__ExportWithMissingChapters:
         adapter = FakeAdapter()
         worker = make_worker(repo, adapter, settings, tmp_path, RecordingStop())
         for position in (1, 2, 3):
-            add_chapter(repo, novel_id, position, state="not_requested", queued_at=None)
+            add_chapter(repo, novel_id, position, state="not_requested")
         view = create_export(repo, novel_id, 1, 3)
         adapter.errors["https://example.com/novel/2"] = ValueError("boom")
         states: list[ExportState] = []
         adapter.hook = lambda url: states.append(repo.exports.get(novel_id, view.id).state)
 
-        assert worker.step() == "download"
+        assert [worker.step() for _ in range(3)] == ["task"] * 3  # one download each
 
         assert states == [ExportState.WAITING] * 3  # waiting while chapters download
         waiting = repo.exports.get(novel_id, view.id)
@@ -467,8 +468,8 @@ class TestEndToEnd__ExportWithMissingChapters:
 
         del adapter.errors["https://example.com/novel/2"]
         repo.chapters.patch(novel_id, ChapterState.PENDING, [2])
-        assert worker.step() == "download"
-        assert worker.step() == "task"
+        assert worker.step() == "task"  # the download
+        assert worker.step() == "task"  # the build
         assert repo.exports.get(novel_id, view.id).state is ExportState.READY
 
 

@@ -24,6 +24,8 @@ from novelhog.repo.tasks import (
     TaskRecoveryReport,
     TaskRow,
     UnregisteredTaskKindError,
+    cancel_many,
+    enqueue_many,
 )
 from tests.conftest import FakeClock
 from tests.integration.helpers import NOW, insert_host, novel_row
@@ -1722,3 +1724,97 @@ class TestTasksRecover:
 
         assert get(handled, task.id).change_seq > before
         assert get(handled, task.id).updated_at == clock.current
+
+
+class TestEnqueueMany:
+    def test_enqueue_many__inserts_one_queued_task_per_entity_with_its_ordinal(
+        self, repo: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        _in_task_transaction(
+            repo,
+            queue,
+            NOVEL,
+            lambda conn: enqueue_many(
+                conn,
+                DOWNLOAD,
+                NOVEL,
+                [(chapter(1), 1), (chapter(2), 2)],
+                priority=100,
+                run_after=NOW,
+                now=clock(),
+            ),  # fmt: skip
+        )
+
+        rows = sorted(all_tasks(repo), key=lambda row: row.ordinal)
+        assert [(r.entity_id, r.ordinal, r.priority, r.state) for r in rows] == [
+            (chapter(1), 1, 100, TaskState.QUEUED),
+            (chapter(2), 2, 100, TaskState.QUEUED),
+        ]
+        assert {(r.run_after, r.created_at) for r in rows} == {(NOW, clock())}
+
+    def test_enqueue_many__merges_into_an_existing_queued_task(
+        self, repo: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        existing = enqueue(repo, queue, DOWNLOAD, chapter(1), priority=100, run_after=NOW)
+
+        _in_task_transaction(
+            repo,
+            queue,
+            NOVEL,
+            lambda conn: enqueue_many(
+                conn,
+                DOWNLOAD,
+                NOVEL,
+                [(chapter(1), 1)],
+                priority=110,
+                run_after=NOW - timedelta(minutes=1),
+                now=clock(),
+            ),  # fmt: skip
+        )
+
+        [row] = all_tasks(repo)
+        assert (row.id, row.priority, row.run_after) == (
+            existing.id, 110, NOW - timedelta(minutes=1),
+        )  # fmt: skip
+
+    def test_enqueue_many__stamps_every_inserted_row(
+        self, repo: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        _in_task_transaction(
+            repo,
+            queue,
+            NOVEL,
+            lambda conn: enqueue_many(
+                conn,
+                DOWNLOAD,
+                NOVEL,
+                [(chapter(1), 1), (chapter(2), 2)],
+                priority=100,
+                run_after=NOW,
+                now=clock(),
+            ),  # fmt: skip
+        )
+
+        assert {row.change_seq for row in all_tasks(repo)} == {repo.events.latest_seq()}
+        assert repo.events.latest_seq() > 0
+
+
+class TestCancelMany:
+    def test_cancel_many__cancels_the_queued_tasks_and_leaves_a_running_one(
+        self, repo: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        queued = enqueue(repo, queue, DOWNLOAD, chapter(1), priority=100, run_after=NOW)
+        active = running(repo, queue, DOWNLOAD, chapter(2))
+        now = clock.advance(seconds=1)
+
+        _in_task_transaction(
+            repo,
+            queue,
+            NOVEL,
+            lambda conn: cancel_many(conn, DOWNLOAD, [chapter(1), chapter(2)], now=now),
+        )
+
+        assert (get(repo, queued.id).state, get(repo, queued.id).finished_at) == (
+            TaskState.CANCELLED, now,
+        )  # fmt: skip
+        assert get(repo, active.id).state is TaskState.RUNNING

@@ -526,6 +526,224 @@ class TestMigration0002__ExportsDowngrade:
             connection.execute(insert(_V1_EXPORTS).values(**_v1_export(7, 3, 3, claimed_by="w")))
 
 
+_V1_CHAPTERS = sa.table(
+    "chapters",
+    sa.column("id", sa.Text),
+    sa.column("novel_id", sa.Text),
+    sa.column("url", sa.Text),
+    sa.column("position", sa.Integer),
+    sa.column("removed_at", UTCDateTime),
+    sa.column("state", sa.Text),
+    sa.column("priority", sa.Boolean),
+    sa.column("queued_at", UTCDateTime),
+    sa.column("claimed_by", sa.Text),
+    sa.column("claimed_until", UTCDateTime),
+    sa.column("updated_at", UTCDateTime),
+)
+QUEUED_1 = NOW - timedelta(minutes=30)
+QUEUED_2 = NOW - timedelta(minutes=20)
+
+
+def _v1_chapter(n: int, position: int | None, state: str, **values: Any) -> dict[str, Any]:
+    queued = state in ("pending", "downloading")
+    return {
+        "id": _ch(n),
+        "novel_id": NOVEL_1,
+        "url": f"https://example.com/novel/1/{n}",
+        "position": position,
+        "removed_at": None if position is not None else NOW,
+        "state": state,
+        "priority": False,
+        "queued_at": NOW - timedelta(minutes=n) if queued else None,
+        "claimed_by": "w" if state == "downloading" else None,
+        "claimed_until": LATER if state == "downloading" else None,
+        "updated_at": NOW,
+    } | values
+
+
+@pytest.fixture
+def v1_chapters_engine(v1_engine: Engine) -> Engine:
+    """Revision 0001 with chapters in every queue situation.
+
+    CH1 pending (user-queued), CH2 downloading (an auto-queued release) under a claim, CH3 pending
+    and CH4 downloading without a position (removed upstream), CH5 downloaded, CH6 pending under
+    an unstarted claim.
+    """
+    with db.write(v1_engine) as connection:
+        connection.execute(
+            insert(_V1_CHAPTERS),
+            [
+                _v1_chapter(1, 1, "pending", queued_at=QUEUED_1),
+                _v1_chapter(2, 2, "downloading", priority=True, queued_at=QUEUED_2),
+                _v1_chapter(3, None, "pending"),
+                _v1_chapter(4, None, "downloading"),
+                _v1_chapter(5, 5, "downloaded"),
+                _v1_chapter(6, 6, "pending", claimed_by="w", claimed_until=LATER),
+            ],
+        )
+    return v1_engine
+
+
+def _download_tasks(engine: Engine) -> dict[str, Any]:
+    with db.read(engine) as connection:
+        rows = connection.execute(select(tasks).where(tasks.c.kind == "chapter_download")).all()
+    return {row.entity_id: row for row in rows}
+
+
+def _chapter_states(engine: Engine) -> dict[str, str]:
+    with db.read(engine) as connection:
+        return dict(connection.execute(select(_V1_CHAPTERS.c.id, _V1_CHAPTERS.c.state)).all())
+
+
+def _queued_at(engine: Engine, chapter_ids: list[str]) -> dict[str, datetime | None]:
+    """Each chapter's API `queued_at`, read through the repo."""
+    repo = Repo(engine.url.render_as_string(hide_password=False))
+    try:
+        return {chapter_id: repo.chapters.get(chapter_id).queued_at for chapter_id in chapter_ids}
+    finally:
+        repo.engine.dispose()
+
+
+class TestMigration0002__Chapters:
+    def test_upgrade__gives_positioned_pending_and_downloading_chapters_a_download_task(
+        self, v1_chapters_engine: Engine
+    ) -> None:
+        db.migrate(v1_chapters_engine)
+
+        found = _download_tasks(v1_chapters_engine)
+        assert sorted(found) == [_ch(1), _ch(2), _ch(6)]
+        for n, queued_at, priority in ((1, QUEUED_1, 100), (2, QUEUED_2, 110), (6, None, 100)):
+            task = found[_ch(n)]
+            at = queued_at or NOW - timedelta(minutes=n)
+            assert (task.state, task.created_at, task.run_after) == ("queued", at, at)
+            assert (task.priority, task.ordinal, task.emit_event, task.claimed_by) == (
+                priority, n, False, None,
+            )  # fmt: skip
+
+    def test_upgrade__stamps_download_tasks_with_the_migration_clock_value(
+        self, v1_chapters_engine: Engine
+    ) -> None:
+        db.migrate(v1_chapters_engine)
+
+        with db.read(v1_chapters_engine) as connection:
+            clock = connection.execute(select(event_clock.c.seq)).scalar_one()
+        assert {t.change_seq for t in _download_tasks(v1_chapters_engine).values()} == {clock}
+
+    def test_upgrade__brings_downloading_chapters_back_pending(
+        self, v1_chapters_engine: Engine
+    ) -> None:
+        db.migrate(v1_chapters_engine)
+
+        states = _chapter_states(v1_chapters_engine)
+        assert (states[_ch(1)], states[_ch(2)], states[_ch(6)]) == ("pending",) * 3
+
+    def test_upgrade__turns_unpositioned_pending_or_downloading_chapters_not_requested(
+        self, v1_chapters_engine: Engine
+    ) -> None:
+        db.migrate(v1_chapters_engine)
+
+        states = _chapter_states(v1_chapters_engine)
+        assert (states[_ch(3)], states[_ch(4)], states[_ch(5)]) == (
+            "not_requested", "not_requested", "downloaded",
+        )  # fmt: skip
+
+    def test_upgrade__keeps_chapter_queued_at(self, v1_chapters_engine: Engine) -> None:
+        with db.read(v1_chapters_engine) as connection:
+            before = dict(
+                connection.execute(
+                    select(_V1_CHAPTERS.c.id, _V1_CHAPTERS.c.queued_at).where(
+                        _V1_CHAPTERS.c.position.is_not(None)
+                    )
+                ).all()
+            )
+
+        db.migrate(v1_chapters_engine)
+
+        assert _queued_at(v1_chapters_engine, sorted(before)) == before
+
+    def test_upgrade__drops_the_chapter_queue_columns_checks_and_index(
+        self, v1_chapters_engine: Engine
+    ) -> None:
+        db.migrate(v1_chapters_engine)
+
+        found = inspect(v1_chapters_engine)
+        columns = {c["name"] for c in found.get_columns("chapters")}
+        assert columns.isdisjoint({"queued_at", "priority", "claimed_by", "claimed_until"})
+        assert "chapters_queue" not in {i["name"] for i in found.get_indexes("chapters")}
+        checks = {c["name"] for c in found.get_check_constraints("chapters")}
+        assert checks.isdisjoint(
+            {
+                "ck_chapters_queued",
+                "ck_chapters_claim",
+                "ck_chapters_claim_state",
+                "ck_chapters_started",
+            }
+        )
+
+
+class TestMigration0002__ChaptersDowngrade:
+    @pytest.fixture
+    def downgraded(self, v1_chapters_engine: Engine) -> Engine:
+        """Upgraded, then CH2's download running (chapter downloading), CH6 without its task."""
+        db.migrate(v1_chapters_engine)
+        with db.write(v1_chapters_engine) as connection:
+            connection.execute(
+                update(tasks)
+                .where(tasks.c.entity_id == _ch(2))
+                .values(state="running", claimed_by="w", claimed_until=LATER, started_at=NOW)
+            )
+            connection.execute(
+                update(_V1_CHAPTERS).where(_V1_CHAPTERS.c.id == _ch(2)).values(state="downloading")
+            )
+            connection.execute(delete(tasks).where(tasks.c.entity_id == _ch(6)))
+        _downgrade(v1_chapters_engine, "0001")
+        return v1_chapters_engine
+
+    def _rows(self, engine: Engine) -> dict[str, Any]:
+        with db.read(engine) as connection:
+            return {row.id: row for row in connection.execute(select(_V1_CHAPTERS)).all()}
+
+    def test_downgrade__resets_running_downloads_to_pending_without_claims(
+        self, downgraded: Engine
+    ) -> None:
+        rows = self._rows(downgraded)
+        assert (rows[_ch(2)].state, rows[_ch(2)].claimed_by, rows[_ch(2)].claimed_until) == (
+            "pending", None, None,
+        )  # fmt: skip
+
+    def test_downgrade__restores_queued_at_and_priority_from_the_live_download_task(
+        self, downgraded: Engine
+    ) -> None:
+        rows = self._rows(downgraded)
+        assert (rows[_ch(1)].queued_at, rows[_ch(1)].priority) == (QUEUED_1, False)
+        assert (rows[_ch(2)].queued_at, rows[_ch(2)].priority) == (QUEUED_2, True)
+
+    def test_downgrade__a_pending_chapter_without_a_live_task_takes_updated_at_and_priority_0(
+        self, downgraded: Engine
+    ) -> None:
+        row = self._rows(downgraded)[_ch(6)]
+        assert (row.state, row.queued_at, row.priority) == ("pending", row.updated_at, False)
+
+    def test_downgrade__leaves_resting_chapters_unqueued(self, downgraded: Engine) -> None:
+        rows = self._rows(downgraded)
+        for n in (3, 4, 5):
+            assert (rows[_ch(n)].queued_at, rows[_ch(n)].priority) == (None, False)
+
+    def test_downgrade__restores_the_v1_chapter_checks_and_index(self, downgraded: Engine) -> None:
+        assert "chapters_queue" in {i["name"] for i in inspect(downgraded).get_indexes("chapters")}
+        broken: list[tuple[str, dict[str, Any]]] = [
+            ("pending", {"queued_at": None}),
+            ("not_requested", {"claimed_by": "w", "claimed_until": LATER}),
+            ("pending", {"claimed_by": "w", "claimed_until": None}),
+            ("downloading", {"claimed_by": None, "claimed_until": None}),
+        ]
+        for state, values in broken:
+            with pytest.raises(IntegrityError), db.write(downgraded) as connection:
+                connection.execute(
+                    insert(_V1_CHAPTERS).values(**_v1_chapter(9, 9, state, **values))
+                )
+
+
 class TestRequireCurrent:
     def test_require_current__returns_on_a_database_at_head(self, empty_engine: Engine) -> None:
         db.migrate(empty_engine)

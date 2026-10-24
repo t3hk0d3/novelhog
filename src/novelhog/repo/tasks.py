@@ -56,9 +56,11 @@ from novelhog.ids import new_id
 from novelhog.repo import claims, db, events, novels
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import event_clock, tasks
+from novelhog.repo.schema import novels as novels_table
 from novelhog.repo.task_kinds import HandlerRegistry, TaskHandler, default_handlers
 
 PRUNE_BATCH = 500
+_IN_BATCH = 500
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 _TOUCHED = "tasks_touched"
@@ -244,6 +246,74 @@ def enqueue(  # noqa: PLR0913  (the enqueue parameters of tasks spec section 4)
     return task
 
 
+def enqueue_many(  # noqa: PLR0913  (the enqueue parameters of tasks spec section 4)
+    conn: Connection,
+    kind: TaskKind,
+    novel_id: str,
+    entities: Sequence[tuple[str, int]],
+    *,
+    priority: int,
+    run_after: datetime,
+    emit_event: bool = False,
+    now: datetime,
+) -> None:
+    """`enqueue` for many `(entity_id, ordinal)` of one novel, with batched reads and inserts.
+
+    Same rules as `enqueue`: an entity with a queued task merges into it, the others get a new
+    queued task each. The caller holds `lock_novel` and calls `TaskQueue.stamp` last.
+    """
+    for start in range(0, len(entities), _IN_BATCH):
+        batch = entities[start : start + _IN_BATCH]
+        queued = {
+            task.entity_id: task
+            for task in (
+                TaskRow.from_row(row)
+                for row in conn.execute(
+                    select(tasks).where(
+                        tasks.c.kind == kind.value,
+                        tasks.c.entity_id.in_([entity_id for entity_id, _ in batch]),
+                        tasks.c.state == TaskState.QUEUED.value,
+                    )
+                )
+            )
+        }
+        rows: list[dict[str, object]] = []
+        for entity_id, ordinal in batch:
+            current = queued.get(entity_id)
+            if current is not None:
+                _merge(
+                    conn,
+                    current,
+                    priority=priority,
+                    run_after=run_after,
+                    emit_event=emit_event,
+                    now=now,
+                )
+                continue
+            rows.append(
+                {
+                    "id": new_id("TK"),
+                    "kind": kind.value,
+                    "entity_id": entity_id,
+                    "novel_id": novel_id,
+                    "state": TaskState.QUEUED.value,
+                    "priority": priority,
+                    "ordinal": ordinal,
+                    "run_after": run_after,
+                    "payload": {},
+                    "emit_event": emit_event,
+                    "attempts": 0,
+                    "change_seq": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        if rows:
+            conn.execute(insert(tasks), rows)
+            for row in rows:
+                _touch(conn, str(row["id"]))
+
+
 def _merge(
     conn: Connection,
     current: TaskRow,
@@ -288,6 +358,25 @@ def cancel(conn: Connection, kind: TaskKind, entity_id: str, *, now: datetime) -
         return False
     _touch(conn, task_id)
     return True
+
+
+def cancel_many(
+    conn: Connection, kind: TaskKind, entity_ids: Sequence[str], *, now: datetime
+) -> None:
+    """`cancel` for many entities: each queued task of `kind` becomes `cancelled`."""
+    for start in range(0, len(entity_ids), _IN_BATCH):
+        cancelled = conn.execute(
+            update(tasks)
+            .where(
+                tasks.c.kind == kind.value,
+                tasks.c.entity_id.in_(entity_ids[start : start + _IN_BATCH]),
+                tasks.c.state == TaskState.QUEUED.value,
+            )
+            .values(state=TaskState.CANCELLED.value, finished_at=now, **_released(now))
+            .returning(tasks.c.id)
+        ).scalars()
+        for task_id in cancelled:
+            _touch(conn, task_id)
 
 
 class TaskQueue:
@@ -762,6 +851,14 @@ class Tasks:
     def renew(self, task: TaskRow, worker_id: str, ttl: int) -> bool:
         """Heartbeat: extend this worker's claim by `ttl` seconds; False once it is lost."""
         return self._queue.renew(task, worker_id, ttl)
+
+    def host_of(self, task: TaskRow) -> str | None:
+        """The host of the task's novel, for per-host politeness; None when the novel is gone."""
+        with db.read(self._engine) as conn:
+            host = conn.execute(
+                select(novels_table.c.host).where(novels_table.c.id == task.novel_id)
+            ).scalar_one_or_none()
+        return None if host is None else str(host)
 
     def start(self, task: TaskRow, worker_id: str) -> StartOutcome[Any]:
         """Start the claimed task and its handler in one transaction (tasks spec section 5).

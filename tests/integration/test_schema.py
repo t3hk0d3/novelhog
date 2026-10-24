@@ -38,8 +38,6 @@ class TestClaimColumns:
     @pytest.mark.parametrize(
         ("table", "row", "claim"),
         [
-            (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_by": "w1"}),
-            (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_until": NOW}),
             (
                 consumers,
                 {"name": "notifier", "last_seq": 0, "updated_at": NOW},
@@ -55,12 +53,7 @@ class TestClaimColumns:
     def test_claim_columns__reject_a_row_with_only_one_set(
         self, repo: Repo, table: Any, row: dict[str, Any], claim: dict[str, Any]
     ) -> None:
-        setups = {
-            novels: insert_host,
-            chapters: _insert_host_and_novel,
-            consumers: None,
-        }
-        _expect_rejected(repo, setups[table], insert(table).values(**(row | claim)))
+        _expect_rejected(repo, None, insert(table).values(**(row | claim)))
 
 
 class TestSchemaConstraints:
@@ -73,52 +66,6 @@ class TestSchemaConstraints:
             connection.execute(insert(novels).values(**novel_row()))
 
         _expect_rejected(repo, setup, insert(chapters).values(**chapter_row(id="CH1")))
-
-    @pytest.mark.parametrize("state", ["pending", "downloading"])
-    def test_schema__queued_state_without_queued_at_is_rejected(
-        self, repo: Repo, state: str
-    ) -> None:
-        _expect_rejected(
-            repo,
-            insert_novel_with_chapter,
-            insert(chapters).values(
-                **chapter_row(
-                    id="CH000000000002",
-                    url="u2",
-                    position=2,
-                    state=state,
-                    claimed_by="w" if state == "downloading" else None,
-                    claimed_until=NOW if state == "downloading" else None,
-                )
-            ),
-        )
-
-    def test_schema__downloading_chapter_without_claim_is_rejected(self, repo: Repo) -> None:
-        _expect_rejected(
-            repo,
-            insert_novel_with_chapter,
-            insert(chapters).values(
-                **chapter_row(id="CH000000000002", url="u2", state="downloading", queued_at=NOW)
-            ),
-        )
-
-    @pytest.mark.parametrize("state", ["not_requested", "downloaded", "error"])
-    def test_schema__claimed_chapter_in_a_resting_state_is_rejected(
-        self, repo: Repo, state: str
-    ) -> None:
-        _expect_rejected(
-            repo,
-            insert_novel_with_chapter,
-            insert(chapters).values(
-                **chapter_row(
-                    id="CH000000000002",
-                    url="u2",
-                    state=state,
-                    claimed_by="w",
-                    claimed_until=NOW,
-                )
-            ),
-        )
 
     @pytest.mark.parametrize(
         "fields", [{"position": 2, "removed_at": NOW}, {"position": None, "removed_at": None}]
@@ -184,20 +131,6 @@ class TestSchemaConstraints:
 
         with db.read(repo.engine) as connection:
             assert connection.execute(select(settings.c.value)).scalar() == value
-
-
-class TestChapterPriority:
-    def test_schema__priority_is_a_boolean_that_round_trips(self, repo: Repo) -> None:
-        with db.write(repo.engine) as connection:
-            insert_novel_with_chapter(connection)
-            connection.execute(
-                insert(chapters).values(**chapter_row(id="CH000000000002", url="u2", priority=True))
-            )
-
-        with db.read(repo.engine) as connection:
-            rows = connection.execute(select(chapters.c.priority).order_by(chapters.c.id)).all()
-        assert [row[0] for row in rows] == [False, True]
-        assert all(isinstance(row[0], bool) for row in rows)
 
 
 TASK_ID = "TK000000000001"

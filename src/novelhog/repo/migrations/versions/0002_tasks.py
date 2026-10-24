@@ -4,6 +4,12 @@ Novels: each novel gets one queued `novel_refresh` task at its `next_refresh_at`
 it to the request time for a requested sync), then the novels' queue and claim columns go.
 Downgrade restores them from the refresh tasks.
 
+Chapters: each `pending` or `downloading` chapter with a position gets one queued
+`chapter_download` task (`created_at = run_after = queued_at`, priority from v1's `priority`) and
+comes back `pending`; one without a position becomes `not_requested`. Then the chapters' queue and
+claim columns, checks and index go. Downgrade resets running downloads and restores the columns
+from the download tasks.
+
 Exports: `building` exports go back to `waiting`, each buildable waiting export gets one queued
 `export_build` task at its `created_at`, then the exports' claim columns and checks go. Downgrade
 sets `building` exports back to `waiting` and restores the columns and checks.
@@ -46,6 +52,17 @@ _EXPORTS_BUILDING_CHECK = "(state = 'building') = (claimed_by IS NOT NULL)"
 _CLAIM_CHECK = "(claimed_by IS NULL) = (claimed_until IS NULL)"
 _NOVELS_DUE = "novels_due_refresh"
 _NOVELS_CLAIM = "ck_novels_claim"
+_DOWNLOAD = "chapter_download"
+_PRIORITY_RELEASE = 110
+_PRIORITY_USER = 100
+_CHAPTERS_QUEUE = "chapters_queue"
+_CHAPTER_CHECKS = {
+    "ck_chapters_queued": "(state IN ('pending', 'downloading')) = (queued_at IS NOT NULL)",
+    "ck_chapters_claim": _CLAIM_CHECK,
+    "ck_chapters_claim_state": "claimed_by IS NULL OR state IN ('pending', 'downloading')",
+    "ck_chapters_started": "state <> 'downloading' OR claimed_by IS NOT NULL",
+}
+_QUEUED_STATES = ("pending", "downloading")
 
 _event_clock = sa.table("event_clock", sa.column("id", sa.Integer), sa.column("seq", _BIG))
 _novels = sa.table(
@@ -59,6 +76,18 @@ _chapters = sa.table(
     sa.column("novel_id", sa.Text),
     sa.column("position", sa.Integer),
     sa.column("state", sa.Text),
+)
+_v1_chapter_queue = sa.table(
+    "chapters",
+    sa.column("id", sa.Text),
+    sa.column("novel_id", sa.Text),
+    sa.column("position", sa.Integer),
+    sa.column("state", sa.Text),
+    sa.column("priority", sa.Boolean),
+    sa.column("queued_at", UTCDateTime),
+    sa.column("claimed_by", sa.Text),
+    sa.column("claimed_until", UTCDateTime),
+    sa.column("updated_at", UTCDateTime),
 )
 _exports = sa.table(
     "exports",
@@ -244,6 +273,209 @@ def _restore_novel_queue_columns(now: datetime) -> None:
             _NOVELS_CLAIM, "(claimed_by IS NULL) = (claimed_until IS NULL)"
         )
         batch.create_index(_NOVELS_DUE, ["next_refresh_at"])
+
+
+def _fill_download_tasks(migration: _Migration) -> None:
+    """One queued download task per positioned queued chapter; the rest leave the queue (spec 9).
+
+    A positioned `pending` or `downloading` chapter gets a task with `created_at = run_after =
+    queued_at`, priority 110 for an auto-queued release (v1 `priority`) else 100, and `ordinal` =
+    its position, and is `pending` without a claim. One without a position becomes
+    `not_requested` (v1 `_back_in_line`). Runs while v1's chapter checks still hold.
+    """
+    conn = op.get_bind()
+    chapters = _v1_chapter_queue
+    queued = chapters.c.state.in_(_QUEUED_STATES)
+    positioned = chapters.c.position.is_not(None)
+    rows = conn.execute(
+        sa.select(
+            chapters.c.id,
+            chapters.c.novel_id,
+            chapters.c.position,
+            chapters.c.priority,
+            chapters.c.queued_at,
+        )
+        .where(queued, positioned)
+        .order_by(chapters.c.id)
+    ).all()
+    if rows:
+        seq = migration.change_seq()
+        conn.execute(
+            sa.insert(_tasks),
+            [
+                {
+                    "id": new_id("TK"),
+                    "kind": _DOWNLOAD,
+                    "entity_id": row.id,
+                    "novel_id": row.novel_id,
+                    "state": "queued",
+                    "priority": _PRIORITY_RELEASE if row.priority else _PRIORITY_USER,
+                    "ordinal": row.position,
+                    "run_after": row.queued_at,
+                    "payload": {},
+                    "emit_event": False,
+                    "attempts": 0,
+                    "change_seq": seq,
+                    "created_at": row.queued_at,
+                    "updated_at": migration.now,
+                }
+                for row in rows
+            ],
+        )
+    conn.execute(
+        sa.update(chapters)
+        .where(queued, positioned)
+        .values(state="pending", claimed_by=None, claimed_until=None)
+    )
+    conn.execute(
+        sa.update(chapters)
+        .where(queued, chapters.c.position.is_(None))
+        .values(
+            state="not_requested",
+            priority=False,
+            queued_at=None,
+            claimed_by=None,
+            claimed_until=None,
+        )
+    )
+
+
+def _v1_chapter_columns() -> sa.Table:
+    """`chapters` as revision 0001 created it, without the constraints that outlive this revision.
+
+    Like `_v1_novel_columns`: the SQLite batch rebuild copies this, and
+    `_kept_chapter_constraints` adds the rest in the order `metadata.create_all` uses.
+    """
+    pending = sa.text("state = 'pending'")
+    released = sa.text("released_at IS NOT NULL")
+    return sa.Table(
+        "chapters",
+        sa.MetaData(),
+        sa.Column("id", sa.Text, primary_key=True),
+        sa.Column("novel_id", sa.Text, nullable=False),
+        sa.Column("url", sa.Text, nullable=False),
+        sa.Column(
+            "position",
+            sa.Integer,
+            sa.CheckConstraint('"position" >= 1', name="ck_chapters_position"),
+        ),
+        sa.Column("removed_at", UTCDateTime),
+        sa.Column("title", sa.Text),
+        sa.Column("state", sa.Text, nullable=False, server_default="not_requested"),
+        sa.Column("priority", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("has_images", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("released_at", UTCDateTime),
+        sa.Column("queued_at", UTCDateTime),
+        sa.Column("claimed_by", sa.Text),
+        sa.Column("claimed_until", UTCDateTime),
+        sa.Column("updated_at", UTCDateTime, nullable=False),
+        *(sa.CheckConstraint(sql, name=name) for name, sql in _CHAPTER_CHECKS.items()),
+        sa.Index(
+            _CHAPTERS_QUEUE,
+            sa.text("priority DESC"),
+            "queued_at",
+            "position",
+            sqlite_where=pending,
+        ),
+        sa.Index("chapters_order", "novel_id", "position"),
+        sa.Index("chapters_state", "novel_id", "state"),
+        sa.Index("chapters_released", "novel_id", "released_at", sqlite_where=released),
+    )
+
+
+def _kept_chapter_constraints() -> tuple[sa.Constraint, ...]:
+    return (
+        sa.UniqueConstraint("novel_id", "url", name="uq_chapters_novel_url"),
+        sa.CheckConstraint("length(id) = 14 AND substr(id, 1, 2) = 'CH'", name="ck_chapters_id"),
+        sa.CheckConstraint(
+            "state IN ('not_requested', 'pending', 'downloading', 'downloaded', 'error')",
+            name="ck_chapters_state",
+        ),
+        sa.CheckConstraint(
+            '("position" IS NULL) = (removed_at IS NOT NULL)', name="ck_chapters_removed"
+        ),
+        sa.ForeignKeyConstraint(["novel_id"], [_key_of("novels", "id")]),
+    )
+
+
+def _drop_chapter_queue_columns() -> None:
+    sqlite = op.get_bind().dialect.name == "sqlite"
+    with op.batch_alter_table(
+        "chapters",
+        copy_from=_v1_chapter_columns() if sqlite else None,
+        table_args=_kept_chapter_constraints() if sqlite else (),
+    ) as batch:
+        batch.drop_index(_CHAPTERS_QUEUE)
+        for name in _CHAPTER_CHECKS:
+            batch.drop_constraint(name, type_="check")
+        batch.drop_column("priority")
+        batch.drop_column("queued_at")
+        batch.drop_column("claimed_by")
+        batch.drop_column("claimed_until")
+
+
+def _restore_chapter_queue_columns() -> None:
+    """Restore v1's chapter queue columns from the download tasks (tasks spec 9, downgrade).
+
+    Running downloads are reset first: `downloading` → `pending`, or `not_requested` without a
+    position. A `pending` chapter takes `queued_at` from its live download task's `created_at`
+    and `priority` from its priority (110 → 1, 100 → 0); without a live task, `queued_at =
+    updated_at` and `priority = 0`. No claims.
+    """
+    conn = op.get_bind()
+    chapters = _v1_chapter_queue
+    conn.execute(
+        sa.update(_chapters)
+        .where(_chapters.c.state == "downloading")
+        .values(
+            state=sa.case((_chapters.c.position.is_not(None), "pending"), else_="not_requested")
+        )
+    )
+    with op.batch_alter_table("chapters") as batch:
+        batch.add_column(
+            sa.Column("priority", sa.Boolean, nullable=False, server_default=sa.false())
+        )
+        batch.add_column(sa.Column("queued_at", UTCDateTime))
+        batch.add_column(sa.Column("claimed_by", sa.Text))
+        batch.add_column(sa.Column("claimed_until", UTCDateTime))
+
+    def live(state: str) -> sa.ColumnElement[bool]:
+        return sa.and_(
+            _tasks.c.kind == _DOWNLOAD,
+            _tasks.c.entity_id == chapters.c.id,
+            _tasks.c.state == state,
+        )
+
+    def created_at(state: str) -> sa.ScalarSelect[datetime]:
+        return sa.select(_tasks.c.created_at).where(live(state)).scalar_subquery()
+
+    release = sa.exists().where(
+        _tasks.c.kind == _DOWNLOAD,
+        _tasks.c.entity_id == chapters.c.id,
+        _tasks.c.state.in_(("queued", "running")),
+        _tasks.c.priority == _PRIORITY_RELEASE,
+    )
+    conn.execute(
+        sa.update(chapters)
+        .where(chapters.c.state == "pending")
+        .values(
+            queued_at=sa.func.coalesce(
+                created_at("queued"), created_at("running"), chapters.c.updated_at
+            ),
+            priority=release,
+        )
+    )
+    with op.batch_alter_table("chapters") as batch:
+        for name, sql in _CHAPTER_CHECKS.items():
+            batch.create_check_constraint(name, sql)
+    pending = sa.text("state = 'pending'")
+    op.create_index(
+        _CHAPTERS_QUEUE,
+        "chapters",
+        [sa.text("priority DESC"), "queued_at", "position"],
+        sqlite_where=pending,
+        postgresql_where=pending,
+    )
 
 
 def _reset_building_exports(*, clear_claims: bool) -> None:
@@ -517,13 +749,16 @@ def upgrade() -> None:
     migration = _Migration()
     _fill_refresh_tasks(migration)
     _reset_building_exports(clear_claims=True)
+    _fill_download_tasks(migration)
     _fill_build_tasks(migration)
     _drop_novel_queue_columns()
+    _drop_chapter_queue_columns()
     _drop_export_claim_columns()
 
 
 def downgrade() -> None:
     _restore_export_claim_columns()
+    _restore_chapter_queue_columns()
     _restore_novel_queue_columns(datetime.now(UTC))
     op.execute("DELETE FROM events WHERE substr(entity_id, 1, 2) = 'TK'")
     _widen_events_check(_OLD_PREFIXES)

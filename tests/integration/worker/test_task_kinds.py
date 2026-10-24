@@ -3,12 +3,12 @@
 `novel_refresh`: v1's refresh (spec section 6.2) as a task, with the derived `syncing` and
 `next_refresh_at` (tasks spec sections 2 and 3) and the successor and manual-sync rules (5.2).
 `export_build`: v1's build (spec section 6.5) as a task, and when builds are queued (5.1).
+`chapter_download`: v1's download (spec section 6.4) as a task, queueing and dequeueing (tasks 4).
 """
 
 import random
-import threading
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,20 +21,25 @@ from novelhog.config import Settings
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.errors import NotFound
 from novelhog.domain.exports import Format
-from novelhog.domain.tasks import Done, Skip, Started, TaskKind, TaskState
+from novelhog.domain.tasks import Done, Skip, Started, StartResult, TaskKind, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import contents as contents_repo
 from novelhog.repo import exports as export_repo
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapters, exports, novels, tasks
+from novelhog.repo.schema import chapter_contents, chapters, exports, novels, tasks
+from novelhog.repo.task_kinds.chapter_download import (
+    ChapterClaim,
+    ChapterDownloadHandler,
+    Downloaded,
+)
 from novelhog.repo.task_kinds.export_build import ExportBuildHandler
 from novelhog.repo.task_kinds.novel_refresh import NovelRefreshHandler
-from novelhog.repo.tasks import Finished, TaskRow
+from novelhog.repo.tasks import Finished, NotStarted, TaskRow
 from novelhog.scraper_adapter.adapter import TocResult
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError
+from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
-from novelhog.worker.reachability import Reachability
+from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks import default_processors
 from novelhog.worker.tasks.base import TaskContext
@@ -42,8 +47,8 @@ from novelhog.worker.tasks.export_build import ExportBuildProcessor
 from novelhog.worker.tasks.novel_refresh import NovelRefreshProcessor
 from tests.conftest import FakeClock
 from tests.integration.helpers import assert_no_events_after_delete, trash_keys
-from tests.integration.task_fakes import start_build, tasks_of
-from tests.integration.worker.conftest import URL, FakeAdapter, FakeFetcher
+from tests.integration.task_fakes import claim_task, start_build, start_task, tasks_of
+from tests.integration.worker.conftest import HOST, URL, FakeAdapter, FakeFetcher, RecordingStop
 
 MIN = 21600
 COVER_URL = "https://example.com/cover.png"
@@ -79,14 +84,19 @@ def files(tmp_path: Path) -> LocalStaticStorage:
 
 
 @pytest.fixture
-def runner(
+def reachability() -> Reachability:
+    return Reachability()
+
+
+def make_runner(  # noqa: PLR0913
     repo: Repo,
     adapter: TocAdapter,
     fetcher: FakeFetcher,
     files: LocalStaticStorage,
     settings: Settings,
+    reachability: Reachability,
 ) -> Runner:
-    """The runner with the default processors, as the worker builds it."""
+    """The runner with the default processors, as the worker builds it; waits never sleep."""
     return Runner(
         repo,
         default_processors(),
@@ -96,13 +106,26 @@ def runner(
             storage=files,
             chapter_store=ChapterStore(repo),
             settings=settings,
-            stop=threading.Event(),
-            reachability=Reachability(),
+            stop=RecordingStop(),
+            reachability=reachability,
             rng=random.Random(3),  # noqa: S311 - refresh jitter, not security
             heartbeat=runtime.Heartbeat,
             clock=repo.clock,
         ),
     )
+
+
+@pytest.fixture
+def runner(
+    repo: Repo,
+    adapter: TocAdapter,
+    fetcher: FakeFetcher,
+    files: LocalStaticStorage,
+    settings: Settings,
+    reachability: Reachability,
+) -> Runner:
+    """The runner with the default processors, as the worker builds it."""
+    return make_runner(repo, adapter, fetcher, files, settings, reachability)
 
 
 def refresh_tasks(repo: Repo, novel_id: str) -> list[TaskRow]:
@@ -527,13 +550,13 @@ BUILD = TaskKind.EXPORT_BUILD
 
 
 def set_chapter(repo: Repo, novel_id: str, position: int, state: str) -> str:
-    """Set the state of the novel's chapter at `position` (v1 columns); return its id."""
-    pending = state in ("pending", "downloading")
+    """Set the resting state of the novel's chapter at `position`; return its id."""
+    assert state in ("not_requested", "downloaded", "error")
     with db.write(repo.engine) as conn:
         chapter_id = conn.execute(
             update(chapters)
             .where(chapters.c.novel_id == novel_id, chapters.c.position == position)
-            .values(state=state, queued_at=repo.clock() if pending else None)
+            .values(state=state)
             .returning(chapters.c.id)
         ).scalar_one()
         if state == "downloaded":
@@ -543,7 +566,7 @@ def set_chapter(repo: Repo, novel_id: str, position: int, state: str) -> str:
 
 def set_states(repo: Repo, novel_id: str, states: str) -> list[str]:
     """Set chapter states by position from a string: d = downloaded, n = not_requested."""
-    names = {"d": "downloaded", "n": "not_requested", "p": "pending"}
+    names = {"d": "downloaded", "n": "not_requested"}
     return [set_chapter(repo, novel_id, at, names[code]) for at, code in enumerate(states, start=1)]
 
 
@@ -744,16 +767,13 @@ class TestExportBuild__Enqueueing:
         self, repo: Repo, novel_id: str, imported3: list[str]
     ) -> None:
         export_id = export(repo, novel_id, 1, 3)  # queues chapter 2
-        [claim] = repo.work.claim_batch("worker-a", 1, 300)
-        assert repo.work.start(claim, "worker-a")
+        started = start_task(repo, imported3[1], "worker-a")
         before = repo.events.latest_seq()
 
-        assert repo.work.complete(
-            claim.chapter_id, "worker-a", markdown="x", title="t", has_images=False
-        )
+        assert repo.tasks.finish(started.task, "worker-a", Done(Downloaded("x", "t", False)))
 
         [task] = builds_of(repo, export_id, TaskState.QUEUED)
-        assert entities_since(repo, before) == [claim.chapter_id, novel_id, export_id, task.id]
+        assert entities_since(repo, before) == [imported3[1], novel_id, export_id, task.id]
 
     def test_sync__moving_an_undownloaded_chapter_out_of_the_range_queues_the_build(
         self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter,
@@ -799,11 +819,8 @@ class TestExportBuild__Enqueueing:
         older = export(repo, novel_id, 1, 3)  # waits for chapter 2
         clock.advance(seconds=1)
         newer = export(repo, novel_id, 3, 3)  # buildable at once, queued first
-        [claim] = repo.work.claim_batch("worker-a", 1, 300)
-        assert repo.work.start(claim, "worker-a")
-        assert repo.work.complete(
-            claim.chapter_id, "worker-a", markdown="x", title="t", has_images=False
-        )
+        started = start_task(repo, imported3[1], "worker-a")
+        assert repo.tasks.finish(started.task, "worker-a", Done(Downloaded("x", "t", False)))
 
         first = repo.tasks.claim("worker-a", 300)
         second = repo.tasks.claim("worker-a", 300)
@@ -868,3 +885,419 @@ class TestExportBuild__Recovery:
         assert export_state(repo, export_id) == "waiting"
         ex = [e.payload for e in repo.events.since(before) if e.entity_id == export_id]
         assert [payload["state"] for payload in ex] == ["waiting"]
+
+
+DOWNLOAD = TaskKind.CHAPTER_DOWNLOAD
+
+
+def chapter_at(repo: Repo, novel_id: str, position: int) -> str:
+    """The id of the novel's chapter at `position`."""
+    with db.read(repo.engine) as conn:
+        return str(
+            conn.execute(
+                select(chapters.c.id).where(
+                    chapters.c.novel_id == novel_id, chapters.c.position == position
+                )
+            ).scalar_one()
+        )
+
+
+def chapter_record(repo: Repo, chapter_id: str) -> Any:
+    with db.read(repo.engine) as conn:
+        return conn.execute(select(chapters).where(chapters.c.id == chapter_id)).one()
+
+
+def downloads_of(repo: Repo, chapter_id: str, state: TaskState | None = None) -> list[TaskRow]:
+    return [t for t in tasks_of(repo, chapter_id) if state is None or t.state is state]
+
+
+def ch_events(repo: Repo, chapter_id: str, after: int) -> list[dict[str, Any]]:
+    return [e.payload for e in repo.events.since(after) if e.entity_id == chapter_id]
+
+
+def stored(repo: Repo, chapter_id: str) -> str | None:
+    with db.read(repo.engine) as conn:
+        return conn.execute(
+            select(chapter_contents.c.markdown).where(chapter_contents.c.chapter_id == chapter_id)
+        ).scalar_one_or_none()
+
+
+@pytest.fixture
+def queued2(
+    repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, clock: FakeClock
+) -> list[str]:
+    """The novel imported with chapters 1-2, both queued by the user."""
+    imported(runner, adapter, clock, 2)
+    repo.chapters.patch(novel_id, ChapterState.PENDING, [1, 2])
+    return [chapter_at(repo, novel_id, 1), chapter_at(repo, novel_id, 2)]
+
+
+class TestChapterDownload__Begin:
+    def test_start__turns_a_pending_positioned_chapter_downloading_with_a_ch_event(
+        self, repo: Repo, novel_id: str, queued2: list[str]
+    ) -> None:
+        before = repo.events.latest_seq()
+
+        started = start_task(repo, queued2[0], "worker-a")
+
+        toc_url = repo.novels.get(novel_id).toc_url
+        assert started.work == ChapterClaim(queued2[0], novel_id, HOST, toc_url, 1, f"{URL}/1")
+        assert chapter_record(repo, queued2[0]).state == "downloading"
+        assert [p["state"] for p in ch_events(repo, queued2[0], before)] == ["downloading"]
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"state": "downloaded"},
+            {"position": None, "removed_at": datetime(2026, 1, 1, tzinfo=UTC)},
+        ],
+        ids=["not pending", "without a position"],
+    )
+    def test_begin__skips_with_not_pending_unless_pending_and_positioned(
+        self, repo: Repo, queued2: list[str], values: dict[str, Any]
+    ) -> None:
+        handler = ChapterDownloadHandler(repo.context)
+        [task] = downloads_of(repo, queued2[0])
+
+        with db.write(repo.engine) as conn:
+            conn.execute(update(chapters).where(chapters.c.id == queued2[0]).values(**values))
+            assert handler.begin(conn, task, repo.clock()) == Skip("not pending")
+
+
+class TestChapterDownload__WhenTheChapterWasDequeuedAfterTheClaim:
+    def test_start__returns_cancelled(self, repo: Repo, novel_id: str, queued2: list[str]) -> None:
+        claimed = claim_task(repo, queued2[0], "worker-a")
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+
+        assert repo.tasks.start(claimed, "worker-a") == NotStarted(StartResult.CANCELLED)
+
+
+class TestChapterDownload__WhenASyncRemovedTheChapterAfterTheClaim:
+    def test_start__returns_cancelled(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
+        claimed = claim_task(repo, queued2[0], "worker-a")
+        sync(repo, novel_id, runner, adapter, 2)  # chapter 1 removed and dequeued
+
+        assert repo.tasks.start(claimed, "worker-a") == NotStarted(StartResult.CANCELLED)
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.CANCELLED]
+
+
+class TestChapterDownload__WhenASyncRemovedTheChapterMidDownload:
+    @pytest.fixture
+    def downloaded(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> str:
+        adapter.hook = lambda url: sync(repo, novel_id, runner, adapter, 2)
+
+        assert runner.step() is True
+        return queued2[0]
+
+    def test_finish__downloads_the_removed_chapter(self, repo: Repo, downloaded: str) -> None:
+        row = chapter_record(repo, downloaded)
+        assert (row.state, row.position) == ("downloaded", None)
+
+    def test_finish__stores_its_content(self, repo: Repo, downloaded: str) -> None:
+        assert stored(repo, downloaded) == "Hi"
+
+    def test_finish__ends_the_task_done(self, repo: Repo, downloaded: str) -> None:
+        assert [t.state for t in downloads_of(repo, downloaded)] == [TaskState.DONE]
+
+
+class TestChapterDownload__OnDone:
+    def test_finish__stores_the_chapter_downloaded_with_title_and_images(
+        self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
+        adapter.titles[f"{URL}/1"] = "The Start"
+        adapter.bodies[f"{URL}/1"] = '<p>Hi</p><p><img src="https://example.com/a.png"></p>'
+
+        assert runner.step() is True
+
+        row = chapter_record(repo, queued2[0])
+        assert (row.state, row.title, row.has_images) == ("downloaded", "The Start", True)
+        assert "data:image/png;base64," in (stored(repo, queued2[0]) or "")
+
+    def test_finish__ends_the_task_done(
+        self, repo: Repo, runner: Runner, queued2: list[str]
+    ) -> None:
+        assert runner.step() is True
+
+        [task] = downloads_of(repo, queued2[0])
+        assert (task.state, task.attempts, task.error) == (TaskState.DONE, 1, None)
+
+
+class TestChapterDownload__OnFailed:
+    @pytest.fixture
+    def failed(self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str]) -> str:
+        adapter.errors[f"{URL}/1"] = SiteError("page gone")
+        assert runner.step() is True
+        return queued2[0]
+
+    def test_finish__sets_the_chapter_error_with_the_message(self, repo: Repo, failed: str) -> None:
+        assert chapter_record(repo, failed).state == "error"
+        assert repo.chapters.get(failed).error == "SiteError: page gone"
+
+    def test_finish__ends_the_task_failed_with_the_error(self, repo: Repo, failed: str) -> None:
+        [task] = downloads_of(repo, failed)
+        assert (task.state, task.error) == (TaskState.FAILED, "SiteError: page gone")
+
+
+class TestChapterDownload__OnRetry:
+    @pytest.fixture
+    def before(self, repo: Repo, queued2: list[str]) -> TaskRow:
+        [task] = downloads_of(repo, queued2[0])
+        return task
+
+    @pytest.fixture
+    def retried(
+        self, runner: Runner, adapter: TocAdapter, queued2: list[str], clock: FakeClock,
+        before: TaskRow,
+    ) -> str:  # fmt: skip
+        adapter.errors[f"{URL}/1"] = InfrastructureError("dns")
+        clock.advance(seconds=30)
+        with pytest.raises(RunnerBackoff):
+            runner.step()
+        return queued2[0]
+
+    def test_finish__puts_the_chapter_back_to_pending(self, repo: Repo, retried: str) -> None:
+        assert chapter_record(repo, retried).state == "pending"
+
+    def test_finish__requeues_the_same_task_keeping_run_after(
+        self, repo: Repo, retried: str, before: TaskRow
+    ) -> None:
+        [task] = downloads_of(repo, retried)
+        assert (task.id, task.state, task.run_after) == (
+            before.id,
+            TaskState.QUEUED,
+            before.run_after,
+        )
+        assert (task.attempts, task.error) == (1, "InfrastructureError: dns")
+
+    def test_get__queued_at_survives_the_retry(
+        self, repo: Repo, retried: str, before: TaskRow
+    ) -> None:
+        assert repo.chapters.get(retried).queued_at == before.created_at
+
+
+class TestChapterDownload__OnRetry__WhenTheChapterLostItsPositionMeanwhile:
+    @pytest.fixture
+    def retried(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> str:
+        adapter.hook = lambda url: sync(repo, novel_id, runner, adapter, 2)
+        adapter.errors[f"{URL}/1"] = InfrastructureError("dns")
+        with pytest.raises(RunnerBackoff):
+            runner.step()
+        return queued2[0]
+
+    def test_finish__sets_the_chapter_not_requested(self, repo: Repo, retried: str) -> None:
+        assert chapter_record(repo, retried).state == "not_requested"
+
+    def test_finish__cancels_the_task(self, repo: Repo, retried: str) -> None:
+        assert [t.state for t in downloads_of(repo, retried)] == [TaskState.CANCELLED]
+
+
+class TestChapterDownload__WhenTheSiteIsUnreachable:
+    def test_run__below_the_threshold_retries(
+        self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
+        adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
+
+        with pytest.raises(RunnerBackoff):
+            runner.step()
+
+        assert chapter_record(repo, queued2[0]).state == "pending"
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.QUEUED]
+
+    def test_run__at_the_threshold_fails_with_site_unreachable(
+        self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str],
+        reachability: Reachability,
+    ) -> None:  # fmt: skip
+        adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
+        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
+            reachability.failed(HOST)
+
+        assert runner.step() is True
+
+        assert repo.chapters.get(queued2[0]).error == "Site unreachable: refused"
+        [task] = downloads_of(repo, queued2[0])
+        assert (task.state, task.error) == (TaskState.FAILED, "Site unreachable: refused")
+
+
+class TestChapterDownload__WhenTheWorkerIsKilledMidDownload:
+    """RF-2: the worker dies mid-download and restarts under another `worker_id`."""
+
+    @pytest.fixture
+    def restarted(
+        self, repo: Repo, adapter: TocAdapter, fetcher: FakeFetcher, files: LocalStaticStorage,
+        settings: Settings, clock: FakeClock, queued2: list[str],
+    ) -> Runner:  # fmt: skip
+        start_task(repo, queued2[0], "worker-killed", settings.claim_ttl)
+        clock.advance(seconds=settings.claim_ttl + 1)
+        other = replace(settings, worker_id="worker-b")
+        return make_runner(repo, adapter, fetcher, files, other, Reachability())
+
+    def test_recover__puts_the_chapter_back_pending_with_queued_at_unchanged(
+        self, repo: Repo, restarted: Runner, queued2: list[str]
+    ) -> None:
+        [task] = downloads_of(repo, queued2[0])
+
+        restarted.recover()
+
+        view = repo.chapters.get(queued2[0])
+        assert (view.state, view.queued_at) == (ChapterState.PENDING, task.created_at)
+
+    def test_step__downloads_it_once_and_the_task_is_done_with_attempts_2(
+        self, repo: Repo, restarted: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
+        restarted.recover()
+
+        assert restarted.step() is True
+
+        assert adapter.fetched == [f"{URL}/1"]
+        assert chapter_record(repo, queued2[0]).state == "downloaded"
+        [task] = downloads_of(repo, queued2[0])
+        assert (task.state, task.attempts, task.claimed_by) == (TaskState.DONE, 2, None)
+
+    def test_recover__never_leaves_two_live_tasks(
+        self, repo: Repo, restarted: Runner, queued2: list[str]
+    ) -> None:
+        restarted.recover()
+        assert len(downloads_of(repo, queued2[0])) == 1
+        restarted.step()
+        assert len(downloads_of(repo, queued2[0])) == 1
+
+
+class TestChapterDownload__WhenTheNovelIsDeletedDuringTheDownload:
+    """RF-3: `DELETE /novels` while one of its downloads runs."""
+
+    @pytest.fixture
+    def logs(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter,
+        queued2: list[str],
+    ) -> list[Any]:  # fmt: skip
+        adapter.hook = lambda url: repo.novels.delete(novel_id)
+        with capture_logs() as logs:
+            assert runner.step() is True
+        return logs
+
+    def test_delete__succeeds(self, repo: Repo, novel_id: str, logs: list[Any]) -> None:
+        with pytest.raises(NotFound):
+            repo.novels.get(novel_id)
+        assert_no_events_after_delete(repo.engine, novel_id)
+
+    def test_finish__is_task_lost(self, logs: list[Any]) -> None:
+        assert [line["event"] for line in logs][-1] == "task_lost"
+
+    def test_finish__stores_no_content(self, repo: Repo, logs: list[Any]) -> None:
+        with db.read(repo.engine) as conn:
+            assert conn.execute(select(chapter_contents)).all() == []
+
+    def test_delete__leaves_no_task_rows(self, repo: Repo, logs: list[Any]) -> None:
+        with db.read(repo.engine) as conn:
+            assert conn.execute(select(tasks)).all() == []
+
+
+class TestChapterDownload__Queueing:
+    def test_patch__to_pending_enqueues_one_task_per_chapter_at_user_priority_by_position(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, clock: FakeClock
+    ) -> None:
+        imported(runner, adapter, clock, 3)
+
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [1, 3])
+
+        for position in (1, 3):
+            [task] = downloads_of(repo, chapter_at(repo, novel_id, position))
+            assert (task.kind, task.state, task.priority, task.ordinal) == (
+                DOWNLOAD, TaskState.QUEUED, 100, position,
+            )  # fmt: skip
+            assert (task.run_after, task.emit_event) == (clock(), False)
+        assert downloads_of(repo, chapter_at(repo, novel_id, 2)) == []
+
+    def test_patch__to_pending_appends_ch_events_showing_queued_at(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, clock: FakeClock
+    ) -> None:
+        imported(runner, adapter, clock, 2)
+        before = repo.events.latest_seq()
+
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [1])
+
+        [event] = ch_events(repo, chapter_at(repo, novel_id, 1), before)
+        assert (event["state"], event["queued_at"]) == ("pending", stamp(clock()))
+        assert [e.entity_id[:2] for e in repo.events.since(before)] == ["CH", "NV"]
+
+    def test_sync__auto_queued_releases_enqueue_at_release_priority(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, clock: FakeClock
+    ) -> None:
+        imported(runner, adapter, clock, 2)
+
+        sync(repo, novel_id, runner, adapter, 1, 2, 3)
+
+        [task] = downloads_of(repo, chapter_at(repo, novel_id, 3))
+        assert (task.state, task.priority, task.ordinal) == (TaskState.QUEUED, 110, 3)
+
+    def test_patch__to_not_requested_cancels_the_queued_task(
+        self, repo: Repo, novel_id: str, queued2: list[str]
+    ) -> None:
+        repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.CANCELLED]
+        assert [t.state for t in downloads_of(repo, queued2[1])] == [TaskState.QUEUED]
+
+    def test_patch__to_not_requested_leaves_a_running_download_to_finish(
+        self, repo: Repo, novel_id: str, queued2: list[str]
+    ) -> None:
+        start_task(repo, queued2[0], "worker-a")
+
+        result = repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
+
+        assert result.skipped == [(1, ChapterState.DOWNLOADING)]
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.RUNNING]
+
+    def test_sync__removing_a_pending_chapter_cancels_its_task(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
+        sync(repo, novel_id, runner, adapter, 2)
+
+        assert chapter_record(repo, queued2[0]).state == "not_requested"
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.CANCELLED]
+
+    def test_get__queued_at_is_the_live_tasks_created_at(
+        self, repo: Repo, novel_id: str, queued2: list[str], clock: FakeClock
+    ) -> None:
+        [task] = downloads_of(repo, queued2[0])
+        clock.advance(minutes=5)
+        start_task(repo, queued2[0], "worker-a")
+
+        assert repo.chapters.get(queued2[0]).queued_at == task.created_at
+        assert repo.chapters.get(queued2[1]).queued_at == task.created_at
+
+
+class TestChapterDownload__Recovery:
+    def test_recover__requeues_a_lapsed_download_with_run_after_kept_and_the_chapter_pending(
+        self, repo: Repo, queued2: list[str], settings: Settings, clock: FakeClock
+    ) -> None:
+        started = start_task(repo, queued2[0], "other", settings.claim_ttl)
+        clock.advance(seconds=settings.claim_ttl + 1)
+        before = repo.events.latest_seq()
+
+        assert repo.tasks.recover().requeued == 1
+
+        [task] = downloads_of(repo, queued2[0])
+        assert (task.id, task.state, task.run_after) == (
+            started.task.id, TaskState.QUEUED, started.task.run_after,
+        )  # fmt: skip
+        assert [p["state"] for p in ch_events(repo, queued2[0], before)] == ["pending"]
+
+    def test_recover__a_lapsed_download_without_a_position_cancels_it_and_dequeues_the_chapter(
+        self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter,
+        queued2: list[str], settings: Settings, clock: FakeClock,
+    ) -> None:  # fmt: skip
+        start_task(repo, queued2[0], "other", settings.claim_ttl)
+        sync(repo, novel_id, runner, adapter, 2)  # removed mid-download: stays downloading
+        clock.advance(seconds=settings.claim_ttl + 1)
+
+        repo.tasks.recover()
+
+        assert chapter_record(repo, queued2[0]).state == "not_requested"
+        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.CANCELLED]

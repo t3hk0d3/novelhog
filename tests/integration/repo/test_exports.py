@@ -18,6 +18,7 @@ from novelhog.repo.tasks import Finished, Skipped
 from tests.conftest import FakeClock
 from tests.integration.helpers import chapter_row, trash_keys
 from tests.integration.task_fakes import force_claim, live_task, start_build, tasks_of
+from tests.integration.worker.conftest import add_chapter
 
 URL = "https://example.com/novel"
 TTL = 300
@@ -40,24 +41,12 @@ def novel_id(repo: Repo) -> str:
 
 
 def add_chapters(repo: Repo, novel_id: str, states: list[str]) -> None:
-    """Insert chapters at positions 1..n with the given states."""
-    with db.write(repo.engine) as conn:
-        for position, state in enumerate(states, start=1):
-            active = state in ("pending", "downloading")
-            claim = {"claimed_by": "w", "claimed_until": repo.clock() + timedelta(days=1)}
-            conn.execute(
-                insert(chapters).values(
-                    **chapter_row(
-                        id=cid(position),
-                        novel_id=novel_id,
-                        url=f"{URL}/{position}",
-                        position=position,
-                        state=state,
-                        queued_at=repo.clock() if active else None,
-                    )
-                    | (claim if state == "downloading" else {})
-                )
-            )
+    """Insert chapters at positions 1..n with the given states and their download tasks."""
+    claim = {"claimed_by": "w", "claimed_until": repo.clock() + timedelta(days=1)}
+    for position, state in enumerate(states, start=1):
+        add_chapter(
+            repo, novel_id, position, state=state, **(claim if state == "downloading" else {})
+        )
 
 
 def set_state(repo: Repo, at: int, **values: Any) -> None:
@@ -151,11 +140,7 @@ class TestCreate__WithMissingChapters:
             "pending",
             "downloading",
         ]
-        with db.read(repo.engine) as conn:
-            queued = conn.execute(
-                select(chapters.c.queued_at).where(chapters.c.id == cid(2))
-            ).scalar_one()
-        assert queued == repo.clock()
+        assert repo.chapters.get(cid(2)).queued_at == repo.clock()
 
     def test_create__inserts_waiting_with_waited_set(self, repo: Repo, novel_id: str) -> None:
         add_chapters(repo, novel_id, ["downloaded", "not_requested"])
@@ -324,8 +309,8 @@ class TestReads:
     ) -> None:
         add_chapters(repo, novel_id, ["downloaded", "error", "not_requested", "pending"])
         view, _ = repo.exports.create(novel_id, 1, 4, EPUB)
-        set_state(repo, 2, state="error", queued_at=None)
-        set_state(repo, 3, state="not_requested", queued_at=None)
+        set_state(repo, 2, state="error")
+        set_state(repo, 3, state="not_requested")
         blocked = repo.exports.get(novel_id, view.id).blocked
         assert blocked.errors == (2,)
         assert blocked.not_queued == (3,)
@@ -348,7 +333,6 @@ class TestReads:
                     **chapter_row(
                         id=cid(9), novel_id=novel_id, url=f"{URL}/9", position=3, state="pending"
                     )
-                    | {"queued_at": repo.clock()}
                 )
             )
         grown = repo.exports.get(novel_id, view.id)
@@ -639,7 +623,7 @@ class TestStartBuild__WhenTheRangeChangedAfterTheClaim:
             repo, live_task(repo, view.id).id, ME, repo.clock() + timedelta(seconds=TTL)
         )
         if request.param == "redownload":
-            set_state(repo, 2, state="pending", queued_at=repo.clock())
+            set_state(repo, 2, state="pending")
         else:
             set_state(repo, 3, position=4)
             add_chapters_at(repo, novel_id, 3)
@@ -668,7 +652,6 @@ def add_chapters_at(repo: Repo, novel_id: str, position: int) -> None:
                     url=f"{URL}/new{position}",
                     position=position,
                     state="pending",
-                    queued_at=repo.clock(),
                 )
             )
         )

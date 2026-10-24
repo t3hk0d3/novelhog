@@ -1,4 +1,4 @@
-"""The worker main loop (spec section 6.1)."""
+"""The worker main loop (spec section 6.1, tasks spec section 6)."""
 
 import json
 import threading
@@ -22,6 +22,7 @@ from tests.conftest import FakeClock
 from tests.integration.worker.conftest import (
     HOST,
     IDLE,
+    URL,
     FakeAdapter,
     FakeFetcher,
     RecordingStop,
@@ -63,18 +64,58 @@ class TestStep__OrderOfWork:
             claimed_until=clock() - timedelta(seconds=1),
         )
 
-        assert worker.step() == "download"
+        assert worker.step() == "task"
         assert chapter_of(repo, chapter_id).state == "downloaded"
 
-    def test_step__prefers_a_due_refresh_over_a_download(
-        self, repo: Repo, novel_id: str, worker: Worker
+    def test_step__runs_a_due_refresh_before_queued_downloads_one_task_per_claim(
+        self, repo: Repo, novel_id: str, worker: Worker, adapter: FakeAdapter
     ) -> None:
-        chapter_id = add_chapter(repo, novel_id, 1)
+        first = add_chapter(repo, novel_id, 1)
+        second = add_chapter(repo, novel_id, 2)
+        adapter.toc_urls = [f"{URL}/1", f"{URL}/2"]
 
-        assert worker.step() == "task"  # the refresh runs as a task
-        assert chapter_of(repo, chapter_id).state == "pending"
-        assert worker.step() == "download"
-        assert chapter_of(repo, chapter_id).state == "downloaded"
+        assert worker.step() == "task"  # the refresh
+        assert (chapter_of(repo, first).state, adapter.fetched) == ("pending", [])
+        assert worker.step() == "task"  # one download
+        assert (chapter_of(repo, first).state, chapter_of(repo, second).state) == (
+            "downloaded", "pending",
+        )  # fmt: skip
+        assert worker.step() == "task"
+        assert chapter_of(repo, second).state == "downloaded"
+
+    def test_step__runs_recover_notifications_trash_runner_then_maintenance_in_spec_order(
+        self, worker: Worker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        runner = worker._runner  # noqa: SLF001
+        monkeypatch.setattr(runner, "recover", lambda: calls.append("recover"))
+        monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("notify"))
+        monkeypatch.setattr(worker, "_empty_trash", lambda: calls.append("trash"))
+
+        def nothing_claimable() -> bool:
+            calls.append("runner")
+            return False
+
+        monkeypatch.setattr(runner, "step", nothing_claimable)
+        monkeypatch.setattr(worker, "_maintain", lambda: calls.append("maintain"))
+
+        assert worker.step() == "idle"
+
+        assert calls == ["recover", "notify", "trash", "runner", "maintain"]
+
+    def test_step__skips_maintenance_while_the_notifier_is_behind(
+        self, worker: Worker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(worker, "_dispatch_notifications", lambda: True)
+        monkeypatch.setattr(worker, "_maintain", lambda: calls.append("maintain"))
+
+        assert worker.step() == "notify"
+
+        assert calls == []
+
+    def test_step__has_no_stage_besides_the_runner_for_downloads(self, worker: Worker) -> None:
+        assert not hasattr(worker, "_download_batch")
 
     def test_step__runs_notification_dispatch_before_the_work(
         self, novel_id: str, worker: Worker, monkeypatch: pytest.MonkeyPatch
@@ -146,6 +187,22 @@ class TestRun__WhenIdle:
         make_worker(repo, adapter, fetcher, settings, tmp_path, stop).run()
 
         assert chapter_of(repo, chapter_id).state == "downloaded"
+
+
+class TestRun__WithTheRemovedBatchSizeSet:
+    def test_run__starts_and_logs_config_ignored_once(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        log.setup("worker")
+        ignored = Settings(**{**settings.__dict__, "ignored": ("NOVELHOG_BATCH_SIZE",)})
+        stop = RecordingStop(stop_after_waits=3)
+
+        make_worker(repo, adapter, fetcher, ignored, tmp_path, stop).run()
+
+        lines = [line for line in _log_lines(capsys) if line["event"] == "config_ignored"]
+        assert [line["variable"] for line in lines] == ["NOVELHOG_BATCH_SIZE"]
+        assert stop.waits == [IDLE, IDLE, IDLE]
 
 
 class TestRun__WhenAStepRaises:

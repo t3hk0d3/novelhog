@@ -198,7 +198,7 @@ class TestRunnerStep__WhenStartReturnsCancelledDeferredOrLost:
     ) -> None:
         queue = handled.tasks._queue  # noqa: SLF001
 
-        def cancel_first(claimed: TaskRow) -> bool:
+        def cancel_first(claimed: TaskRow, host: str | None) -> bool:
             with db.write(handled.engine) as conn:
                 assert lock_novel(conn, claimed.novel_id)
                 queue.cancel(conn, KIND, claimed.entity_id)

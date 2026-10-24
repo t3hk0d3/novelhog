@@ -215,3 +215,46 @@ class TestPatchChapters__OnUnknownNovel:
     def test_patch_chapters__returns_404(self, client: TestClient) -> None:
         response = client.patch(_url(UNKNOWN), json={"state": "pending", "chapters": [1]})
         _assert_error(response, 404, "not_found")
+
+
+class TestPatchChapters__QueueingAndDequeueingManyChapters:
+    """RF-4: 2 000 chapters queued, then every other one dequeued (tasks spec section 4)."""
+
+    COUNT = 2000
+
+    @pytest.fixture
+    def novel_id(self, client: TestClient, repo: Repo) -> str:
+        novel_id = _seed(repo, self.COUNT)
+        queued = client.patch(
+            _url(novel_id), json={"state": "pending", "chapters": {"start": 1, "end": self.COUNT}}
+        )
+        assert len(queued.json()["updated"]) == self.COUNT
+        dequeued = client.patch(
+            _url(novel_id),
+            json={"state": "not_requested", "chapters": list(range(2, self.COUNT + 1, 2))},
+        )
+        assert len(dequeued.json()["updated"]) == self.COUNT // 2
+        return novel_id
+
+    def _downloads(self, client: TestClient, novel_id: str, state: str) -> dict[str, object]:
+        params = {"novel_id": novel_id, "kind": "chapter_download", "state": state, "limit": 500}
+        body: dict[str, object] = client.get("/api/v1/tasks", params=params).json()
+        return body
+
+    def test_patch_chapters__leaves_one_queued_task_per_queued_chapter(
+        self, client: TestClient, novel_id: str
+    ) -> None:
+        assert self._downloads(client, novel_id, "queued")["total"] == self.COUNT // 2
+
+    def test_patch_chapters__cancels_the_task_of_every_dequeued_chapter(
+        self, client: TestClient, novel_id: str
+    ) -> None:
+        assert self._downloads(client, novel_id, "cancelled")["total"] == self.COUNT // 2
+
+    def test_get_tasks__lists_the_queued_downloads_in_position_order(
+        self, client: TestClient, repo: Repo, novel_id: str
+    ) -> None:
+        items = self._downloads(client, novel_id, "queued")["items"]
+        assert isinstance(items, list)
+        positions = [repo.chapters.get(item["entity_id"]).position for item in items]
+        assert positions == list(range(1, 1000, 2))

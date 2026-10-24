@@ -5,13 +5,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
 from novelhog import config
 from novelhog.config import Settings
+from novelhog.domain.tasks import PRIORITY_USER, TaskKind
 from novelhog.images import FetchedImage
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import chapters
+from novelhog.repo.novels import lock_novel
+from novelhog.repo.schema import chapters, tasks
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
 from tests.integration.helpers import chapter_row
 
@@ -51,6 +53,7 @@ class FakeAdapter:
         self.hook: Any = None
         self.fetched: list[str] = []
         self.delays: dict[str, float] = {}
+        self.toc_urls = [f"{URL}/1"]
 
     def supported_hosts(self) -> list[str]:
         return [HOST]
@@ -61,7 +64,7 @@ class FakeAdapter:
     def sync_toc(self, novel_id: str, host: str, toc_url: str) -> TocResult:
         if self.toc_error is not None:
             raise self.toc_error
-        return TocResult("Lantern", "en", None, [f"{URL}/1"], "<html></html>")
+        return TocResult("Lantern", "en", None, list(self.toc_urls), "<html></html>")
 
     def fetch_chapter(self, novel_id: str, host: str, toc_url: str, url: str) -> FetchedChapter:
         self.fetched.append(url)
@@ -89,7 +92,6 @@ def settings(tmp_path: Path) -> Settings:
             "NOVELHOG_CLAIM_TTL": "300",
             "NOVELHOG_REQUEST_DELAY": str(DELAY),
             "NOVELHOG_IDLE_SLEEP": str(IDLE),
-            "NOVELHOG_BATCH_SIZE": "10",
         }
     )
 
@@ -111,11 +113,44 @@ def novel_id(repo: Repo) -> str:
 
 
 def add_chapter(repo: Repo, novel_id: str, at: int, **overrides: Any) -> str:
-    """Insert a `pending` chapter at position `at` (queued now) unless overridden."""
-    values: dict[str, Any] = {"state": "pending", "queued_at": repo.clock()} | overrides
+    """Insert a chapter at position `at`, `pending` unless overridden, as a worker would see it.
+
+    A positioned `pending` chapter gets its queued download task, due now at user priority. A
+    `downloading` one gets that task running under `claimed_by` until `claimed_until`.
+    """
+    claimed_by = overrides.pop("claimed_by", None)
+    claimed_until = overrides.pop("claimed_until", None)
+    values: dict[str, Any] = {"state": "pending"} | overrides
     row = chapter_row(id=f"CH{at:012d}", novel_id=novel_id, url=f"{URL}/{at}", position=at)
+    row |= values
+    now = repo.clock()
+    queue = repo.tasks._queue  # noqa: SLF001  (tests set up rows through the internal queue)
     with db.write(repo.engine) as conn:
-        conn.execute(insert(chapters).values(**(row | values)))
+        assert lock_novel(conn, novel_id)
+        conn.execute(insert(chapters).values(**row))
+        if row["state"] in ("pending", "downloading") and row["position"] is not None:
+            task = queue.enqueue(
+                conn,
+                TaskKind.CHAPTER_DOWNLOAD,
+                row["id"],
+                novel_id,
+                priority=PRIORITY_USER,
+                ordinal=row["position"],
+                run_after=now,
+            )
+            if row["state"] == "downloading":
+                conn.execute(
+                    update(tasks)
+                    .where(tasks.c.id == task.id)
+                    .values(
+                        state="running",
+                        attempts=1,
+                        started_at=now,
+                        claimed_by=claimed_by,
+                        claimed_until=claimed_until,
+                    )
+                )
+        queue.stamp(conn)
     return str(row["id"])
 
 
