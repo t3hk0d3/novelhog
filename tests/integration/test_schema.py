@@ -38,8 +38,6 @@ class TestClaimColumns:
     @pytest.mark.parametrize(
         ("table", "row", "claim"),
         [
-            (novels, novel_row(), {"claimed_by": "w1"}),
-            (novels, novel_row(), {"claimed_until": NOW}),
             (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_by": "w1"}),
             (chapters, chapter_row(state="pending", queued_at=NOW), {"claimed_until": NOW}),
             (exports, export_row(), {"claimed_by": "w1", "state": "building"}),

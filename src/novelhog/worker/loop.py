@@ -7,14 +7,13 @@ when it did work:
 2. `_dispatch_notifications` (always runs, never returns early; a failure is logged; keeps
    dispatching while full batches come back, for up to `DISPATCH_BUDGET_S`),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
-4. claim and run one task (`Runner.step`, tasks spec section 6),
-5. refresh a due novel,
-6. `_build_export` (claim and build a ready export),
-7. download a batch of pending chapters,
-8. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
+4. claim and run one task (`Runner.step`, tasks spec section 6; refreshes are tasks),
+5. `_build_export` (claim and build a ready export),
+6. download a batch of pending chapters,
+7. otherwise `_maintain` (at most hourly; a failure is logged) and report "idle", or "notify"
    when the notifier is still behind (so the loop does not sleep).
 
-Stages 5-7 are v1's and leave as their kinds move to tasks. A `RunnerBackoff` from stage 4 backs
+Stages 5-6 are v1's and leave as their kinds move to tasks. A `RunnerBackoff` from stage 4 backs
 the loop off like a failed step; the runner has logged the task event, so the loop logs nothing.
 """
 
@@ -41,11 +40,11 @@ from novelhog.worker.tasks.base import ProcessorRegistry, TaskContext, WorkerAda
 MAINTENANCE_INTERVAL = timedelta(hours=1)
 DISPATCH_BUDGET_S = 2.0
 
-StepResult = Literal["task", "refresh", "build", "download", "notify", "idle"]
+StepResult = Literal["task", "build", "download", "notify", "idle"]
 
 
 class Worker:
-    """Runs recover, task, refresh, build and download steps until asked to stop."""
+    """Runs recover, task, build and download steps until asked to stop."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -88,6 +87,7 @@ class Worker:
                 reachability=self._reachability,
                 rng=self._rng,
                 heartbeat=runtime.Heartbeat,
+                clock=repo.clock,
             ),
         )
 
@@ -133,8 +133,6 @@ class Worker:
         self._empty_trash()
         if self._runner.step():
             return "task"
-        if self._refresh_due():
-            return "refresh"
         if self._build_export():
             return "build"
         if self._download_batch():
@@ -206,23 +204,6 @@ class Worker:
             claim,
             settings=settings,
             tmp_dir=settings.data_dir / "tmp",
-        )
-        return True
-
-    def _refresh_due(self) -> bool:
-        settings = self._settings
-        claim = self._repo.novels.claim_due_refresh(settings.worker_id, settings.claim_ttl)
-        if claim is None:
-            return False
-        refresh.refresh(
-            self._repo,
-            self._adapter,
-            self._fetcher,
-            self._storage,
-            claim,
-            settings=settings,
-            rng=self._rng,
-            reachability=self._reachability,
         )
         return True
 

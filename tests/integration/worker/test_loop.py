@@ -53,7 +53,7 @@ class TestStep__OrderOfWork:
     def test_step__recovers_expired_claims_first(
         self, repo: Repo, novel_id: str, worker: Worker, clock: FakeClock
     ) -> None:
-        repo.novels.claim_due_refresh("other", 10)  # keeps the refresh out of the way
+        repo.tasks.claim("other", 10)  # keeps the refresh out of the way
         chapter_id = add_chapter(
             repo,
             novel_id,
@@ -71,7 +71,7 @@ class TestStep__OrderOfWork:
     ) -> None:
         chapter_id = add_chapter(repo, novel_id, 1)
 
-        assert worker.step() == "refresh"
+        assert worker.step() == "task"  # the refresh runs as a task
         assert chapter_of(repo, chapter_id).state == "pending"
         assert worker.step() == "download"
         assert chapter_of(repo, chapter_id).state == "downloaded"
@@ -81,7 +81,7 @@ class TestStep__OrderOfWork:
     ) -> None:
         monkeypatch.setattr(Worker, "_build_export", lambda self: True)
 
-        assert worker.step() == "refresh"
+        assert worker.step() == "task"
         assert worker.step() == "build"
 
     def test_step__runs_notification_dispatch_before_the_work(
@@ -196,7 +196,7 @@ class TestRun__AfterRequestStop:
         second = add_chapter(repo, novel_id, 2)
         worker = make_worker(repo, adapter, fetcher, settings, tmp_path)
         adapter.hook = lambda url: worker.request_stop()
-        repo.novels.claim_due_refresh("other", 10)  # keeps the refresh out of the way
+        repo.tasks.claim("other", 10)  # keeps the refresh out of the way
 
         worker.run()
 
@@ -276,10 +276,10 @@ class TestStep__Notifications:
         storage = LocalStaticStorage(tmp_path / "static", "/static")
         worker = Worker(repo, adapter, fetcher, storage, broken, settings, stop=RecordingStop())
 
-        assert worker.step() == "refresh"
+        assert worker.step() == "task"
         assert any(line["event"] == "notification_dispatch_failed" for line in _log_lines(capsys))
 
-    def test_step__dispatches_before_refreshing(
+    def test_step__dispatches_before_running_a_task(
         self,
         repo: Repo,
         adapter: FakeAdapter,
@@ -292,15 +292,15 @@ class TestStep__Notifications:
         worker = make_worker(repo, adapter, fetcher, settings, tmp_path, RecordingStop())
         monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("dispatch"))
 
-        def refresh_due() -> bool:
-            calls.append("refresh")
+        def run_task() -> bool:
+            calls.append("task")
             return True
 
-        monkeypatch.setattr(worker, "_refresh_due", refresh_due)
+        monkeypatch.setattr(worker._runner, "step", run_task)  # noqa: SLF001
 
         worker.step()
 
-        assert calls == ["dispatch", "refresh"]
+        assert calls == ["dispatch", "task"]
 
 
 FULL = dispatcher.DispatchReport(claimed=True, events=dispatcher.BATCH, advanced=True)

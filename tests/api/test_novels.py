@@ -1,14 +1,35 @@
 """Tests for the hosts and novels routes."""
 
 import secrets
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
+from novelhog.domain.tasks import Failed
 from novelhog.repo import Repo
+from novelhog.repo.task_kinds.novel_refresh import SyncFailed
+from novelhog.repo.tasks import Ready, TaskRow
 from tests.conftest import FakeClock
 
 TOC = "https://example.org/novel/1"
 UNKNOWN = "NV000000000000"
+WORKER = "worker-a"
+
+
+def _start_refresh(repo: Repo) -> TaskRow:
+    """Claim and start the first due refresh task, as the worker would."""
+    claimed = repo.tasks.claim(WORKER, 300)
+    assert claimed is not None
+    started = repo.tasks.start(claimed, WORKER)
+    assert isinstance(started, Ready)
+    return started.task
+
+
+def _schedule_next_refresh(repo: Repo, clock: FakeClock, hours: int = 6) -> None:
+    """Run the first refresh to a failure that schedules the next one `hours` from now."""
+    task = _start_refresh(repo)
+    failed = SyncFailed(None, 21600, clock() + timedelta(hours=hours))
+    assert repo.tasks.finish(task, WORKER, Failed("SiteError: down", failed)) is not None
 
 
 def _create(client: TestClient, url: str = TOC, **extra: object) -> dict[str, object]:
@@ -213,6 +234,7 @@ class TestSyncNovel:
     ) -> None:
         repo.hosts.publish(["example.org"])
         novel_id = _create(client)["id"]
+        _schedule_next_refresh(repo, clock)
         clock.advance(seconds=90)
         response = client.post(f"/api/v1/novels/{novel_id}/sync")
         assert response.status_code == 202
@@ -220,3 +242,26 @@ class TestSyncNovel:
 
     def test_sync_novel__unknown_id_returns_404(self, client: TestClient) -> None:
         assert client.post(f"/api/v1/novels/{UNKNOWN}/sync").status_code == 404
+
+
+class TestNovelDerivedFields:
+    def test_get_novels__return_next_refresh_at_and_syncing_of_the_nv_event_during_a_sync(
+        self, client: TestClient, repo: Repo, clock: FakeClock
+    ) -> None:
+        repo.hosts.publish(["example.org"])
+        novel_id = str(_create(client)["id"])
+        _schedule_next_refresh(repo, clock)
+        clock.advance(hours=7)
+        _start_refresh(repo)
+        client.post(f"/api/v1/novels/{novel_id}/sync")
+        event = [e for e in repo.events.since(0) if e.entity_id == novel_id][-1].payload
+
+        one = client.get(f"/api/v1/novels/{novel_id}").json()
+        [listed] = client.get("/api/v1/novels").json()
+
+        assert (event["next_refresh_at"], event["syncing"]) == ("2026-10-19T19:00:00.000Z", True)
+        for body in (one, listed):
+            assert (body["next_refresh_at"], body["syncing"]) == (
+                event["next_refresh_at"],
+                event["syncing"],
+            )

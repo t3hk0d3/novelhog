@@ -11,8 +11,8 @@
    is no longer needed is logged and left;
 4. the processor's `run` works under a heartbeat that renews the claim every `CLAIM_TTL / 3`; an
    exception is recorded as `Failed('<Type>: <summary>')`;
-5. `repo.tasks.finish` records the outcome; when the fence fails the result is discarded and
-   the files `run` stored are trashed.
+5. `repo.tasks.finish` records the outcome and the processor's `finished` logs the handler's
+   report; when the fence fails the result is discarded and the files `run` stored are trashed.
 
 A `Retry` outcome, or a start or finish transaction that itself fails, raises `RunnerBackoff`
 so the loop backs off; the task then keeps its claim until recovery puts it back.
@@ -28,6 +28,7 @@ from novelhog import log
 from novelhog.domain.tasks import Done, Failed, Outcome, Retry, StartResult, TaskKind
 from novelhog.repo import Repo
 from novelhog.repo.tasks import (
+    Finished,
     NotStarted,
     Ready,
     Skipped,
@@ -60,6 +61,25 @@ def _task_logger(worker_id: str, task: TaskRow) -> FilteringBoundLogger:
 
 def _outcome_name(outcome: Outcome[Any]) -> str:
     return "done" if isinstance(outcome, Done) else "failed"
+
+
+def _log_finished(
+    logger: FilteringBoundLogger,
+    outcome: Outcome[Any],
+    finished: Finished,
+    raised: Exception | None,
+) -> None:
+    """Log `task_retry`, or `task_finished` with the duration stored on the task."""
+    if isinstance(outcome, Retry):
+        logger.warning("task_retry", run_after=outcome.run_after, error=outcome.error)
+        return
+    logger.info(
+        "task_finished",
+        outcome=_outcome_name(outcome),
+        duration_ms=finished.task.duration_ms,
+        error=outcome.error if isinstance(outcome, Failed) else None,
+        exc_info=raised,
+    )
 
 
 class Runner:
@@ -153,15 +173,8 @@ class Runner:
         if finished is None:
             logger.warning("task_lost", exc_info=raised)
             self._repo.trash.discard(processor.stored_keys(outcome))
-        elif isinstance(outcome, Retry):
-            logger.warning("task_retry", run_after=outcome.run_after, error=outcome.error)
         else:
-            logger.info(
-                "task_finished",
-                outcome=_outcome_name(outcome),
-                duration_ms=finished.task.duration_ms,
-                error=outcome.error if isinstance(outcome, Failed) else None,
-                exc_info=raised,
-            )
+            _log_finished(logger, outcome, finished, raised)
+            processor.finished(task, outcome, finished.report)
         if isinstance(outcome, Retry):
             raise RunnerBackoff

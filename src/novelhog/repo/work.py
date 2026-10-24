@@ -17,7 +17,7 @@ from novelhog.domain.exports import ExportState
 from novelhog.repo import claims, contents, db, events
 from novelhog.repo import exports as export_repo
 from novelhog.repo.context import RepoContext
-from novelhog.repo.novels import lock_novel, snapshot
+from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import chapters, consumers, novels
 from novelhog.repo.schema import exports as exports_table
 
@@ -47,7 +47,6 @@ class RecoveryReport:
 
     chapters_requeued: int
     chapters_freed: int
-    novels_freed: int
     exports_reset: int = 0
     consumers_freed: int = 0
 
@@ -264,19 +263,19 @@ class Work:
         return [chapter_id for chapter_id in chapter_ids if chapter_id in owned_ids]
 
     def recover(self) -> RecoveryReport:
-        """Reset every lapsed claim of chapters, novels and exports (spec section 4, "Recovery").
+        """Reset every lapsed claim of chapters and exports (spec section 4, "Recovery").
+
+        Refreshes are tasks; `Tasks.recover` recovers them.
 
         Also frees consumers whose claim lapsed (no events).
         """
         now = self._clock()
         requeued, freed = self._recover_chapters(now)
-        novels_freed = self._recover_novels(now)
         exports_reset = self._recover_exports(now)
         consumers_freed = self._recover_consumers(now)
         return RecoveryReport(
             chapters_requeued=requeued,
             chapters_freed=freed,
-            novels_freed=novels_freed,
             exports_reset=exports_reset,
             consumers_freed=consumers_freed,
         )
@@ -349,39 +348,8 @@ class Work:
             freed += sum(1 for row in rows if row.state != _PENDING)
         return requeued, freed
 
-    def _recover_novels(self, now: datetime) -> int:
-        """Free novels whose sync claim lapsed and append an `NV` event for each."""
-        with db.read(self._engine) as conn:
-            lapsed_ids = [row.id for row in claims.expired(conn, novels, now)]
-        freed = 0
-        for novel_id in lapsed_ids:
-            with db.write(self._engine) as conn:
-                if not lock_novel(conn, novel_id):
-                    continue
-                released = conn.execute(
-                    update(novels)
-                    .where(
-                        novels.c.id == novel_id,
-                        novels.c.claimed_by.is_not(None),
-                        novels.c.claimed_until < now,
-                    )
-                    .values(claimed_by=None, claimed_until=None)
-                ).rowcount
-                if released:
-                    events.append(
-                        conn, novel_id, novel_id, self._novel_payload(conn, novel_id, now), now=now
-                    )
-                    freed += 1
-        return freed
-
     def _export_payload(self, conn: Connection, export_id: str) -> events.Payload:
         """A lazy `EX` payload: the export's snapshot, built after the event clock is taken."""
         return lambda: export_repo.snapshot(
             conn, export_id, static_base_url=self._static_base_url
-        ).to_json()
-
-    def _novel_payload(self, conn: Connection, novel_id: str, now: datetime) -> events.Payload:
-        """A lazy `NV` payload: the novel's snapshot, built after the event clock is taken."""
-        return lambda: snapshot(
-            conn, novel_id, now=now, static_base_url=self._static_base_url
         ).to_json()

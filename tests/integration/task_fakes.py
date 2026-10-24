@@ -1,7 +1,8 @@
 """A recording task handler and processor for a real kind, and helpers to queue tasks.
 
-No kind has a real handler or processor until Tasks 6-8 register them, so the tests of the
-generic task path inject these through `Repo(handlers=...)` and `Runner(processors=...)`.
+The tests of the generic task path inject these through `Repo(handlers=...)` and
+`Runner(processors=...)` in place of the kind's real handler and processor. A novel created through
+`repo.novels.create` already has a queued refresh task, which `enqueue_task` merges into.
 """
 
 from collections.abc import Callable
@@ -83,6 +84,7 @@ class RecordingProcessor:
         self.error: Exception | None = None
         self.during: Callable[[], object] | None = None
         self.keys: list[str] = []
+        self.reports: list[object] = []
 
     def run(self, task: TaskRow, work: object, ctx: TaskContext) -> Outcome[Any]:
         self.runs.append((task.id, work))
@@ -94,6 +96,9 @@ class RecordingProcessor:
 
     def stored_keys(self, outcome: Outcome[Any]) -> list[str]:
         return list(self.keys)
+
+    def finished(self, task: TaskRow, outcome: Outcome[Any], report: object) -> None:
+        self.reports.append(report)
 
 
 def enqueue_task(repo: Repo, novel_id: str, **options: Any) -> TaskRow:

@@ -496,48 +496,20 @@ class TestRecover:
         assert repo.work.recover().chapters_requeued == 2
         assert {row_of(repo, one).state, row_of(repo, two).state} == {"pending"}
 
-    def test_recover__expired_sync_claim_frees_the_novel_and_appends_nv_event(
-        self, repo: Repo, novel_id: str, clock: FakeClock
-    ) -> None:
-        with db.write(repo.engine) as conn:
-            conn.execute(
-                update(novels).values(
-                    claimed_by=ME, claimed_until=clock.current + timedelta(seconds=TTL)
-                )
-            )
-        assert repo.novels.get(novel_id).syncing is True
-        clock.advance(seconds=TTL + 1)
-        report = repo.work.recover()
-        assert report.novels_freed == 1
-        with db.read(repo.engine) as conn:
-            row = conn.execute(select(novels)).one()
-            newest = conn.execute(select(events).order_by(events.c.seq.desc())).first()
-        assert (row.claimed_by, row.claimed_until) == (None, None)
-        assert newest is not None
-        assert newest.entity_id == novel_id
-        assert newest.payload["syncing"] is False
-
     def test_recover__live_claims_are_left_alone(
         self, repo: Repo, novel_id: str, clock: FakeClock
     ) -> None:
         started(repo, novel_id, 1)
         add(repo, novel_id, 2)
         repo.work.claim_batch(ME, 1, TTL)
-        with db.write(repo.engine) as conn:
-            conn.execute(
-                update(novels).values(
-                    claimed_by=ME, claimed_until=clock.current + timedelta(seconds=TTL)
-                )
-            )
         before = event_count(repo)
         report = repo.work.recover()
         assert (
             report.chapters_requeued,
             report.chapters_freed,
-            report.novels_freed,
             report.exports_reset,
             report.consumers_freed,
-        ) == (0, 0, 0, 0, 0)
+        ) == (0, 0, 0, 0)
         assert event_count(repo) == before
         assert row_of(repo, cid(1)).state == "downloading"
         assert row_of(repo, cid(2)).claimed_by == ME

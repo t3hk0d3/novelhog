@@ -33,8 +33,13 @@ WORKER = "worker-a"
 
 
 def _novel(repo: Repo, n: int = 1) -> str:
+    """Create a novel without its first refresh task, so each test seeds exactly its tasks."""
     repo.hosts.publish(["example.org"])
-    return repo.novels.create(f"{BASE}/{n}", followed=False).id
+    novel_id = repo.novels.create(f"{BASE}/{n}", followed=False).id
+    with db.write(repo.engine) as conn:
+        assert lock_novel(conn, novel_id)
+        repo.tasks._queue.delete_for_novel(conn, novel_id)  # noqa: SLF001
+    return novel_id
 
 
 def _enqueue(

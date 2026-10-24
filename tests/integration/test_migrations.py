@@ -4,18 +4,21 @@ import re
 import shutil
 import textwrap
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Engine, event, insert, inspect, select, text
+from sqlalchemy import Engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from novelhog.repo import SchemaOutdated, db
-from novelhog.repo.schema import chapters, event_clock, events, metadata, novels
+from novelhog.repo import Repo, SchemaOutdated, db
+from novelhog.repo.schema import chapters, event_clock, events, metadata, novels, tasks
+from novelhog.repo.types import UTCDateTime
 from tests.integration.helpers import NOW, chapter_row, insert_host, novel_row
 
 
@@ -191,6 +194,175 @@ class TestMigration0002__Tasks:
                     seq=1, novel_id="NV000000000001", entity_id="TK000000000001", payload={}, at=NOW
                 )
             )
+
+
+_V1_NOVELS = sa.table(
+    "novels",
+    sa.column("id", sa.Text),
+    sa.column("host", sa.Text),
+    sa.column("toc_url", sa.Text),
+    sa.column("refresh_interval", sa.Integer),
+    sa.column("next_refresh_at", UTCDateTime),
+    sa.column("sync_requested", sa.Boolean),
+    sa.column("claimed_by", sa.Text),
+    sa.column("claimed_until", UTCDateTime),
+    sa.column("created_at", UTCDateTime),
+    sa.column("updated_at", UTCDateTime),
+)
+LATER = NOW + timedelta(hours=6)
+REQUESTED = NOW + timedelta(minutes=5)
+
+
+def _v1_novel(n: int, next_refresh_at: datetime | None, **values: Any) -> dict[str, Any]:
+    return {
+        "id": f"NV{n:012d}",
+        "host": "example.com",
+        "toc_url": f"https://example.com/novel/{n}",
+        "refresh_interval": 3600,
+        "next_refresh_at": next_refresh_at,
+        "sync_requested": False,
+        "created_at": NOW,
+        "updated_at": NOW,
+    } | values
+
+
+@pytest.fixture
+def v1_engine(empty_engine: Engine) -> Engine:
+    """A database at revision 0001 holding v1 novels: due later, requested, mid-sync."""
+    db.migrate(empty_engine)
+    _downgrade(empty_engine, "0001")
+    with db.write(empty_engine) as connection:
+        insert_host(connection)
+        connection.execute(
+            insert(_V1_NOVELS),
+            [
+                _v1_novel(1, LATER),
+                _v1_novel(2, REQUESTED, sync_requested=True),
+                _v1_novel(3, NOW, claimed_by="w", claimed_until=LATER),
+            ],
+        )
+    return empty_engine
+
+
+def _refresh_tasks(engine: Engine) -> dict[str, Any]:
+    with db.read(engine) as connection:
+        rows = connection.execute(select(tasks).where(tasks.c.kind == "novel_refresh")).all()
+    return {row.entity_id: row for row in rows}
+
+
+def _next_refresh_at(engine: Engine) -> dict[str, datetime]:
+    """Each novel's API `next_refresh_at`, read through the repo."""
+    repo = Repo(engine.url.render_as_string(hide_password=False))
+    try:
+        return {view.id: view.next_refresh_at for view in repo.novels.list()}
+    finally:
+        repo.engine.dispose()
+
+
+class TestMigration0002__Novels:
+    def test_upgrade__gives_each_novel_one_queued_refresh_at_its_next_refresh_at(
+        self, v1_engine: Engine
+    ) -> None:
+        db.migrate(v1_engine)
+
+        found = _refresh_tasks(v1_engine)
+        assert {novel: (t.state, t.run_after) for novel, t in found.items()} == {
+            "NV000000000001": ("queued", LATER),
+            "NV000000000002": ("queued", REQUESTED),
+            "NV000000000003": ("queued", NOW),
+        }
+        assert {(t.priority, t.emit_event, t.claimed_by, t.attempts) for t in found.values()} == {
+            (300, False, None, 0)
+        }
+
+    def test_upgrade__stamps_every_task_with_one_new_clock_value(self, v1_engine: Engine) -> None:
+        db.migrate(v1_engine)
+
+        with db.read(v1_engine) as connection:
+            clock = connection.execute(select(event_clock.c.seq)).scalar_one()
+        assert {t.change_seq for t in _refresh_tasks(v1_engine).values()} == {clock}
+        assert clock == 1
+
+    def test_upgrade__keeps_novel_next_refresh_at(self, v1_engine: Engine) -> None:
+        with db.read(v1_engine) as connection:
+            before = dict(
+                connection.execute(select(_V1_NOVELS.c.id, _V1_NOVELS.c.next_refresh_at)).all()
+            )
+
+        db.migrate(v1_engine)
+
+        assert _next_refresh_at(v1_engine) == before
+
+    def test_upgrade__drops_the_novel_queue_columns_and_index(self, v1_engine: Engine) -> None:
+        db.migrate(v1_engine)
+
+        columns = {c["name"] for c in inspect(v1_engine).get_columns("novels")}
+        indexes = {i["name"] for i in inspect(v1_engine).get_indexes("novels")}
+        assert columns.isdisjoint(
+            {"next_refresh_at", "sync_requested", "claimed_by", "claimed_until"}
+        )
+        assert "novels_due_refresh" not in indexes
+
+    def test_upgrade__on_an_empty_database_takes_no_clock_value(self, empty_engine: Engine) -> None:
+        db.migrate(empty_engine)
+
+        with db.read(empty_engine) as connection:
+            assert connection.execute(select(event_clock.c.seq)).scalar_one() == 0
+
+
+class TestMigration0002__NovelsDowngrade:
+    @pytest.fixture
+    def downgraded(self, v1_engine: Engine) -> tuple[Engine, datetime, datetime]:
+        """Upgraded, then: novel 1 queued later, novel 2 running, novel 3 without live tasks."""
+        db.migrate(v1_engine)
+        with db.write(v1_engine) as connection:
+            connection.execute(
+                update(tasks)
+                .where(tasks.c.entity_id == "NV000000000002")
+                .values(state="running", claimed_by="w", claimed_until=LATER, started_at=NOW)
+            )
+            connection.execute(delete(tasks).where(tasks.c.entity_id == "NV000000000003"))
+        start = datetime.now(UTC)
+        _downgrade(v1_engine, "0001")
+        return v1_engine, start, datetime.now(UTC)
+
+    def test_downgrade__restores_next_refresh_at_from_queued_else_running_else_now(
+        self, downgraded: tuple[Engine, datetime, datetime]
+    ) -> None:
+        engine, start, end = downgraded
+
+        with db.read(engine) as connection:
+            rows = dict(
+                connection.execute(select(_V1_NOVELS.c.id, _V1_NOVELS.c.next_refresh_at)).all()
+            )
+        assert (rows["NV000000000001"], rows["NV000000000002"]) == (LATER, REQUESTED)
+        assert start <= rows["NV000000000003"] <= end
+
+    def test_downgrade__restores_no_requests_and_no_claims(
+        self, downgraded: tuple[Engine, datetime, datetime]
+    ) -> None:
+        engine, _, _ = downgraded
+
+        with db.read(engine) as connection:
+            rows = connection.execute(
+                select(
+                    _V1_NOVELS.c.sync_requested,
+                    _V1_NOVELS.c.claimed_by,
+                    _V1_NOVELS.c.claimed_until,
+                )
+            ).all()
+        assert set(rows) == {(False, None, None)}
+
+    def test_downgrade__restores_the_v1_checks_and_index(
+        self, downgraded: tuple[Engine, datetime, datetime]
+    ) -> None:
+        engine, _, _ = downgraded
+
+        assert "novels_due_refresh" in {i["name"] for i in inspect(engine).get_indexes("novels")}
+        with pytest.raises(IntegrityError), db.write(engine) as connection:
+            connection.execute(insert(_V1_NOVELS).values(**_v1_novel(4, NOW, claimed_by="w")))
+        with pytest.raises(IntegrityError), db.write(engine) as connection:
+            connection.execute(insert(_V1_NOVELS).values(**_v1_novel(5, None)))
 
 
 class TestRequireCurrent:

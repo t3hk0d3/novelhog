@@ -32,8 +32,11 @@ class TaskHandler[W](Protocol):
 
     def complete(
         self, conn: Connection, task: TaskRow, outcome: Outcome[Any], now: datetime
-    ) -> None:
-        """Inside finish's or retry's transaction, only when the fenced write applied."""
+    ) -> object:
+        """Inside finish's or retry's transaction, only when the fenced write applied.
+
+        Returns a report of what it changed for the processor to log (`Finished.report`), or None.
+        """
         ...
 
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:

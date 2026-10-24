@@ -15,9 +15,9 @@ from sqlalchemy import Column, ColumnElement, Connection, Row, Table, and_, exis
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import UnaryExpression
 
-from novelhog.repo.schema import chapters, consumers, exports, novels
+from novelhog.repo.schema import chapters, consumers, exports, tasks
 
-CLAIMABLE: tuple[Table, ...] = (novels, chapters, exports, consumers)
+CLAIMABLE: tuple[Table, ...] = (chapters, exports, consumers, tasks)
 
 
 def _key(table: Table) -> Column[Any]:

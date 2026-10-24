@@ -23,7 +23,6 @@ def novel_row(**overrides: Any) -> dict[str, Any]:
         "host": "example.com",
         "toc_url": "https://example.com/novel",
         "refresh_interval": 3600,
-        "next_refresh_at": NOW,
         "created_at": NOW,
         "updated_at": NOW,
     }

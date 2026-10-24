@@ -246,17 +246,15 @@ class TestBuild__OnSuccess:
             claimed_by=OTHER,
             claimed_until=repo.clock() + timedelta(days=1),
         )
-        with db.write(repo.engine) as conn:
-            conn.execute(
-                update(novels).values(claimed_by=OTHER, claimed_until=repo.clock() + timedelta(1))
-            )
+        refresh = repo.tasks.claim(OTHER, 86400)  # the novel is syncing
+        assert refresh is not None
+        repo.tasks.start(refresh, OTHER)
         claim = claim_export(repo, novel_id, 1, 1)
 
         run_build(repo, storage, claim, settings, tmp_dir)
 
         assert export_of(repo, claim.export_id).state == ExportState.READY
-        with db.read(repo.engine) as conn:
-            assert conn.execute(select(novels.c.claimed_by)).scalar_one() == OTHER
+        assert repo.novels.get(novel_id).syncing is True
 
     def test_build__renews_the_export_claim_through_a_heartbeat(
         self,
@@ -445,7 +443,7 @@ class TestStep__WithAReadyExport:
         tmp_path: Path,
     ) -> None:
         worker = make_worker(repo, adapter, settings, tmp_path, RecordingStop())
-        repo.novels.claim_due_refresh("other", 10)  # keeps the refresh out of the way
+        repo.tasks.claim("other", 10)  # keeps the refresh out of the way
         add_downloaded(repo, novel_id, 1)
         add_chapter(repo, novel_id, 2)  # still pending
         view, _ = repo.exports.create(novel_id, 1, 1, Format.EPUB)
@@ -466,7 +464,7 @@ class TestEndToEnd__ExportWithMissingChapters:
         tmp_path: Path,
     ) -> None:
         worker = make_worker(repo, adapter, settings, tmp_path, RecordingStop())
-        repo.novels.claim_due_refresh("other", 10)
+        repo.tasks.claim("other", 10)
         for position in (1, 2, 3):
             add_chapter(repo, novel_id, position, state="not_requested", queued_at=None)
         view, _ = repo.exports.create(novel_id, 1, 3, Format.EPUB)

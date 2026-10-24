@@ -1,6 +1,11 @@
-"""Host publishing and the TOC refresh (spec sections 6.1 to 6.3)."""
+"""Host publishing and the TOC refresh (spec sections 6.1 to 6.3).
+
+The v1 refresh contract, run as a `novel_refresh` task through the runner (tasks spec 5, 6). An
+infrastructure error now surfaces as `RunnerBackoff` instead of the adapter's exception.
+"""
 
 import random
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -11,16 +16,22 @@ import structlog
 from sqlalchemy import select, update
 
 from novelhog import config
+from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
+from novelhog.domain.tasks import TaskKind, TaskState
 from novelhog.images import FetchedImage
 from novelhog.repo import Repo, db
-from novelhog.repo.novels import NovelClaim
-from novelhog.repo.schema import chapters, novels
-from novelhog.scraper_adapter.adapter import TocResult
+from novelhog.repo.schema import chapters, novels, tasks
+from novelhog.repo.tasks import TaskRow
+from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import LocalStaticStorage
+from novelhog.worker import runtime
 from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
-from novelhog.worker.refresh import publish_hosts, refresh
+from novelhog.worker.refresh import publish_hosts
+from novelhog.worker.runner import Runner, RunnerBackoff
+from novelhog.worker.tasks.base import TaskContext
+from novelhog.worker.tasks.novel_refresh import NovelRefreshProcessor
 from tests.conftest import FakeClock
 from tests.integration.helpers import trash_keys
 
@@ -59,6 +70,12 @@ class FakeAdapter:
         if self.error is not None:
             raise self.error
         return TocResult(self.title, "en", self.cover_url, list(self.urls), "<html></html>")
+
+    def fetch_chapter(self, novel_id: str, host: str, toc_url: str, url: str) -> FetchedChapter:
+        raise NotImplementedError
+
+    def request_delay(self, host: str) -> float:
+        return 0.0
 
 
 class FakeFetcher:
@@ -106,7 +123,7 @@ def novel_id(repo: Repo, adapter: FakeAdapter) -> str:
 
 
 class Harness:
-    """Claims the due novel and runs one refresh with the fakes."""
+    """Runs the due refresh task through the runner with the fakes."""
 
     def __init__(
         self,
@@ -119,32 +136,43 @@ class Harness:
         self.repo, self.adapter, self.fetcher = repo, adapter, fetcher
         self.files, self.settings = files, settings
         self.reachability = Reachability()
-
-    def claim(self) -> NovelClaim:
-        claim = self.repo.novels.claim_due_refresh(ME, self.settings.claim_ttl)
-        assert claim is not None
-        return claim
-
-    def run(self, claim: NovelClaim | None = None) -> None:
-        refresh(
-            self.repo,
-            self.adapter,
-            self.fetcher,
-            self.files,
-            claim or self.claim(),
-            settings=self.settings,
-            rng=random.Random(7),  # noqa: S311
-            reachability=self.reachability,
+        self.runner = Runner(
+            repo,
+            {TaskKind.NOVEL_REFRESH: NovelRefreshProcessor()},
+            TaskContext(
+                adapter=adapter,
+                fetcher=fetcher,
+                storage=files,
+                chapter_store=ChapterStore(repo),
+                settings=settings,
+                stop=threading.Event(),
+                reachability=self.reachability,
+                rng=random.Random(7),  # noqa: S311
+                heartbeat=runtime.Heartbeat,
+                clock=repo.clock,
+            ),
         )
+
+    def run(self) -> None:
+        """Claim and run the due refresh; `RunnerBackoff` after an infrastructure error."""
+        assert self.runner.step() is True
 
     def novel(self, novel_id: str) -> Any:
         with db.read(self.repo.engine) as conn:
             return conn.execute(select(novels).where(novels.c.id == novel_id)).one()
 
+    def next_refresh_at(self, novel_id: str) -> Any:
+        return self.repo.novels.get(novel_id).next_refresh_at
+
     def chapters(self, novel_id: str) -> list[Any]:
         with db.read(self.repo.engine) as conn:
             statement = select(chapters).where(chapters.c.novel_id == novel_id)
             return list(conn.execute(statement.order_by(chapters.c.url)).all())
+
+    def refresh_tasks(self, novel_id: str) -> list[TaskRow]:
+        with db.read(self.repo.engine) as conn:
+            statement = select(tasks).where(tasks.c.entity_id == novel_id).order_by(tasks.c.id)
+            return [TaskRow.from_row(row) for row in conn.execute(statement)]
 
     def last_nv(self, novel_id: str) -> dict[str, object]:
         rows = [e for e in self.repo.events.since(0, novel_id=novel_id) if e.entity_id == novel_id]
@@ -372,8 +400,8 @@ class TestRefresh__OnSiteError:
         assert row.import_error == "SiteError: HTTP 503 from the site"
         assert row.refresh_interval == MIN * 2
         assert row.last_refreshed_at is None
-        assert row.claimed_by is None
-        wait = (row.next_refresh_at - repo.clock()).total_seconds()
+        assert repo.novels.get(novel_id).syncing is False
+        wait = (run.next_refresh_at(novel_id) - repo.clock()).total_seconds()
         assert MIN * 2 * 0.9 <= wait <= MIN * 2 * 1.1
         assert run.last_nv(novel_id)["released"] == []
 
@@ -413,20 +441,20 @@ class TestRefresh__OnSiteError:
 
 
 class TestRefresh__OnInfrastructureError:
-    def test_refresh__keeps_the_interval_schedules_min_and_reraises(
+    def test_refresh__keeps_the_interval_schedules_min_and_backs_off(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
     ) -> None:
         do_initial(run, novel_id, clock)
         run.adapter.error = InfrastructureError("connection refused")
         before = run.novel(novel_id).refresh_interval
 
-        with pytest.raises(InfrastructureError):
+        with pytest.raises(RunnerBackoff):
             run.run()
 
         row = run.novel(novel_id)
         assert row.refresh_interval == before
-        assert row.next_refresh_at == clock() + timedelta(seconds=MIN)
-        assert row.claimed_by is None
+        assert run.next_refresh_at(novel_id) == clock() + timedelta(seconds=MIN)
+        assert repo.novels.get(novel_id).syncing is False
         assert row.import_error is None
 
     def test_refresh__does_not_set_import_error_on_the_initial_import(
@@ -434,7 +462,7 @@ class TestRefresh__OnInfrastructureError:
     ) -> None:
         run.adapter.error = InfrastructureError("connection refused")
 
-        with pytest.raises(InfrastructureError):
+        with pytest.raises(RunnerBackoff):
             run.run()
 
         assert run.novel(novel_id).import_error is None
@@ -444,7 +472,7 @@ class TestRefresh__OnInfrastructureError:
 class TestRefresh__OnSiteUnreachable:
     def fail_below_threshold(self, run: Harness, clock: FakeClock) -> None:
         for _ in range(SITE_UNREACHABLE_RETRIES - 1):
-            with pytest.raises(SiteUnreachable):
+            with pytest.raises(RunnerBackoff):
                 run.run()
             clock.advance(days=1)
 
@@ -459,7 +487,8 @@ class TestRefresh__OnSiteUnreachable:
 
         row = run.novel(novel_id)
         assert row.refresh_interval == before
-        assert row.next_refresh_at == clock() - timedelta(days=1) + timedelta(seconds=MIN)
+        expected = clock() - timedelta(days=1) + timedelta(seconds=MIN)
+        assert run.next_refresh_at(novel_id) == expected
         assert row.import_error is None
 
     def test_refresh__at_the_threshold_an_initial_import_sets_import_error(
@@ -498,7 +527,7 @@ class TestRefresh__OnSiteUnreachable:
         clock.advance(days=40)
         run.adapter.error = SiteUnreachable("refused")
 
-        with pytest.raises(SiteUnreachable):
+        with pytest.raises(RunnerBackoff):
             run.run()
 
     def test_refresh__a_site_error_means_the_host_answered_and_resets_the_count(
@@ -512,7 +541,7 @@ class TestRefresh__OnSiteUnreachable:
         clock.advance(days=40)
         run.adapter.error = SiteUnreachable("refused")
 
-        with pytest.raises(SiteUnreachable):
+        with pytest.raises(RunnerBackoff):
             run.run()
 
     def test_refresh__counts_hosts_independently(
@@ -522,7 +551,7 @@ class TestRefresh__OnSiteUnreachable:
             run.reachability.failed("other.com")
         run.adapter.error = SiteUnreachable("refused")
 
-        with pytest.raises(SiteUnreachable):
+        with pytest.raises(RunnerBackoff):
             run.run()
 
 
@@ -550,9 +579,9 @@ class TestRefresh__OnRequestedSync:
 
         run.run()
 
-        row = run.novel(novel_id)
-        assert row.next_refresh_at == repo.clock()
-        assert row.sync_requested is False
+        assert run.next_refresh_at(novel_id) == repo.clock()
+        queued = [t for t in run.refresh_tasks(novel_id) if t.state is TaskState.QUEUED]
+        assert [t.run_after for t in queued] == [repo.clock()]
 
 
 class TestRefresh__OnLostClaim:
@@ -564,7 +593,7 @@ class TestRefresh__OnLostClaim:
         with structlog.testing.capture_logs() as logs:
             run.run()
 
-        assert any(e["event"] == "refresh_claim_lost" for e in logs)
+        assert any(e["event"] == "task_lost" for e in logs)
         assert run.chapters(novel_id) == []
         assert run.novel(novel_id).last_refreshed_at is None
 
@@ -612,13 +641,13 @@ class TestRefresh__Heartbeat:
             }
         )
         renewals: list[bool] = []
-        original = repo.novels.renew_claim
+        original = repo.tasks.renew
 
-        def spy(nid: str, worker: str, ttl: int) -> bool:
-            renewals.append(original(nid, worker, ttl))
+        def spy(task: TaskRow, worker: str, ttl: int) -> bool:
+            renewals.append(original(task, worker, ttl))
             return renewals[-1]
 
-        monkeypatch.setattr(repo.novels, "renew_claim", spy)
+        monkeypatch.setattr(repo.tasks, "renew", spy)
         adapter.hook = lambda: time.sleep(1.0)
         harness = Harness(repo, adapter, fetcher, files, short)
 

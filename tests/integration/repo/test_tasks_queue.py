@@ -1490,11 +1490,17 @@ class TestTasksStart__WhenTheNovelIsGone:
 
 
 class TestTasksStart__WithoutARegisteredHandler:
-    def test_start__raises_and_leaves_the_task_alone(self, repo: Repo, queue: TaskQueue) -> None:
+    def test_start__raises_and_leaves_the_task_alone(
+        self, repo: Repo, queue: TaskQueue, migrated_database: str, clock: FakeClock
+    ) -> None:
         task = claimed_task(repo, queue)
+        unhandled = Repo(migrated_database, clock=clock, handlers={})
 
-        with pytest.raises(UnregisteredTaskKindError):
-            repo.tasks.start(task, ME)
+        try:
+            with pytest.raises(UnregisteredTaskKindError):
+                unhandled.tasks.start(task, ME)
+        finally:
+            unhandled.engine.dispose()
 
         assert get(repo, task.id) == task
 

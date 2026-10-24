@@ -112,6 +112,7 @@ def ctx(
         reachability=Reachability(),
         rng=random.Random(0),  # noqa: S311 - refresh jitter, not security
         heartbeat=heartbeat,
+        clock=handled.clock,
     )
 
 
@@ -141,7 +142,9 @@ def claim(repo: Repo) -> TaskRow:
 
 
 class TestRunnerStep__WhenNothingIsClaimable:
-    def test_step__returns_false(self, runner: Runner, novel_id: str) -> None:
+    def test_step__returns_false(self, handled: Repo, runner: Runner, novel_id: str) -> None:
+        assert handled.tasks.claim("other", TTL) is not None  # the novel's first refresh
+
         assert runner.step() is False
 
 
@@ -541,7 +544,7 @@ class TestWorkerStep__WithTasks:
 
         assert worker.step() == "task"
         assert task_row(handled, task.id).state is TaskState.DONE
-        assert worker.step() == "refresh"  # the v1 refresh of the novel was due all along
+        assert worker.step() == "idle"  # the task was the novel's refresh
 
     def test_step__recovers_lapsed_tasks(
         self, handled: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,

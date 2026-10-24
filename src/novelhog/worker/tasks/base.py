@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, ClassVar, Protocol
 
 from novelhog.chapter_store import ChapterStore
@@ -49,6 +50,7 @@ class TaskContext:
     reachability: Reachability
     rng: random.Random
     heartbeat: HeartbeatFactory
+    clock: Callable[[], datetime]
 
 
 class TaskProcessor[W, R](Protocol):
@@ -62,6 +64,10 @@ class TaskProcessor[W, R](Protocol):
 
     def stored_keys(self, outcome: Outcome[R]) -> list[str]:
         """Static-storage keys `run` stored for `outcome`; trashed when the finish fence fails."""
+        ...
+
+    def finished(self, task: TaskRow, outcome: Outcome[R], report: object) -> None:
+        """After a fenced finish: log what the handler's `complete` reported (`report`)."""
         ...
 
 

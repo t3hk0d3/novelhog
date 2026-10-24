@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import Connection, insert, select, update
 
 from novelhog.domain.errors import Conflict, NotFound, ServiceUnavailable, ValidationFailed
+from novelhog.domain.tasks import PRIORITY_REFRESH, TaskKind, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo.novels import lock_novel
@@ -19,7 +20,9 @@ from novelhog.repo.schema import (
     exports,
     novels,
     storage_trash,
+    tasks,
 )
+from novelhog.repo.tasks import Ready, TaskRow
 from tests.conftest import FakeClock
 from tests.integration.helpers import chapter_row, export_row
 
@@ -35,8 +38,34 @@ def published(repo: Repo) -> Repo:
 
 
 def _events(repo: Repo) -> list[Any]:
+    """The entity events (`NV`, `CH`, `EX`) in seq order; `TK` events are left out."""
     with db.read(repo.engine) as conn:
-        return list(conn.execute(select(events).order_by(events.c.seq)).all())
+        statement = select(events).where(events.c.entity_id.not_like("TK%"))
+        return list(conn.execute(statement.order_by(events.c.seq)).all())
+
+
+def _task_events(repo: Repo) -> list[Any]:
+    with db.read(repo.engine) as conn:
+        statement = select(events).where(events.c.entity_id.like("TK%"))
+        return list(conn.execute(statement.order_by(events.c.seq)).all())
+
+
+def _refresh_tasks(repo: Repo, novel_id: str) -> list[TaskRow]:
+    """The novel's refresh tasks in `id` order."""
+    with db.read(repo.engine) as conn:
+        statement = select(tasks).where(
+            tasks.c.kind == TaskKind.NOVEL_REFRESH.value, tasks.c.entity_id == novel_id
+        )
+        return [TaskRow.from_row(row) for row in conn.execute(statement.order_by(tasks.c.id))]
+
+
+def _start_refresh(repo: Repo, worker: str = "w", ttl: int = 300) -> TaskRow:
+    """Claim and start the due refresh task through the public task path."""
+    claimed = repo.tasks.claim(worker, ttl)
+    assert claimed is not None
+    started = repo.tasks.start(claimed, worker)
+    assert isinstance(started, Ready)
+    return started.task
 
 
 def _row(repo: Repo, novel_id: str) -> Any:
@@ -65,8 +94,31 @@ class TestCreate__OnSupportedHost:
         assert row.host == "example.com"
         assert row.followed is False
         assert row.refresh_interval == MIN_INTERVAL
-        assert row.next_refresh_at == clock.current
+        assert view.next_refresh_at == clock.current
         assert row.created_at == clock.current
+
+    def test_create__inserts_a_queued_refresh_task_due_now_that_emits_events(
+        self, published: Repo, clock: FakeClock
+    ) -> None:
+        view = published.novels.create(URL, followed=True)
+
+        [task] = _refresh_tasks(published, view.id)
+        assert (task.state, task.run_after, task.priority, task.emit_event, task.novel_id) == (
+            TaskState.QUEUED,
+            clock.current,
+            PRIORITY_REFRESH,
+            True,
+            view.id,
+        )
+
+    def test_create__appends_a_task_event_after_the_novel_event(self, published: Repo) -> None:
+        view = published.novels.create(URL, followed=True)
+
+        [task] = _refresh_tasks(published, view.id)
+        [nv] = _events(published)
+        [tk] = _task_events(published)
+        assert (tk.entity_id, tk.payload) == (task.id, task.to_view().to_json())
+        assert tk.seq > nv.seq
 
     def test_create__appends_one_novel_event_with_the_payload(self, published: Repo) -> None:
         view = published.novels.create(URL, followed=True)
@@ -178,13 +230,11 @@ class TestGetAndList:
             conn.execute(update(novels).values(seen_at=t0 - timedelta(hours=1)))
         assert published.novels.get(novel.id).new_pages == 1
 
-    def test_get__syncing_only_while_claimed_by_a_live_claim(
+    def test_get__syncing_only_while_the_running_refresh_holds_its_claim(
         self, published: Repo, clock: FakeClock
     ) -> None:
         novel = published.novels.create(URL, followed=True)
-        until = clock.current + timedelta(minutes=5)
-        with db.write(published.engine) as conn:
-            conn.execute(update(novels).values(claimed_by="w", claimed_until=until))
+        _start_refresh(published, ttl=300)
         assert published.novels.get(novel.id).syncing is True
         clock.advance(minutes=6)
         assert published.novels.get(novel.id).syncing is False
@@ -283,18 +333,48 @@ class TestUpdate:
 
 
 class TestRequestSync:
-    def test_request_sync__sets_next_refresh_and_flag_and_appends_an_event(
+    @pytest.fixture
+    def idle(self, published: Repo, clock: FakeClock) -> str:
+        """A novel whose next refresh is a day away."""
+        novel = published.novels.create(URL, followed=True)
+        with db.write(published.engine) as conn:
+            conn.execute(update(tasks).values(run_after=clock.current + timedelta(days=1)))
+        clock.advance(hours=2)
+        return novel.id
+
+    def test_request_sync__makes_the_queued_refresh_due_now_and_appends_an_event(
+        self, published: Repo, idle: str, clock: FakeClock
+    ) -> None:
+        view = published.novels.request_sync(idle)
+
+        [task] = _refresh_tasks(published, idle)
+        assert (task.state, task.run_after) == (TaskState.QUEUED, clock.current)
+        assert view.next_refresh_at == clock.current
+        assert _events(published)[-1].payload == view.to_json()
+        assert len(_events(published)) == 2
+
+    def test_request_sync__appends_a_task_event_for_the_merged_task(
+        self, published: Repo, idle: str
+    ) -> None:
+        published.novels.request_sync(idle)
+
+        [task] = _refresh_tasks(published, idle)
+        assert _task_events(published)[-1].payload == task.to_view().to_json()
+
+    def test_request_sync__during_a_sync_queues_one_successor_due_now(
         self, published: Repo, clock: FakeClock
     ) -> None:
         novel = published.novels.create(URL, followed=True)
-        clock.advance(hours=2)
-        with db.write(published.engine) as conn:
-            conn.execute(update(novels).values(next_refresh_at=clock.current + timedelta(days=1)))
+        running = _start_refresh(published)
+        clock.advance(minutes=1)
+
         view = published.novels.request_sync(novel.id)
-        row = _row(published, novel.id)
-        assert (row.next_refresh_at, row.sync_requested) == (clock.current, True)
-        assert view.next_refresh_at == clock.current
-        assert len(_events(published)) == 2
+
+        tasks_ = _refresh_tasks(published, novel.id)
+        assert sorted((t.state, t.run_after) for t in tasks_) == sorted(
+            [(TaskState.RUNNING, running.run_after), (TaskState.QUEUED, clock.current)]
+        )
+        assert (view.next_refresh_at, view.syncing) == (clock.current, True)
 
     @pytest.mark.parametrize("novel_id", ["NV000000000099", "garbage", "NV\x00"])
     def test_request_sync__unknown_or_malformed_id_raises_not_found(
@@ -344,12 +424,16 @@ class TestDelete:
             )
         return novel.id
 
-    def test_delete__removes_novel_chapters_contents_and_exports(
+    def test_delete__removes_novel_chapters_contents_exports_and_tasks(
         self, published: Repo, populated: str
     ) -> None:
+        _start_refresh(published)
+        published.novels.request_sync(populated)
+
         published.novels.delete(populated)
+
         with db.read(published.engine) as conn:
-            for table in (novels, chapters, chapter_contents, exports):
+            for table in (novels, chapters, chapter_contents, exports, tasks):
                 assert conn.execute(select(table)).all() == []
 
     def test_delete__trashes_cover_and_ready_export_keys(

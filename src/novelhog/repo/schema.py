@@ -60,17 +60,11 @@ novels = Table(
         CheckConstraint("refresh_interval > 0", name="ck_novels_refresh_interval"),
         nullable=False,
     ),
-    Column("next_refresh_at", UTCDateTime, nullable=False),
-    Column("sync_requested", Boolean, nullable=False, server_default=false()),
     Column("last_refreshed_at", UTCDateTime),
     Column("seen_at", UTCDateTime),
-    Column("claimed_by", Text),
-    Column("claimed_until", UTCDateTime),
     Column("created_at", UTCDateTime, nullable=False),
     Column("updated_at", UTCDateTime, nullable=False),
     _id_check("ck_novels_id", "NV"),
-    _claim_check("ck_novels_claim"),
-    Index("novels_due_refresh", "next_refresh_at"),
 )
 
 chapters = Table(

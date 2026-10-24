@@ -273,6 +273,10 @@ class TaskQueue:
             _touch(conn, current.id)
         return TaskRow.from_row(row)
 
+    def queued(self, conn: Connection, kind: TaskKind, entity_id: str) -> TaskRow | None:
+        """The queued task of `(kind, entity_id)`, if there is one."""
+        return _find(conn, kind, entity_id, TaskState.QUEUED)
+
     def cancel(self, conn: Connection, kind: TaskKind, entity_id: str) -> bool:
         """Turn the queued task of `(kind, entity_id)` into `cancelled`; a running one stays."""
         now = self._clock()
@@ -663,9 +667,13 @@ type StartOutcome[W] = Ready[W] | Skipped | NotStarted
 
 @dataclass(frozen=True)
 class Finished:
-    """A fenced finish: the task row as the finish transaction left it."""
+    """A fenced finish: the task row as its transaction left it, and the handler's report.
+
+    `report` is what the handler's `complete` returned (None for kinds that report nothing).
+    """
 
     task: TaskRow
+    report: object = None
 
 
 @dataclass(frozen=True)
@@ -693,7 +701,7 @@ class Tasks:
         self._engine = context.engine
         self._clock = context.clock
         self._queue = TaskQueue(context)
-        registry = default_handlers() if handlers is None else handlers
+        registry = default_handlers(context) if handlers is None else handlers
         for kind, handler in registry.items():
             if handler.kind is not kind:
                 message = f"handler for {handler.kind.value} registered as {kind.value}"
@@ -767,9 +775,9 @@ class Tasks:
                 fenced = self._queue.finish(conn, task, worker_id, TaskState.DONE)
             if not fenced:
                 return None
-            handler.complete(conn, task, outcome, now)
+            report = handler.complete(conn, task, outcome, now)
             self._queue.stamp(conn)
-            return Finished(_require(conn, task.id))
+            return Finished(_require(conn, task.id), report)
 
     def recover(self) -> TaskRecoveryReport:
         """Recover every task whose claim lapsed, each in its own transaction (tasks spec 8).
