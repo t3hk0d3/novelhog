@@ -42,7 +42,7 @@ from novelhog.worker import runtime
 from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks import default_processors
-from novelhog.worker.tasks.base import TaskContext
+from novelhog.worker.tasks.base import HeartbeatFactory, TaskContext
 from novelhog.worker.tasks.export_build import ExportBuildProcessor
 from novelhog.worker.tasks.novel_refresh import NovelRefreshProcessor
 from tests.conftest import FakeClock
@@ -95,6 +95,7 @@ def make_runner(  # noqa: PLR0913
     files: LocalStaticStorage,
     settings: Settings,
     reachability: Reachability,
+    heartbeat: HeartbeatFactory = runtime.Heartbeat,
 ) -> Runner:
     """The runner with the default processors, as the worker builds it; waits never sleep."""
     return Runner(
@@ -109,7 +110,7 @@ def make_runner(  # noqa: PLR0913
             stop=RecordingStop(),
             reachability=reachability,
             rng=random.Random(3),  # noqa: S311 - refresh jitter, not security
-            heartbeat=runtime.Heartbeat,
+            heartbeat=heartbeat,
             clock=repo.clock,
         ),
     )
@@ -316,6 +317,63 @@ class TestNovelRefresh__WhenTheFenceFailsAfterACoverWasStored:
         assert key.startswith(f"covers/{novel_id}/")
         assert novel_row(repo, novel_id).cover_key is None
         assert "task_lost" in [line["event"] for line in logs]
+
+
+class _LostBeat:
+    """A heartbeat whose renewal already found the claim gone."""
+
+    lost = True
+
+    def __enter__(self) -> _LostBeat:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+class _CountingFetcher(FakeFetcher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetches = 0
+
+    def fetch(self, url: str) -> Any:
+        self.fetches += 1
+        return super().fetch(url)
+
+
+class TestNovelRefresh__WhenTheHeartbeatLostTheClaimBeforeTheCover:
+    @pytest.fixture
+    def fetcher(self) -> _CountingFetcher:
+        return _CountingFetcher()
+
+    @pytest.fixture
+    def lost_runner(  # noqa: PLR0913
+        self,
+        repo: Repo,
+        adapter: TocAdapter,
+        fetcher: _CountingFetcher,
+        files: LocalStaticStorage,
+        settings: Settings,
+        reachability: Reachability,
+    ) -> Runner:
+        return make_runner(
+            repo, adapter, fetcher, files, settings, reachability, lambda renew, s: _LostBeat()
+        )
+
+    def test_run__does_not_fetch_the_cover(
+        self, novel_id: str, lost_runner: Runner, fetcher: _CountingFetcher
+    ) -> None:
+        assert lost_runner.step()
+
+        assert fetcher.fetches == 0
+
+    def test_run__stores_no_cover(
+        self, repo: Repo, novel_id: str, lost_runner: Runner, tmp_path: Path
+    ) -> None:
+        assert lost_runner.step()
+
+        assert not (tmp_path / "static" / "covers").exists()
+        assert trash_keys(repo.engine) == []
 
 
 class TestNovelRefresh__WhenTheNovelWasDeletedDuringTheRun:

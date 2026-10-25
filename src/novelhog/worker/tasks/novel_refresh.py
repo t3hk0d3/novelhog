@@ -1,10 +1,11 @@
 """The worker half of `novel_refresh`: the network part of v1's refresh (v1 spec 6.2, tasks 5).
 
-`run` fetches the TOC and stores a missing cover, then hands the result to the repo handler as an
-outcome: `Done(SyncSucceeded)`; `Failed(error, SyncFailed)` for a site error, with the backed-off
-schedule; or `Retry` at `now + REFRESH_MIN_INTERVAL` for an infrastructure error, which keeps the
-interval. A `SiteUnreachable` that `Reachability` says has failed too often for the host counts as
-a site error.
+`run` fetches the TOC and stores a missing cover (not once the heartbeat lost the claim), then
+hands the result to the repo handler as an outcome: `Done(SyncSucceeded)`; `Failed(error,
+SyncFailed)` for a site error, with the backed-off schedule; or `Retry` at
+`now + REFRESH_MIN_INTERVAL` for an infrastructure error, which keeps the interval. A
+`SiteUnreachable` that `Reachability` says has failed too often for the host counts as a site
+error.
 """
 
 from datetime import timedelta
@@ -82,7 +83,7 @@ class NovelRefreshProcessor:
             toc = _fetch_toc(ctx.adapter, claim)
             ctx.reachability.succeeded(claim.host)
             cover = None
-            if claim.cover_key is None:
+            if claim.cover_key is None and (ctx.beat is None or not ctx.beat.lost):
                 cover = _store_cover(ctx.fetcher, ctx.storage, claim, toc.cover_url)
         except Exception as error:  # noqa: BLE001 - any other failure counts as a site error
             message = summarize(error)
