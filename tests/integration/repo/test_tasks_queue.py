@@ -1168,6 +1168,58 @@ class TestChangeCursor:
         assert clock_value(repo) == before.change_seq
 
 
+class TestWrite__WhenATaskWriteWasNotStamped:
+    """`db.write` refuses to commit a task write that `stamp` did not follow (change cursor)."""
+
+    @pytest.mark.parametrize("operation", ["enqueue", "start", "finish", "retry", "cancel"])
+    def test_write__raises_unstamped_task_write(
+        self, repo: Repo, queue: TaskQueue, operation: str
+    ) -> None:
+        task = running(repo, queue) if operation in ("finish", "retry") else enqueue(repo, queue)
+        if operation == "start":
+            claimed = queue.claim(ME, TTL)
+            assert claimed is not None
+            task = claimed
+        writes: dict[str, Callable[[Connection], object]] = {
+            "enqueue": lambda conn: queue.enqueue(
+                conn, DOWNLOAD, CHAPTER, NOVEL, priority=100, run_after=NOW
+            ),
+            "start": lambda conn: queue.start(conn, task, ME),
+            "finish": lambda conn: queue.finish(conn, task, ME, TaskState.DONE),
+            "retry": lambda conn: queue.retry(conn, task, ME, run_after=NOW, error="E: e"),
+            "cancel": lambda conn: queue.cancel(conn, REFRESH, NOVEL),
+        }
+        before = all_tasks(repo)
+
+        with pytest.raises(db.UnstampedTaskWriteError), db.write(repo.engine) as conn:
+            assert lock_novel(conn, NOVEL)
+            writes[operation](conn)
+
+        assert all_tasks(repo) == before
+
+    def test_write__raises_when_a_task_write_follows_stamp(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        with pytest.raises(db.UnstampedTaskWriteError), db.write(repo.engine) as conn:
+            assert lock_novel(conn, NOVEL)
+            queue.enqueue(conn, REFRESH, NOVEL, NOVEL, priority=300, run_after=NOW)
+            queue.stamp(conn)
+            queue.enqueue(conn, DOWNLOAD, CHAPTER, NOVEL, priority=100, run_after=NOW)
+
+        assert all_tasks(repo) == []
+
+    def test_write__commits_a_transaction_that_touched_no_task_without_stamp(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        task = enqueue(repo, queue)
+
+        with db.write(repo.engine) as conn:
+            assert lock_novel(conn, NOVEL)
+            assert queue.queued(conn, REFRESH, NOVEL) is not None
+
+        assert all_tasks(repo) == [get(repo, task.id)]
+
+
 class TestUpdatedAt:
     @pytest.mark.parametrize("operation", OPERATIONS)
     def test_updated_at__is_set_by_the_same_writes_from_the_writers_clock(

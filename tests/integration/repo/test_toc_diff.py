@@ -417,6 +417,7 @@ class TestApplyToc__RacingADelete:
                         static_base_url="/static",
                         released=diff.new,
                     )
+                    repo.tasks._queue.stamp(conn)  # noqa: SLF001  (the caller's last step)
                 outcomes.append("sync:ok")
             except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
                 outcomes.append(f"sync:{error!r}")

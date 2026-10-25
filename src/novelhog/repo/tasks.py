@@ -14,6 +14,8 @@ the transaction (see `db.transaction_info`); `stamp` then appends a `TK` event f
 with `emit_event` and sets `change_seq` on the touched rows: to the row's own `TK` seq, else to the
 transaction's last event seq, or to a clock value of its own if it appended no events.
 Inserted rows carry `change_seq = 0` until then, which no other transaction can see.
+`db.write` rolls back a transaction that touched a row after its last `stamp`
+(`db.UnstampedTaskWriteError`), so a writer that forgets `stamp` cannot commit a stale cursor.
 
 `Tasks` is the public side (`repo.tasks`). Its `start`, `finish` and `recover` each compose one
 transaction per task in that order: `lock_novel`, the queue primitive, the kind's `TaskHandler`
@@ -68,7 +70,6 @@ PRUNE_BATCH = 500
 _IN_BATCH = 500
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
-_TOUCHED = "tasks_touched"
 _OUTCOMES = frozenset({TaskState.DONE, TaskState.FAILED, TaskState.SKIPPED})
 
 
@@ -141,7 +142,7 @@ class TaskRow:
 
 def _touch(conn: Connection, task_id: str) -> None:
     """Record that this transaction changed a field of the task's Task object."""
-    touched: dict[str, None] = db.transaction_info(conn).setdefault(_TOUCHED, {})
+    touched: dict[str, None] = db.transaction_info(conn).setdefault(db.TASKS_TOUCHED, {})
     touched[task_id] = None
 
 
@@ -754,7 +755,7 @@ class TaskQueue:
         no events. The touched rows are already locked by this transaction, so no new row lock is
         taken.
         """
-        touched: dict[str, None] = db.transaction_info(conn).pop(_TOUCHED, {})
+        touched: dict[str, None] = db.transaction_info(conn).pop(db.TASKS_TOUCHED, {})
         if not touched:
             return
         now = self._clock()
