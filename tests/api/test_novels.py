@@ -5,6 +5,8 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
+from novelhog.domain.hosts import FailureKind
+from novelhog.domain.payloads import format_time
 from novelhog.domain.tasks import Failed
 from novelhog.repo import Repo
 from novelhog.repo.task_kinds.novel_refresh import SyncFailed
@@ -45,7 +47,23 @@ class TestGetHosts:
         repo.hosts.publish(["a.example"])
         response = client.get("/api/v1/hosts")
         assert response.status_code == 200
-        assert response.json() == [{"host": "a.example"}]
+        assert response.json() == [
+            {"host": "a.example", "reach_after": None, "failing_since": None}
+        ]
+
+    def test_list_hosts__shows_when_a_paused_host_may_be_contacted_again(
+        self, client: TestClient, repo: Repo, clock: FakeClock
+    ) -> None:
+        repo.hosts.publish(["a.example"])
+        repo.hosts.failed("a.example", FailureKind.THROTTLED, retry_after=120)
+
+        [host] = client.get("/api/v1/hosts").json()
+
+        assert host == {
+            "host": "a.example",
+            "reach_after": format_time(clock() + timedelta(seconds=120)),
+            "failing_since": format_time(clock()),
+        }
 
 
 class TestListNovels:
