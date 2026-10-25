@@ -4,6 +4,11 @@ The handler reads the work item (`NovelClaim`) when the refresh starts, turns `s
 `NV` event, and on finish applies the sync result: the TOC diff, the novel fields and the
 interval of v1 section 6.2. Before any event it enqueues the successor refresh, so the `NV`
 snapshot shows the successor's `next_refresh_at` (tasks spec section 4, "Lock order").
+
+Repair (tasks spec section 8): `problems` finds novels without a live refresh task
+(`novel_without_refresh`); `fix` enqueues one at `last_refreshed_at + refresh_interval`, or now
+with `emit_event` (as `POST /novels` would) for a novel never refreshed, and appends the `NV` event.
+A syncing novel has a running refresh task, so it is never a problem.
 """
 
 import random
@@ -11,10 +16,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
-from sqlalchemy import Connection, func, select, update
+from sqlalchemy import ColumnElement, Connection, func, select, update
 
 from novelhog.domain.refresh import jittered, next_interval
 from novelhog.domain.tasks import (
+    LIVE_STATES,
     PRIORITY_REFRESH,
     Begin,
     Done,
@@ -27,11 +33,19 @@ from novelhog.domain.tasks import (
 )
 from novelhog.repo import chapters as chapter_repo
 from novelhog.repo import events, exports, hosts, novels
+from novelhog.repo import tasks as task_queue
 from novelhog.repo.chapters import TocDiff
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import chapters
 from novelhog.repo.schema import novels as novels_table
-from novelhog.repo.tasks import TaskQueue, TaskRow
+from novelhog.repo.tasks import Problem, Repair, TaskQueue, TaskRow
+
+WITHOUT_REFRESH = "novel_without_refresh"
+
+
+def _without_refresh() -> ColumnElement[bool]:
+    """A novel with no live refresh task (tasks spec section 2, "every novel")."""
+    return ~task_queue.has_task(TaskKind.NOVEL_REFRESH, novels_table.c.id, LIVE_STATES)
 
 
 @dataclass(frozen=True)
@@ -154,6 +168,36 @@ class NovelRefreshHandler:
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:
         """The lapsed refresh went back to the queue: the `NV` event shows `syncing` off."""
         self._emit(conn, task.entity_id, now)
+
+    def problems(self, conn: Connection) -> list[Problem]:
+        """The novels without a live refresh task."""
+        rows = conn.execute(
+            select(novels_table.c.id).where(_without_refresh()).order_by(novels_table.c.id)
+        )
+        return [Problem(WITHOUT_REFRESH, row.id, row.id) for row in rows]
+
+    def fix(self, conn: Connection, problem: Problem, now: datetime) -> Repair | None:
+        """Enqueue the missing refresh, then append the `NV` event; None if one exists now."""
+        novel_id = problem.entity_id
+        row = conn.execute(
+            select(novels_table.c.last_refreshed_at, novels_table.c.refresh_interval).where(
+                novels_table.c.id == novel_id, _without_refresh()
+            )
+        ).first()
+        if row is None:
+            return None
+        last = row.last_refreshed_at
+        task = self._queue.enqueue(
+            conn,
+            self.kind,
+            novel_id,
+            novel_id,
+            priority=PRIORITY_REFRESH,
+            run_after=now if last is None else last + timedelta(seconds=row.refresh_interval),
+            emit_event=last is None,
+        )
+        self._emit(conn, novel_id, now)
+        return Repair(problem.name, task.id, novel_id)
 
     def _result(
         self, conn: Connection, row: Any, outcome: Done[Any] | Failed[Any], now: datetime

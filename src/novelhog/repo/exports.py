@@ -1,7 +1,7 @@
 """Exports: snapshots, the repository and the build enqueueing (spec 4, 5.5, 6.5; tasks spec 5.1).
 
-`snapshot`, `affected_waiting`, `fail_cancelled`, `enqueue_buildable`, `begin_build` and
-`read_claim` are internal helpers that take the caller's `Connection`. Builds run as
+`snapshot`, `affected_waiting`, `fail_cancelled`, `buildable`, `enqueue_buildable`, `begin_build`
+and `read_claim` are internal helpers that take the caller's `Connection`. Builds run as
 `export_build` tasks (`repo/task_kinds/export_build.py`). Every per-novel write transaction
 follows the lock order of tasks spec section 4: `lock_novel` first, then the rows (task enqueues
 and cancels included), then the events, then `TaskQueue.stamp` last.
@@ -245,7 +245,7 @@ def _range_ready() -> Any:
     return or_(exports.c.skip_missing, first.is_(None), last.is_(None), ~incomplete)
 
 
-def _buildable() -> Any:
+def buildable() -> Any:
     """A waiting export whose range may be built: the one definition of "buildable" (v1 6.5)."""
     return and_(exports.c.state == _WAITING, _range_ready())
 
@@ -266,7 +266,7 @@ def enqueue_buildable(
         return []
     rows = conn.execute(
         select(exports.c.id, exports.c.created_at)
-        .where(exports.c.id.in_(wanted), exports.c.novel_id == novel_id, _buildable())
+        .where(exports.c.id.in_(wanted), exports.c.novel_id == novel_id, buildable())
         .order_by(exports.c.created_at, exports.c.id)
     ).all()
     for row in rows:
@@ -289,7 +289,7 @@ def begin_build(conn: Connection, export_id: str) -> bool:
     Writes the row only; the build handler appends the `EX` event.
     """
     started = conn.execute(
-        update(exports).where(exports.c.id == export_id, _buildable()).values(state=_BUILDING)
+        update(exports).where(exports.c.id == export_id, buildable()).values(state=_BUILDING)
     ).rowcount
     return started == 1
 

@@ -6,6 +6,8 @@ first, then every entity and task row write, then the events, then `TaskQueue.st
 module functions `enqueue` and `cancel` are the same writes with the writer's `now` given, for
 entity helpers that take a `Connection` and a time but hold no `TaskQueue` (`exports`).
 `claim`, `release`, `renew`, `lapsed` and `prune` are their own transactions and are exempt.
+`queued`, `has_task` and `queued_unneeded` are the reads and conditions the handlers' repair checks
+share.
 
 Change cursor: every write that changes a field of the Task object records the row as touched in
 the transaction (see `db.transaction_info`); `stamp` then appends a `TK` event for each touched row
@@ -15,11 +17,13 @@ Inserted rows carry `change_seq = 0` until then, which no other transaction can 
 
 `Tasks` is the public side (`repo.tasks`). Its `start`, `finish` and `recover` each compose one
 transaction per task in that order: `lock_novel`, the queue primitive, the kind's `TaskHandler`
-hook (tasks spec section 5), then `stamp`. A task whose kind has no registered handler is a
+hook (tasks spec section 5), then `stamp`. `repair` scans with each handler's `problems` in a plain
+read, then runs each fix in its own transaction: `lock_novel`, the handler's `fix` (which re-checks
+the problem), then `stamp`. A task whose kind has no registered handler is a
 programming error: those methods raise `UnregisteredTaskKindError` and write nothing.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -29,6 +33,7 @@ from sqlalchemy import (
     ColumnElement,
     Connection,
     Row,
+    Table,
     and_,
     delete,
     exists,
@@ -379,6 +384,60 @@ def cancel_many(
             _touch(conn, task_id)
 
 
+def queued(conn: Connection, kind: TaskKind, entity_id: str) -> TaskRow | None:
+    """The queued task of `(kind, entity_id)`, if there is one."""
+    return _find(conn, kind, entity_id, TaskState.QUEUED)
+
+
+def has_task(
+    kind: TaskKind, entity_id: ColumnElement[Any], states: Iterable[TaskState]
+) -> ColumnElement[bool]:
+    """A task of `kind` for `entity_id` (a column of the enclosing query) is in one of `states`."""
+    other = tasks.alias("other_task")
+    return exists().where(
+        other.c.kind == kind.value,
+        other.c.entity_id == entity_id,
+        other.c.state.in_([state.value for state in states]),
+    )
+
+
+def queued_unneeded(kind: TaskKind, entity: Table, needed: Iterable[str]) -> ColumnElement[bool]:
+    """A queued `kind` task whose entity is gone or in none of the `needed` states (repair).
+
+    A task whose entity has a running task of the kind is left out: repair never touches the
+    entity of a running task (tasks spec section 8).
+    """
+    return and_(
+        tasks.c.kind == kind.value,
+        tasks.c.state == TaskState.QUEUED.value,
+        ~exists().where(entity.c.id == tasks.c.entity_id, entity.c.state.in_(list(needed))),
+        ~_running_sibling(),
+    )
+
+
+@dataclass(frozen=True)
+class Problem:
+    """A broken entity/task pair a handler's repair scan found (tasks spec section 8).
+
+    `name` is the stable `snake_case` problem name; `task_id` names the queued task concerned,
+    when the problem is about one.
+    """
+
+    name: str
+    entity_id: str
+    novel_id: str
+    task_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Repair:
+    """One applied repair: the problem's name, the task enqueued or cancelled, and the entity."""
+
+    problem: str
+    task_id: str | None
+    entity_id: str
+
+
 class TaskQueue:
     """Queue primitives over the `tasks` table (tasks spec section 4, "Operations")."""
 
@@ -415,7 +474,7 @@ class TaskQueue:
 
     def queued(self, conn: Connection, kind: TaskKind, entity_id: str) -> TaskRow | None:
         """The queued task of `(kind, entity_id)`, if there is one."""
-        return _find(conn, kind, entity_id, TaskState.QUEUED)
+        return queued(conn, kind, entity_id)
 
     def cancel(self, conn: Connection, kind: TaskKind, entity_id: str) -> bool:
         """Turn the queued task of `(kind, entity_id)` into `cancelled`; a running one stays."""
@@ -941,6 +1000,33 @@ class Tasks:
             merged=counts[Recovered.MERGED],
             recovered=tuple(recovered),
         )
+
+    def repair(self) -> list[Repair]:
+        """Find and fix the entity/task pairs that do not hold (tasks spec sections 2 and 8).
+
+        Each handler scans for its problems in a plain read, in registry order, so a later scan
+        sees the earlier fixes. Each fix then runs in its own transaction under `lock_novel`; the
+        handler re-checks the problem there and leaves it when it no longer holds. A running task
+        counts as present for its entity, so neither it nor its entity is touched. Returns the
+        applied repairs, for the worker to log.
+        """
+        repairs: list[Repair] = []
+        for handler in self._handlers.values():
+            with db.read(self._engine) as conn:
+                problems = handler.problems(conn)
+            for problem in problems:
+                with db.write(self._engine) as conn:
+                    if not novels.lock_novel(conn, problem.novel_id):
+                        continue
+                    repair = handler.fix(conn, problem, self._clock())
+                    self._queue.stamp(conn)
+                if repair is not None:
+                    repairs.append(repair)
+        return repairs
+
+    def prune(self, before: datetime) -> int:
+        """Delete finished tasks that finished before `before`; return how many (retention)."""
+        return self._queue.prune(before)
 
     def get(self, task_id: str) -> TaskView:
         """Return one task; raise `NotFound` for an unknown, malformed or pruned ID."""

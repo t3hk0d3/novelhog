@@ -83,7 +83,7 @@ class TestStep__OrderOfWork:
         assert worker.step() == "task"
         assert chapter_of(repo, second).state == "downloaded"
 
-    def test_step__runs_recover_notifications_trash_runner_then_maintenance_in_spec_order(
+    def test_step__runs_recover_notifications_trash_repair_runner_then_maintenance_in_order(
         self, worker: Worker, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[str] = []
@@ -91,6 +91,7 @@ class TestStep__OrderOfWork:
         monkeypatch.setattr(runner, "recover", lambda: calls.append("recover"))
         monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("notify"))
         monkeypatch.setattr(worker, "_empty_trash", lambda: calls.append("trash"))
+        monkeypatch.setattr(worker, "_repair", lambda: calls.append("repair"))
 
         def nothing_claimable() -> bool:
             calls.append("runner")
@@ -101,7 +102,7 @@ class TestStep__OrderOfWork:
 
         assert worker.step() == "idle"
 
-        assert calls == ["recover", "notify", "trash", "runner", "maintain"]
+        assert calls == ["recover", "notify", "trash", "repair", "runner", "maintain"]
 
     def test_step__skips_maintenance_while_the_notifier_is_behind(
         self, worker: Worker, monkeypatch: pytest.MonkeyPatch

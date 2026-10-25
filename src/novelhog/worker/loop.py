@@ -6,7 +6,8 @@
 2. `_dispatch_notifications` (always runs, never returns early; a failure is logged; keeps
    dispatching while full batches come back, for up to `DISPATCH_BUDGET_S`),
 3. `_empty_trash` (always runs, never returns early; a failure is logged),
-4. task repair at most every `TASK_REPAIR_INTERVAL` (added by the repair task; not yet here),
+4. `_repair`: task repair at most every `TASK_REPAIR_INTERVAL` on the loop's clock, idle or busy;
+   each fix is logged as `task_repaired`, a failure as `task_repair_failed` (the step goes on),
 5. claim and run one task (`Runner.step`): refreshes, builds and downloads, one per claim,
 6. otherwise "notify" while the notifier is still behind (no maintenance, no idle sleep), else
    `_maintain` (at most hourly; a failure is logged) and "idle".
@@ -25,8 +26,11 @@ from typing import Literal
 from novelhog import log
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
+from novelhog.domain.errors import NotFound
+from novelhog.domain.tasks import TASK_REPAIR_INTERVAL, TaskKind
 from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
+from novelhog.repo.tasks import Repair
 from novelhog.storage import StaticStorage
 from novelhog.worker import maintenance, refresh, runtime
 from novelhog.worker.reachability import Reachability
@@ -68,6 +72,7 @@ class Worker:
         self._clock = clock
         self._monotonic = monotonic
         self._last_maintenance: datetime | None = None
+        self._last_repair: datetime | None = None
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
         self._reachability = Reachability()
@@ -130,7 +135,7 @@ class Worker:
         self._runner.recover()
         behind = self._dispatch_notifications()
         self._empty_trash()
-        # Repair (tasks spec section 8) goes here: at most every TASK_REPAIR_INTERVAL, idle or not.
+        self._repair()
         if self._runner.step():
             return "task"
         if behind:
@@ -174,6 +179,42 @@ class Worker:
             log.get(worker_id=self._settings.worker_id).error(
                 "empty_trash_failed", error=f"{type(error).__name__}: {error}", exc_info=True
             )
+
+    def _repair(self) -> None:
+        """Repair tasks at most once per `TASK_REPAIR_INTERVAL`; a failure is logged.
+
+        Logs `task_repaired` with the problem for each fix (tasks spec section 8).
+        """
+        now = self._clock()
+        last = self._last_repair
+        if last is not None and now - last < TASK_REPAIR_INTERVAL:
+            return
+        self._last_repair = now  # a failing run is retried next interval, not every pass
+        logger = log.get(worker_id=self._settings.worker_id)
+        try:
+            repairs = self._repo.tasks.repair()
+        except Exception as error:  # noqa: BLE001 - repair must not stop the loop
+            logger.error(
+                "task_repair_failed", error=f"{type(error).__name__}: {error}", exc_info=True
+            )
+            return
+        for repair in repairs:
+            logger.warning("task_repaired", problem=repair.problem, **self._repaired(repair))
+
+    def _repaired(self, repair: Repair) -> dict[str, object]:
+        """The task fields of a `task_repaired` line; `attempts` is None without a task."""
+        attempts: int | None = None
+        if repair.task_id is not None:
+            try:
+                attempts = self._repo.tasks.get(repair.task_id).attempts
+            except NotFound:  # pruned or deleted with its novel since the fix
+                pass
+        return {
+            "task_id": repair.task_id,
+            "kind": TaskKind.for_entity(repair.entity_id).value,
+            "entity_id": repair.entity_id,
+            "attempts": attempts,
+        }
 
     def _maintain(self) -> None:
         """Run maintenance at most once per `MAINTENANCE_INTERVAL`; a failure is logged."""

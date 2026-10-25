@@ -3,6 +3,8 @@
 A handler is the transactional half of a kind. Its hooks run inside the transactions that the
 public `Tasks` methods compose, after `lock_novel` and the queue primitive and before
 `TaskQueue.stamp`; they write entity rows and then entity events, and never do network I/O.
+`problems` and `fix` are the kind's repair checks (tasks spec section 8): `problems` runs in a
+plain read and `fix` in its own transaction under `lock_novel`, before `TaskQueue.stamp`.
 """
 
 from collections.abc import Mapping
@@ -14,7 +16,7 @@ from sqlalchemy import Connection
 from novelhog.domain.tasks import Begin, Outcome, TaskKind
 
 if TYPE_CHECKING:
-    from novelhog.repo.tasks import TaskRow
+    from novelhog.repo.tasks import Problem, Repair, TaskRow
 
 
 class TaskHandler[W](Protocol):
@@ -41,6 +43,17 @@ class TaskHandler[W](Protocol):
 
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:
         """Inside recovery's transaction, after the lapsed running task went back to the queue."""
+        ...
+
+    def problems(self, conn: Connection) -> list[Problem]:
+        """In a plain read: the kind's broken entity/task pairs (tasks spec section 8)."""
+        ...
+
+    def fix(self, conn: Connection, problem: Problem, now: datetime) -> Repair | None:
+        """In the fix's own transaction: re-check `problem` and fix it; None if it no longer holds.
+
+        Follows the lock order: entity and task rows first, then the entity events.
+        """
         ...
 
 

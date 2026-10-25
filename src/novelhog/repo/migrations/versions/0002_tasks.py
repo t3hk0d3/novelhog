@@ -500,7 +500,7 @@ def _reset_building_exports(*, clear_claims: bool) -> None:
 def _buildable() -> sa.ColumnElement[bool]:
     """A waiting export whose range may be built (v1 spec 6.5), as this revision defines it.
 
-    A frozen copy of `repo.exports._buildable` over this revision's tables: skip_missing, an end
+    A frozen copy of `repo.exports.buildable` over this revision's tables: skip_missing, an end
     chapter without a position, or every positioned chapter between the ends downloaded.
     """
 

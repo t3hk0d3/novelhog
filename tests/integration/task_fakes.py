@@ -16,7 +16,7 @@ from novelhog.repo import Busy, Repo, db
 from novelhog.repo.exports import ExportClaim
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import novels, tasks
-from novelhog.repo.tasks import Ready, TaskRow
+from novelhog.repo.tasks import Problem, Ready, Repair, TaskRow
 from novelhog.worker.tasks.base import TaskContext
 
 KIND = TaskKind.NOVEL_REFRESH
@@ -68,6 +68,12 @@ class RecordingHandler:
 
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:
         self._seen("recover", conn, task)
+
+    def problems(self, conn: Connection) -> list[Problem]:
+        return []
+
+    def fix(self, conn: Connection, problem: Problem, now: datetime) -> Repair | None:
+        return None
 
 
 class RecordingProcessor:

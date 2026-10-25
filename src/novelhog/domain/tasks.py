@@ -17,6 +17,15 @@ class TaskKind(StrEnum):
         """The ID prefix of the entities this kind works on."""
         return _PREFIXES[self]
 
+    @classmethod
+    def for_entity(cls, entity_id: str) -> TaskKind:
+        """The kind that works on the entity, by its ID prefix; `ValueError` for another prefix."""
+        for kind, prefix in _PREFIXES.items():
+            if entity_id.startswith(prefix):
+                return kind
+        message = f"no task kind works on {entity_id!r}"
+        raise ValueError(message)
+
 
 _PREFIXES: dict[TaskKind, str] = {
     TaskKind.NOVEL_REFRESH: "NV",

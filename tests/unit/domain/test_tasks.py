@@ -39,6 +39,21 @@ class TestTaskKind:
     def test_prefix__is_the_entity_id_prefix(self, kind: TaskKind, prefix: str) -> None:
         assert kind.prefix == prefix
 
+    @pytest.mark.parametrize(
+        ("entity_id", "kind"),
+        [
+            ("NV000000000001", TaskKind.NOVEL_REFRESH),
+            ("CH000000000001", TaskKind.CHAPTER_DOWNLOAD),
+            ("EX000000000001", TaskKind.EXPORT_BUILD),
+        ],
+    )
+    def test_for_entity__is_the_kind_of_the_id_prefix(self, entity_id: str, kind: TaskKind) -> None:
+        assert TaskKind.for_entity(entity_id) is kind
+
+    def test_for_entity__rejects_another_prefix(self) -> None:
+        with pytest.raises(ValueError, match="TK000000000001"):
+            TaskKind.for_entity("TK000000000001")
+
     def test_values__are_the_wire_names(self) -> None:
         assert [kind.value for kind in TaskKind] == [
             "novel_refresh",

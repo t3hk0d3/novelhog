@@ -1,29 +1,65 @@
 """The repo half of `export_build`: v1's export claim, finish and fail as a task handler.
 
 The build is still needed while the export is `waiting` and buildable (v1 spec 6.5; the one
-definition is `exports._buildable`); `begin` then turns it `building` with an `EX` event and `work`
+definition is `exports.buildable`); `begin` then turns it `building` with an `EX` event and `work`
 reads the `ExportClaim`. `complete` applies v1's `finish` (`Done`: `ready` with the stored file) or
 `fail` (`Failed`: `failed` with the error); there is no `Retry` (tasks spec section 5). `recover`
 hands a lapsed build's export back to `waiting`. Every export write is conditional on the export
 still being `building`.
+
+Repair (tasks spec section 8): `problems` finds buildable `waiting` exports without a live build
+(`export_buildable_without_task`: enqueued), `building` ones without a running build
+(`export_building_without_task`: back to `waiting` with an `EX` event, enqueued if buildable) and
+queued builds of exports that are gone, `ready` or `failed` (`queued_task_not_needed`: cancelled).
+An export with a running build is never a problem.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import Connection, delete, update
+from sqlalchemy import ColumnElement, Connection, delete, select, update
 
 from novelhog.domain.exports import ExportState
-from novelhog.domain.tasks import Begin, Done, Failed, Outcome, Skip, Started, TaskKind
+from novelhog.domain.tasks import (
+    LIVE_STATES,
+    Begin,
+    Done,
+    Failed,
+    Outcome,
+    Skip,
+    Started,
+    TaskKind,
+    TaskState,
+)
 from novelhog.repo import events
 from novelhog.repo import exports as export_repo
+from novelhog.repo import tasks as task_queue
 from novelhog.repo.context import RepoContext
 from novelhog.repo.exports import ExportClaim
-from novelhog.repo.schema import exports, storage_trash
-from novelhog.repo.tasks import TaskRow
+from novelhog.repo.schema import exports, storage_trash, tasks
+from novelhog.repo.tasks import Problem, Repair, TaskRow
 
 _BUILDING = ExportState.BUILDING.value
+_KIND = TaskKind.EXPORT_BUILD
+BUILDABLE_WITHOUT_TASK = "export_buildable_without_task"
+BUILDING_WITHOUT_TASK = "export_building_without_task"
+TASK_NOT_NEEDED = "queued_task_not_needed"
+
+
+def _export_checks() -> dict[str, ColumnElement[bool]]:
+    """Each export problem of tasks spec section 8 as a condition on `exports`."""
+    no_live = ~task_queue.has_task(_KIND, exports.c.id, LIVE_STATES)
+    no_running = ~task_queue.has_task(_KIND, exports.c.id, [TaskState.RUNNING])
+    return {
+        BUILDABLE_WITHOUT_TASK: export_repo.buildable() & no_live,
+        BUILDING_WITHOUT_TASK: (exports.c.state == _BUILDING) & no_running,
+    }
+
+
+def _not_needed() -> ColumnElement[bool]:
+    """A queued build whose export is gone, `ready` or `failed`."""
+    return task_queue.queued_unneeded(_KIND, exports, [ExportState.WAITING.value, _BUILDING])
 
 
 @dataclass(frozen=True)
@@ -58,7 +94,7 @@ class ExportBuildHandler:
         """Still needed while the export is waiting and buildable; it turns `building`."""
         if not export_repo.begin_build(conn, task.entity_id):
             return Skip("not buildable")
-        self._emit(conn, task, now)
+        self._emit(conn, task.novel_id, task.entity_id, now)
         return Started()
 
     def complete(
@@ -90,25 +126,70 @@ class ExportBuildHandler:
         if stored is not None:
             # An earlier owner that lost its claim may have trashed this (deterministic) key.
             conn.execute(delete(storage_trash).where(storage_trash.c.key == stored))
-        self._emit(conn, task, now)
+        self._emit(conn, task.novel_id, task.entity_id, now)
         return BuildReport(task.entity_id, state)
 
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:
         """The lapsed build went back to the queue: its export returns to `waiting`."""
+        if self._unbuild(conn, task.entity_id):
+            self._emit(conn, task.novel_id, task.entity_id, now)
+
+    @staticmethod
+    def _unbuild(conn: Connection, export_id: str) -> bool:
+        """`building` → `waiting`; rows only. False when the export was not building."""
         reset = conn.execute(
             update(exports)
-            .where(exports.c.id == task.entity_id, exports.c.state == _BUILDING)
+            .where(exports.c.id == export_id, exports.c.state == _BUILDING)
             .values(state=ExportState.WAITING.value)
         ).rowcount
-        if reset == 1:
-            self._emit(conn, task, now)
+        return reset == 1
 
-    def _emit(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+    def problems(self, conn: Connection) -> list[Problem]:
+        """The exports whose build task is missing, and the unneeded builds."""
+        found: list[Problem] = []
+        for name, condition in _export_checks().items():
+            rows = conn.execute(
+                select(exports.c.id, exports.c.novel_id)
+                .where(condition)
+                .order_by(exports.c.created_at, exports.c.id)
+            )
+            found.extend(Problem(name, row.id, row.novel_id) for row in rows)
+        rows = conn.execute(
+            select(tasks.c.id, tasks.c.entity_id, tasks.c.novel_id)
+            .where(_not_needed())
+            .order_by(tasks.c.id)
+        )
+        found.extend(Problem(TASK_NOT_NEEDED, row.entity_id, row.novel_id, row.id) for row in rows)
+        return found
+
+    def fix(self, conn: Connection, problem: Problem, now: datetime) -> Repair | None:
+        """Re-check the problem and fix it (tasks spec section 8); None if it no longer holds."""
+        export_id = problem.entity_id
+        if problem.name == TASK_NOT_NEEDED:
+            holds = conn.execute(
+                select(tasks.c.id).where(tasks.c.id == problem.task_id, _not_needed())
+            ).first()
+            if holds is None:
+                return None
+            task_queue.cancel(conn, self.kind, export_id, now=now)
+            return Repair(problem.name, problem.task_id, export_id)
+        holds = conn.execute(
+            select(exports.c.id).where(exports.c.id == export_id, _export_checks()[problem.name])
+        ).first()
+        if holds is None:
+            return None
+        reset = problem.name == BUILDING_WITHOUT_TASK and self._unbuild(conn, export_id)
+        export_repo.enqueue_buildable(conn, problem.novel_id, [export_id], now)
+        queued = task_queue.queued(conn, self.kind, export_id)
+        if reset:
+            self._emit(conn, problem.novel_id, export_id, now)
+        return Repair(problem.name, None if queued is None else queued.id, export_id)
+
+    def _emit(self, conn: Connection, novel_id: str, export_id: str, now: datetime) -> None:
         """Append the export's `EX` event; the snapshot is built after the clock is taken."""
-        export_id = task.entity_id
         events.append(
             conn,
-            task.novel_id,
+            novel_id,
             export_id,
             lambda: export_repo.snapshot(
                 conn, export_id, static_base_url=self._static_base_url
