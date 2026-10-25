@@ -32,7 +32,7 @@ from novelhog.repo.claims import (
     release,
     renew,
 )
-from novelhog.repo.schema import chapters, consumers, exports, tasks
+from novelhog.repo.schema import consumers, metadata, tasks
 from novelhog.repo.types import UTCDateTime
 from tests.integration.helpers import NOW
 
@@ -93,7 +93,11 @@ def _ids(rows: list[Row[Any]]) -> list[int]:
 
 class TestClaimable:
     def test_claimable__lists_the_claimable_tables(self) -> None:
-        assert CLAIMABLE == (chapters, exports, consumers, tasks)
+        assert CLAIMABLE == (consumers, tasks)
+
+    def test_claimable__are_exactly_the_tables_with_claim_columns(self) -> None:
+        with_claims = {table.name for table in metadata.sorted_tables if "claimed_by" in table.c}
+        assert {table.name for table in CLAIMABLE} == with_claims
 
 
 class TestClaim__WithAnAvailableEligibleRow:

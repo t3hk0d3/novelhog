@@ -1,10 +1,11 @@
 """Compare-and-set claims, fencing and expiry for claimable rows (spec section 4, "Claims").
 
-Every claimable table has `claimed_by` / `claimed_until`. A claim is one `UPDATE … RETURNING`
-whose outer `WHERE` repeats the "free or expired" condition, so concurrent workers never claim the
-same row; there is no `SELECT … FOR UPDATE`. Writes that finish claimed work are fenced by
-`owned`. Timestamps are computed in Python and passed in; no arithmetic happens in SQL.
-These helpers are internal to `repo`.
+The claimable tables, `CLAIMABLE`, are `consumers` and `tasks`: the tables with `claimed_by` /
+`claimed_until`. Chapter downloads and export builds are claimed through their task. A claim is
+one `UPDATE … RETURNING` whose outer `WHERE` repeats the "free or expired" condition, so
+concurrent workers never claim the same row; there is no `SELECT … FOR UPDATE`.
+Writes that finish claimed work are fenced by `owned`. Timestamps are computed in Python and
+passed in; no arithmetic happens in SQL. These helpers are internal to `repo`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -15,9 +16,9 @@ from sqlalchemy import Column, ColumnElement, Connection, Row, Table, and_, exis
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import UnaryExpression
 
-from novelhog.repo.schema import chapters, consumers, exports, tasks
+from novelhog.repo.schema import consumers, tasks
 
-CLAIMABLE: tuple[Table, ...] = (chapters, exports, consumers, tasks)
+CLAIMABLE: tuple[Table, ...] = (consumers, tasks)
 
 
 def _key(table: Table) -> Column[Any]:
