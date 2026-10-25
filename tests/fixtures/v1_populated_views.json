@@ -1,0 +1,386 @@
+{
+  "CH000000000001": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000001",
+    "position": 1,
+    "queued_at": null,
+    "released_at": null,
+    "state": "downloaded",
+    "title": "One",
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/1"
+  },
+  "CH000000000002": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000002",
+    "position": 2,
+    "queued_at": null,
+    "released_at": null,
+    "state": "downloaded",
+    "title": "Two",
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/2"
+  },
+  "CH000000000003": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000003",
+    "position": 3,
+    "queued_at": "2026-10-19T11:57:00.000Z",
+    "released_at": null,
+    "state": "pending",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/3"
+  },
+  "CH000000000004": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000004",
+    "position": 4,
+    "queued_at": "2026-10-19T11:56:00.000Z",
+    "released_at": "2026-10-19T12:00:00.000Z",
+    "state": "downloading",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/4"
+  },
+  "CH000000000005": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000005",
+    "position": 5,
+    "queued_at": "2026-10-19T11:55:00.000Z",
+    "released_at": null,
+    "state": "pending",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/5"
+  },
+  "CH000000000006": {
+    "error": "HTTP 500",
+    "error_at": "2026-10-19T12:00:00.000Z",
+    "has_images": false,
+    "id": "CH000000000006",
+    "position": 6,
+    "queued_at": null,
+    "released_at": null,
+    "state": "error",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/6"
+  },
+  "CH000000000007": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000007",
+    "position": 7,
+    "queued_at": null,
+    "released_at": null,
+    "state": "not_requested",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/1/7"
+  },
+  "CH000000000011": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000011",
+    "position": 1,
+    "queued_at": null,
+    "released_at": null,
+    "state": "downloaded",
+    "title": "Eleven",
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/3/1"
+  },
+  "CH000000000012": {
+    "error": null,
+    "error_at": null,
+    "has_images": false,
+    "id": "CH000000000012",
+    "position": 2,
+    "queued_at": "2026-10-19T11:48:00.000Z",
+    "released_at": null,
+    "state": "pending",
+    "title": null,
+    "updated_at": "2026-10-19T12:00:00.000Z",
+    "url": "https://example.com/novel/3/2"
+  },
+  "EX000000000001": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 1,
+    "chapter_to": 2,
+    "created_at": "2026-10-19T11:01:00.000Z",
+    "error": null,
+    "filename": "novel-1.epub",
+    "format": "epub",
+    "id": "EX000000000001",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 2,
+      "total": 2
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "waiting",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000002": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 1,
+    "chapter_to": 4,
+    "created_at": "2026-10-19T11:02:00.000Z",
+    "error": null,
+    "filename": "novel-2.epub",
+    "format": "epub",
+    "id": "EX000000000002",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 2,
+      "total": 4
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "waiting",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000003": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 2,
+    "chapter_to": 7,
+    "created_at": "2026-10-19T11:03:00.000Z",
+    "error": null,
+    "filename": "novel-3.epub",
+    "format": "epub",
+    "id": "EX000000000003",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 1,
+      "total": 6
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": true,
+    "state": "waiting",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000004": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 1,
+    "chapter_to": 1,
+    "created_at": "2026-10-19T11:04:00.000Z",
+    "error": null,
+    "filename": "novel-4.epub",
+    "format": "epub",
+    "id": "EX000000000004",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 1,
+      "total": 1
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "building",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000005": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 2,
+    "chapter_to": 2,
+    "created_at": "2026-10-19T11:05:00.000Z",
+    "error": null,
+    "filename": "novel-5.epub",
+    "format": "epub",
+    "id": "EX000000000005",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 1,
+      "total": 1
+    },
+    "ready_at": "2026-10-19T12:00:00.000Z",
+    "size_bytes": 1,
+    "skip_missing": false,
+    "state": "ready",
+    "url": "/static/exports/EX5.epub",
+    "waited": false
+  },
+  "EX000000000006": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 1,
+    "chapter_to": 1,
+    "created_at": "2026-10-19T11:06:00.000Z",
+    "error": "Range changed upstream",
+    "filename": "novel-6.epub",
+    "format": "epub",
+    "id": "EX000000000006",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 1,
+      "total": 1
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "failed",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000007": {
+    "blocked": {
+      "errors": [
+        6
+      ],
+      "not_queued": [
+        7
+      ]
+    },
+    "chapter_from": 6,
+    "chapter_to": 7,
+    "created_at": "2026-10-19T11:07:00.000Z",
+    "error": null,
+    "filename": "novel-7.epub",
+    "format": "epub",
+    "id": "EX000000000007",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000001",
+    "progress": {
+      "downloaded": 0,
+      "total": 2
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "waiting",
+    "url": null,
+    "waited": false
+  },
+  "EX000000000008": {
+    "blocked": {
+      "errors": [],
+      "not_queued": []
+    },
+    "chapter_from": 1,
+    "chapter_to": 2,
+    "created_at": "2026-10-19T11:08:00.000Z",
+    "error": null,
+    "filename": "novel-8.epub",
+    "format": "epub",
+    "id": "EX000000000008",
+    "mime": "application/epub+zip",
+    "novel_id": "NV000000000003",
+    "progress": {
+      "downloaded": 1,
+      "total": 2
+    },
+    "ready_at": null,
+    "size_bytes": null,
+    "skip_missing": false,
+    "state": "waiting",
+    "url": null,
+    "waited": false
+  },
+  "NV000000000001": {
+    "cover_url": null,
+    "created_at": "2026-10-17T12:00:00.000Z",
+    "downloaded_pages": 2,
+    "error_pages": 1,
+    "followed": true,
+    "host": "example.com",
+    "id": "NV000000000001",
+    "import_error": null,
+    "importing": false,
+    "last_refreshed_at": "2026-10-19T11:00:00.000Z",
+    "new_pages": 1,
+    "next_refresh_at": "2026-10-19T18:00:00.000Z",
+    "pending_pages": 3,
+    "refresh_interval": 3600,
+    "syncing": false,
+    "title": "Lantern",
+    "toc_url": "https://example.com/novel/1",
+    "total_pages": 7,
+    "updated_at": "2026-10-19T12:00:00.000Z"
+  },
+  "NV000000000002": {
+    "cover_url": null,
+    "created_at": "2026-10-17T12:00:00.000Z",
+    "downloaded_pages": 0,
+    "error_pages": 0,
+    "followed": true,
+    "host": "example.com",
+    "id": "NV000000000002",
+    "import_error": null,
+    "importing": true,
+    "last_refreshed_at": null,
+    "new_pages": 0,
+    "next_refresh_at": "2026-10-19T11:58:00.000Z",
+    "pending_pages": 0,
+    "refresh_interval": 3600,
+    "syncing": false,
+    "title": null,
+    "toc_url": "https://example.com/novel/2",
+    "total_pages": 0,
+    "updated_at": "2026-10-19T12:00:00.000Z"
+  },
+  "NV000000000003": {
+    "cover_url": null,
+    "created_at": "2026-10-17T12:00:00.000Z",
+    "downloaded_pages": 1,
+    "error_pages": 0,
+    "followed": true,
+    "host": "example.com",
+    "id": "NV000000000003",
+    "import_error": null,
+    "importing": false,
+    "last_refreshed_at": "2026-10-18T12:00:00.000Z",
+    "new_pages": 0,
+    "next_refresh_at": "2026-10-19T11:50:00.000Z",
+    "pending_pages": 1,
+    "refresh_interval": 3600,
+    "syncing": true,
+    "title": "Ember",
+    "toc_url": "https://example.com/novel/3",
+    "total_pages": 2,
+    "updated_at": "2026-10-19T12:00:00.000Z"
+  }
+}

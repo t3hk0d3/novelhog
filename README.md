@@ -19,7 +19,7 @@ docker compose up -d --build
 |---|---|---|
 | `novelhog-migrate` | `novelhog db migrate` | One-shot; `web` and `worker` wait for it to exit 0, so every `up` migrates exactly once |
 | `novelhog-web` | `novelhog web` | Caddy (the only published port, `8080` by default) and the API on `127.0.0.1:8000`, under `tini` |
-| `novelhog-worker` | `novelhog worker` | Scraper, exports, notifications; `stop_grace_period: 2m` lets a chapter finish |
+| `novelhog-worker` | `novelhog worker` | Scraper, exports, notifications; `stop_grace_period: 2m` lets a chapter finish. Its work runs as tasks, readable at `GET /api/v1/tasks` |
 | `flaresolverr` | | On a private network shared only with the worker; `NOVELHOG_FLARESOLVERR_URL` points at it |
 
 Every worker is paired 1:1 with its own FlareSolverr. Do not use `--scale` on the worker; add another
@@ -120,12 +120,20 @@ matches re-subscribe.
 
 ## Upgrades
 
+Stop the workers before upgrading, so none runs while the database migrates (also any extra worker from an
+override file):
+
 ```sh
 git pull
+docker compose stop novelhog-worker
 docker compose up -d --build
 ```
 
 `novelhog-migrate` runs `novelhog db migrate` first. To run it by hand: `docker compose run --rm novelhog-migrate`.
+
+`NOVELHOG_BATCH_SIZE` is removed. If it is still set, it is ignored and the worker logs `config_ignored` at
+startup.
+
 `VACUUM` is a manual operation if the database file has grown after large deletions. On SQLite, stop the worker
 while it runs:
 
