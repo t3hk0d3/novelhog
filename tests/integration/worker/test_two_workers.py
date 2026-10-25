@@ -1,7 +1,8 @@
 """RF-5: two worker processes on one database (tasks spec sections 4 and 6).
 
 Each worker is a `Worker` on its own thread with its own `Repo` (its own engine), as two processes
-would be. The adapter records what runs at the same time.
+would be. The adapter records what runs at the same time; the drain also samples the tasks table
+for two `running` rows of one `(kind, entity_id)` and ends with a build of a waiting export.
 """
 
 import threading
@@ -12,12 +13,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from structlog.testing import capture_logs
 
 from novelhog.config import Settings
 from novelhog.domain.chapters import ChapterState
+from novelhog.domain.exports import ExportState, Format
 from novelhog.domain.tasks import TaskKind, TaskState
-from novelhog.repo import Repo
+from novelhog.repo import Repo, db
+from novelhog.repo.schema import tasks
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker.loop import Worker
@@ -130,6 +134,18 @@ def downloaded(repo: Repo, novel_id: str) -> bool:
     )
 
 
+def running_twice(repo: Repo) -> list[tuple[str, str]]:
+    """Every `(kind, entity_id)` with more than one `running` task row right now."""
+    with db.read(repo.engine) as conn:
+        rows = conn.execute(
+            select(tasks.c.kind, tasks.c.entity_id)
+            .where(tasks.c.state == TaskState.RUNNING.value)
+            .group_by(tasks.c.kind, tasks.c.entity_id)
+            .having(func.count() > 1)
+        ).all()
+    return [(row.kind, row.entity_id) for row in rows]
+
+
 def running(repo: Repo, entity_id: str) -> bool:
     return any(task.state is TaskState.RUNNING for task in tasks_of(repo, entity_id))
 
@@ -148,9 +164,24 @@ class TestTwoWorkers__DrainingOneQueue:
         ]
         assert workers[0].step() == "task"  # the first import
         repo.chapters.patch(novel_id, ChapterState.PENDING, list(range(1, CHAPTERS + 1)))
+        view, _ = repo.exports.create(novel_id, 1, CHAPTERS, Format.EPUB)  # waits for them all
 
-        run_both(workers, lambda: downloaded(repo, novel_id))
+        def done() -> bool:
+            self.doubles.extend(running_twice(repo))
+            ready = repo.exports.get(novel_id, view.id).state is ExportState.READY
+            return downloaded(repo, novel_id) and ready
+
+        run_both(workers, done)
+        self.doubles.extend(running_twice(repo))
+        self.export_id = view.id
         return novel_id
+
+    doubles: list[tuple[str, str]]
+    export_id: str
+
+    @pytest.fixture(autouse=True)
+    def _samples(self) -> None:
+        self.doubles = []
 
     def test_workers__never_run_one_kind_and_entity_twice_at_once(
         self, adapter: OverlapAdapter, drained: str
@@ -169,6 +200,17 @@ class TestTwoWorkers__DrainingOneQueue:
 
     def test_workers__sync_the_novel_once(self, adapter: OverlapAdapter, drained: str) -> None:
         assert adapter.toc_syncs == 1
+
+    def test_workers__build_the_waiting_export_once(self, repo: Repo, drained: str) -> None:
+        [task] = tasks_of(repo, self.export_id)
+        assert (task.kind, task.state, task.attempts) == (
+            TaskKind.EXPORT_BUILD, TaskState.DONE, 1,
+        )  # fmt: skip
+
+    def test_workers__never_hold_two_running_rows_for_one_kind_and_entity(
+        self, drained: str
+    ) -> None:
+        assert self.doubles == []
 
 
 class TestTwoWorkers__WhenARefreshIsQueuedDuringARunningSync:
