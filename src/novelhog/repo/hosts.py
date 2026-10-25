@@ -29,6 +29,14 @@ class Host:
 
 
 @dataclass(frozen=True)
+class Slot:
+    """The host's next free moment; `reserved` when the caller booked it."""
+
+    at: datetime
+    reserved: bool
+
+
+@dataclass(frozen=True)
 class HostState:
     """A host after a failure: `paused_until` is None while it is not paused."""
 
@@ -101,26 +109,47 @@ class Hosts:
         with db.read(self._engine) as conn:
             return [Host(r.host, r.reach_after, r.failing_since) for r in conn.execute(statement)]
 
-    def reserve(self, host: str, delay_s: float) -> datetime | None:
-        """Take the host's next slot: `reach_after = now + delay_s` if it is free.
+    def reserve(self, host: str, delay_s: float, *, within: timedelta) -> Slot:
+        """Book the host's next slot, `delay_s` long, if it starts within `within` from now.
 
-        Returns None when the slot was taken, else the `reach_after` the caller must wait for.
+        The slot starts at `reach_after`, or now if that passed. A booked slot moves
+        `reach_after` to its end (a compare-and-set, so two workers get consecutive slots);
+        `Slot.reserved` is False, with nothing changed, when the slot starts later than that.
         """
         now = self._clock()
-        free = or_(hosts_table.c.reach_after.is_(None), hosts_table.c.reach_after <= now)
         with db.write(self._engine) as conn:
-            taken = conn.execute(
+            while True:
+                current: datetime | None = conn.execute(
+                    select(hosts_table.c.reach_after).where(hosts_table.c.host == host)
+                ).scalar_one_or_none()
+                start = now if current is None or current < now else current
+                if start - now > within:
+                    return Slot(start, reserved=False)
+                unchanged = (
+                    hosts_table.c.reach_after.is_(None)
+                    if current is None
+                    else hosts_table.c.reach_after == current
+                )
+                booked = conn.execute(
+                    update(hosts_table)
+                    .where(hosts_table.c.host == host, unchanged)
+                    .values(reach_after=start + timedelta(seconds=delay_s))
+                ).rowcount
+                if booked:
+                    return Slot(start, reserved=True)
+
+    def hold(self, host: str, delay_s: float) -> None:
+        """A fetch just ended: keep the host for `delay_s` more; never moves `reach_after` back."""
+        until = self._clock() + timedelta(seconds=delay_s)
+        with db.write(self._engine) as conn:
+            conn.execute(
                 update(hosts_table)
-                .where(hosts_table.c.host == host, free)
-                .values(reach_after=now + timedelta(seconds=delay_s))
-                .returning(hosts_table.c.host)
-            ).first()
-            if taken is not None:
-                return None
-            reach_after: datetime | None = conn.execute(
-                select(hosts_table.c.reach_after).where(hosts_table.c.host == host)
-            ).scalar_one_or_none()
-        return reach_after
+                .where(
+                    hosts_table.c.host == host,
+                    or_(hosts_table.c.reach_after.is_(None), hosts_table.c.reach_after < until),
+                )
+                .values(reach_after=until)
+            )
 
     def failed(self, host: str, kind: FailureKind, *, retry_after: float | None) -> HostState:
         """Count one more failure of `kind` and pause the host if the policy says so.

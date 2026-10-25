@@ -180,14 +180,16 @@ class TestRun__WhenIdle:
 
     def test_run__downloads_pending_work_before_waiting(
         self, repo: Repo, novel_id: str, adapter: FakeAdapter, fetcher: FakeFetcher,
-        settings: Settings, tmp_path: Path,
+        settings: Settings, tmp_path: Path, clock: FakeClock,
     ) -> None:  # fmt: skip
         chapter_id = add_chapter(repo, novel_id, 1)
-        stop = RecordingStop(stop_after_waits=1)
+        # The import's TOC fetch holds the host for the request delay, then the download runs.
+        stop = RecordingStop(stop_after_waits=2, clock=clock)
 
         make_worker(repo, adapter, fetcher, settings, tmp_path, stop).run()
 
         assert chapter_of(repo, chapter_id).state == "downloaded"
+        assert stop.waits == [settings.request_delay, IDLE]
 
 
 class TestRun__WithTheRemovedBatchSizeSet:

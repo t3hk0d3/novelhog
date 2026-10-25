@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
-from novelhog.domain.tasks import Failed, Retry, Skip, TaskState
+from novelhog.domain.tasks import Failed, Retry, RetryCause, Skip, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.tasks import TaskRow, UnregisteredTaskKindError
@@ -331,6 +331,21 @@ class TestRunnerStep__WhenRunReturnsFailed:
         runner.step()
 
         assert task_row(handled, task.id).error == "SiteError: 404"
+
+
+class TestRunnerStep__WhenRunReturnsARetryThatIsNoInfrastructureError:
+    @pytest.mark.parametrize("cause", [RetryCause.HOST_PAUSED, RetryCause.TRANSIENT])
+    def test_step__requeues_the_task_without_backing_off(
+        self, handled: Repo, runner: Runner, processor: RecordingProcessor, task: TaskRow,
+        clock: FakeClock, cause: RetryCause,
+    ) -> None:  # fmt: skip
+        run_after = clock() + timedelta(minutes=5)
+        processor.outcome = Retry(run_after, "SiteThrottled: 429", cause)
+
+        assert runner.step() is True
+
+        row = task_row(handled, task.id)
+        assert (row.state, row.run_after) == (TaskState.QUEUED, run_after)
 
 
 class TestRunnerStep__WhenRunReturnsRetry:

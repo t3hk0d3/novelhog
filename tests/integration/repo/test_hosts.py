@@ -9,7 +9,7 @@ from sqlalchemy import insert, select, update
 
 from novelhog.domain.hosts import FailureKind
 from novelhog.repo import Repo, db
-from novelhog.repo.hosts import Host, HostState, PublishReport
+from novelhog.repo.hosts import Host, HostState, PublishReport, Slot
 from novelhog.repo.schema import hosts, novels
 from tests.conftest import FakeClock
 from tests.integration.helpers import novel_row
@@ -117,44 +117,78 @@ def host(repo: Repo) -> str:
     return HOST
 
 
+WINDOW = timedelta(seconds=30)
+
+
 class TestReserve:
-    def test_reserve__takes_a_free_host_and_sets_reach_after(
+    def test_reserve__books_a_free_host_from_now(
         self, repo: Repo, clock: FakeClock, host: str
     ) -> None:
-        assert repo.hosts.reserve(host, DELAY) is None
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(clock.current, True)
         assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=DELAY)
 
-    def test_reserve__takes_a_host_whose_reach_after_passed(
+    def test_reserve__books_a_host_whose_reach_after_passed_from_now(
         self, repo: Repo, clock: FakeClock, host: str
     ) -> None:
         _set_reach_after(repo, clock.current - timedelta(seconds=1))
-        assert repo.hosts.reserve(host, DELAY) is None
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(clock.current, True)
         assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=DELAY)
 
-    def test_reserve__returns_a_future_reach_after_and_changes_nothing(
+    def test_reserve__books_the_next_slot_when_it_starts_within_the_window(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        soon = clock.current + timedelta(seconds=10)
+        _set_reach_after(repo, soon)
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(soon, True)
+        assert _row(repo)["reach_after"] == soon + timedelta(seconds=DELAY)
+
+    def test_reserve__books_nothing_when_the_next_slot_is_beyond_the_window(
         self, repo: Repo, clock: FakeClock, host: str
     ) -> None:
         later = clock.current + timedelta(minutes=5)
         _set_reach_after(repo, later)
-        assert repo.hosts.reserve(host, DELAY) == later
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(later, False)
         assert _row(repo)["reach_after"] == later
 
-    def test_reserve__gives_one_slot_to_two_workers_at_once(
-        self, repo: Repo, other_repo: Repo, host: str
+    def test_reserve__gives_two_workers_at_once_consecutive_slots(
+        self, repo: Repo, other_repo: Repo, clock: FakeClock, host: str
     ) -> None:
         barrier = threading.Barrier(2)
-        results: list[datetime | None] = []
+        slots: list[Slot] = []
 
         def reserve(r: Repo) -> None:
             barrier.wait(timeout=30)
-            results.append(r.hosts.reserve(host, DELAY))
+            slots.append(r.hosts.reserve(host, DELAY, within=WINDOW))
 
         threads = [threading.Thread(target=reserve, args=(r,)) for r in (repo, other_repo)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=30)
-        assert sorted(r is None for r in results) == [False, True]
+        assert sorted(slot.at for slot in slots) == [
+            clock.current,
+            clock.current + timedelta(seconds=DELAY),
+        ]
+        assert all(slot.reserved for slot in slots)
+        assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=2 * DELAY)
+
+
+class TestHold:
+    def test_hold__keeps_the_host_for_the_delay_after_a_fetch(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        repo.hosts.reserve(host, DELAY, within=WINDOW)
+        now = clock.advance(seconds=5)
+        repo.hosts.hold(host, DELAY)
+        assert _row(repo)["reach_after"] == now + timedelta(seconds=DELAY)
+
+    def test_hold__never_moves_reach_after_earlier(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        later = clock.current + timedelta(minutes=5)
+        _set_reach_after(repo, later)
+        repo.hosts.hold(host, DELAY)
+        assert _row(repo)["reach_after"] == later
 
 
 class TestFailed:

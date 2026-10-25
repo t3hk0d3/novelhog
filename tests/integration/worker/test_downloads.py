@@ -6,6 +6,7 @@ batch" now applies to the chapters still queued. Politeness is per host (tasks s
 
 import random
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from novelhog.config import Settings
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.tasks import TaskState
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import tasks
+from novelhog.repo.schema import hosts, tasks
 from novelhog.repo.tasks import TaskRow
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import LocalStaticStorage
@@ -71,8 +72,8 @@ def novel_id(repo: Repo) -> str:
 
 
 @pytest.fixture
-def stop() -> RecordingStop:
-    return RecordingStop()
+def stop(clock: FakeClock) -> RecordingStop:
+    return RecordingStop(clock=clock)
 
 
 @pytest.fixture
@@ -472,7 +473,7 @@ class TestRunner__Politeness:
         assert adapter.fetched == [f"{URL}/1", f"{OTHER_URL}/2"]
         assert stop.waits == []
 
-    def test_run_task__a_refresh_does_not_wait(
+    def test_run_task__a_refresh_shares_the_hosts_slots_with_downloads(
         self, repo: Repo, novel_id: str, runner: Runner, stop: RecordingStop, adapter: FakeAdapter
     ) -> None:
         queue(repo, novel_id, 1)
@@ -484,8 +485,32 @@ class TestRunner__Politeness:
 
         runner.run_task(claimed)
 
-        assert stop.waits == []
+        assert stop.waits == [DELAY]
         assert live_task(repo, novel_id, TaskState.QUEUED).id != refresh.id
+
+    def test_run_task__a_paused_host_reschedules_the_task_to_reach_after(
+        self, repo: Repo, novel_id: str, runner: Runner, stop: RecordingStop,
+        adapter: FakeAdapter, clock: FakeClock,
+    ) -> None:  # fmt: skip
+        (chapter_id,) = queue(repo, novel_id, 1)
+        paused = clock() + timedelta(minutes=10)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(hosts).where(hosts.c.host == HOST).values(reach_after=paused))
+
+        with capture_logs() as logs:
+            assert runner.step() is True
+
+        assert adapter.fetched == []
+        assert stop.waits == []
+        task = download_task(repo, chapter_id)
+        assert (task.state, task.run_after, task.claimed_by, task.attempts) == (
+            TaskState.QUEUED,
+            paused,
+            None,
+            0,
+        )
+        rescheduled = [e for e in logs if e["event"] == "task_rescheduled"]
+        assert [e["reach_after"] for e in rescheduled] == [paused]
 
     def test_run_task__stop_during_the_wait_releases_the_task_unstarted(
         self, repo: Repo, novel_id: str, adapter: FakeAdapter, runner: Runner,

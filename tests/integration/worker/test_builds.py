@@ -23,7 +23,7 @@ from novelhog.domain.tasks import Done, TaskState
 from novelhog.exporter import BookInput
 from novelhog.repo import Repo, db
 from novelhog.repo import contents as contents_repo
-from novelhog.repo.schema import chapters, exports, novels, tasks
+from novelhog.repo.schema import chapters, exports, hosts, novels, tasks
 from novelhog.repo.task_kinds.export_build import BuildResult
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
@@ -280,6 +280,19 @@ class TestBuild__OnSuccess:
         assert row.state == ExportState.READY
         assert row.size_bytes == stored.stat().st_size > 0
         assert row.ready_at == repo.clock()
+
+    def test_build__contacts_no_host_so_books_no_slot(
+        self, repo: Repo, novel_id: str, runner: Runner
+    ) -> None:
+        add_downloaded(repo, novel_id, 1)
+        create_export(repo, novel_id, 1, 1)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(hosts).values(reach_after=None))
+
+        run_build(runner)
+
+        with db.read(repo.engine) as conn:
+            assert set(conn.execute(select(hosts.c.reach_after)).scalars()) == {None}
 
     def test_build__removes_its_temporary_file(
         self, repo: Repo, novel_id: str, runner: Runner, tmp_dir: Path
