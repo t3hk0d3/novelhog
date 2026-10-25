@@ -16,6 +16,7 @@ export type ExportCreate = Omit<Schemas['ExportCreate'], 'format' | 'skip_missin
   Partial<Pick<Schemas['ExportCreate'], 'format' | 'skip_missing'>>;
 export type Settings = Schemas['SettingsOut'];
 export type Subscription = Schemas['Subscription'];
+export type Task = Schemas['Task'];
 export type WebpushSubscriptionCreate = Schemas['WebpushSubscriptionCreate'];
 
 const BASE = '/api/v1';
