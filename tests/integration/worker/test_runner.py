@@ -19,7 +19,6 @@ from novelhog.repo.novels import lock_novel
 from novelhog.repo.tasks import TaskRow, UnregisteredTaskKindError
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker.loop import Worker
-from novelhog.worker.reachability import Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks.base import TaskContext
 from tests.conftest import FakeClock
@@ -109,7 +108,7 @@ def ctx(
         chapter_store=ChapterStore(handled),
         settings=settings,
         stop=stop,
-        reachability=Reachability(),
+        hosts=handled.hosts,
         rng=random.Random(0),  # noqa: S311 - refresh jitter, not security
         heartbeat=heartbeat,
         clock=handled.clock,

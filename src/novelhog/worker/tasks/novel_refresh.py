@@ -1,26 +1,31 @@
 """The worker half of `novel_refresh`: the network part of v1's refresh (v1 spec 6.2, tasks 5).
 
 `run` fetches the TOC and stores a missing cover (not once the heartbeat lost the claim), then
-hands the result to the repo handler as an outcome: `Done(SyncSucceeded)`; `Failed(error,
-SyncFailed)` for a site error, with the backed-off schedule; or `Retry` at
-`now + REFRESH_MIN_INTERVAL` for an infrastructure error, which keeps the interval. A
-`SiteUnreachable` that `Reachability` says has failed too often for the host counts as a site
-error.
+hands the result to the repo handler as an outcome: `Done(SyncSucceeded)`; `Retry` at
+`now + REFRESH_MIN_INTERVAL` when FlareSolverr is down (the interval is kept); `Retry` at the end
+of the pause when the failure paused the host (`domain.hosts`); else `Failed(error, SyncFailed)`
+with the backed-off schedule. A refresh has no chapter-style retries: its schedule backs off.
 """
 
 from datetime import timedelta
 from typing import Any, ClassVar
 
 from novelhog import log
+from novelhog.domain.hosts import FailureKind
 from novelhog.domain.refresh import jittered, next_interval
-from novelhog.domain.tasks import Done, Failed, Outcome, Retry, TaskKind
+from novelhog.domain.tasks import Done, Failed, Outcome, Retry, RetryCause, TaskKind
 from novelhog.repo.chapters import TocDiff
 from novelhog.repo.task_kinds.novel_refresh import NovelClaim, SyncFailed, SyncSucceeded
 from novelhog.repo.tasks import TaskRow
 from novelhog.scraper_adapter.adapter import TocResult
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
+from novelhog.scraper_adapter.errors import (
+    HostFailureError,
+    InfrastructureError,
+    SiteError,
+    SiteUnreachable,
+)
 from novelhog.storage import StaticStorage, cover_key
-from novelhog.worker.errors import summarize, unreachable_message
+from novelhog.worker.errors import log_host_paused, summarize, unreachable_message
 from novelhog.worker.refresh import CoverFetcher, TocAdapter
 from novelhog.worker.tasks.base import TaskContext
 
@@ -81,20 +86,24 @@ class NovelRefreshProcessor:
         now = ctx.clock()
         try:
             toc = _fetch_toc(ctx.adapter, claim)
-            ctx.reachability.succeeded(claim.host)
+            ctx.hosts.succeeded(claim.host)
             cover = None
             if claim.cover_key is None and (ctx.beat is None or not ctx.beat.lost):
                 cover = _store_cover(ctx.fetcher, ctx.storage, claim, toc.cover_url)
         except Exception as error:  # noqa: BLE001 - any other failure counts as a site error
             message = summarize(error)
-            if isinstance(error, SiteError):
-                ctx.reachability.succeeded(claim.host)  # the host answered
-            gave_up = isinstance(error, SiteUnreachable) and ctx.reachability.failed(claim.host)
-            if gave_up:
-                message = unreachable_message(error)
-            if isinstance(error, InfrastructureError) and not gave_up:
+            if isinstance(error, InfrastructureError):
                 logger.warning("refresh_infrastructure_error", error=message)
-                return Retry(now + timedelta(seconds=min_s), message)
+                return Retry(now + timedelta(seconds=min_s), message, RetryCause.INFRASTRUCTURE)
+            if isinstance(error, HostFailureError) and error.kind is not FailureKind.TRANSIENT:
+                host = ctx.hosts.failed(claim.host, error.kind, retry_after=error.retry_after)
+                if host.paused_until is not None:
+                    log_host_paused(logger, claim.host, error.kind, host)
+                    return Retry(host.paused_until, message, RetryCause.HOST_PAUSED)
+                if isinstance(error, SiteUnreachable):
+                    message = unreachable_message(error)
+            elif isinstance(error, SiteError) and not isinstance(error, HostFailureError):
+                ctx.hosts.succeeded(claim.host)  # the host answered
             logger.warning("refresh_failed", error=message, exc_info=True)
             interval = next_interval(
                 claim.refresh_interval, found_new=False, failed=True, min_s=min_s, max_s=max_s

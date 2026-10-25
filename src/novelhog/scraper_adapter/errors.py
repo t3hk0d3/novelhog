@@ -27,7 +27,7 @@ class HostFailureError(Exception):
         self.retry_after = retry_after
 
 
-class SiteUnreachable(HostFailureError, InfrastructureError):  # noqa: N818 - named by the spec
+class SiteUnreachable(HostFailureError):  # noqa: N818 - named by the spec
     """A direct request to the site was refused, failed DNS or timed out connecting."""
 
     kind = FailureKind.UNREACHABLE

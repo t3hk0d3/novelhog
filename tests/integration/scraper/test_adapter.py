@@ -453,8 +453,9 @@ class TestScraperAdapter__DirectHost:
 
 
 class TestScraperErrors__SiteUnreachable:
-    def test_site_unreachable__is_an_infrastructure_error(self) -> None:
-        assert issubclass(SiteUnreachable, InfrastructureError)
+    def test_site_unreachable__is_a_host_failure_not_an_infrastructure_error(self) -> None:
+        assert issubclass(SiteUnreachable, HostFailureError)
+        assert not issubclass(SiteUnreachable, InfrastructureError)
 
 
 class TestScraperAdapter__OnUnreachableFlaresolverr__ForAForcedHost:

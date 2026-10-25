@@ -28,7 +28,6 @@ from novelhog.repo.task_kinds.export_build import BuildResult
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
 from novelhog.worker.loop import Worker
-from novelhog.worker.reachability import Reachability
 from novelhog.worker.runner import Runner
 from novelhog.worker.tasks import default_processors
 from novelhog.worker.tasks.base import HeartbeatFactory, TaskContext
@@ -110,7 +109,7 @@ def ctx(repo: Repo, storage: HookedStorage, settings: Settings) -> TaskContext:
         chapter_store=ChapterStore(repo),
         settings=settings,
         stop=threading.Event(),
-        reachability=Reachability(),
+        hosts=repo.hosts,
         rng=random.Random(3),  # noqa: S311 - refresh jitter, not security
         heartbeat=runtime.Heartbeat,
         clock=repo.clock,

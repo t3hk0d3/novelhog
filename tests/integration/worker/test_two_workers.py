@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,10 @@ from novelhog.domain.chapters import ChapterState
 from novelhog.domain.exports import ExportState, Format
 from novelhog.domain.tasks import TaskKind, TaskState
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import tasks
+from novelhog.repo.schema import hosts, tasks
+from novelhog.repo.tasks import TaskRow
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
+from novelhog.scraper_adapter.errors import SiteThrottled
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker.loop import Worker
 from tests.conftest import FakeClock
@@ -211,6 +214,84 @@ class TestTwoWorkers__DrainingOneQueue:
         self, drained: str
     ) -> None:
         assert self.doubles == []
+
+
+class ThrottlingAdapter(OverlapAdapter):
+    """Answers the first `throttles` chapter fetches with 429 and `Retry-After: 60`.
+
+    Every attempt is recorded with the fake clock's time in `attempts`; a successful fetch also
+    lands in `fetched`.
+    """
+
+    def __init__(self, clock: FakeClock, throttles: int) -> None:
+        super().__init__()
+        self._clock = clock
+        self._throttles = throttles
+        self.attempts: list[tuple[str, datetime]] = []
+
+    def fetch_chapter(self, novel_id: str, host: str, toc_url: str, url: str) -> FetchedChapter:
+        with self._lock:
+            self.attempts.append((url, self._clock()))
+            throttle = self._throttles > 0
+            self._throttles -= 1
+        if throttle:
+            raise SiteThrottled("429", retry_after=60)
+        return super().fetch_chapter(novel_id, host, toc_url, url)
+
+
+def reach_after(repo: Repo) -> datetime | None:
+    with db.read(repo.engine) as conn:
+        value: datetime | None = conn.execute(
+            select(hosts.c.reach_after).where(hosts.c.host == HOST)
+        ).scalar_one()
+    return value
+
+
+class TestTwoWorkers__WhenTheHostThrottles:
+    def test_workers__pause_together_and_download_every_chapter_once_afterwards(
+        self, repo: Repo, other_repo: Repo, fast: Settings, tmp_path: Path, clock: FakeClock
+    ) -> None:
+        adapter = ThrottlingAdapter(clock, throttles=1)
+        awake = replace(fast, idle_sleep=0)  # idle workers must notice the fake clock moving on
+        repo.hosts.publish([HOST])
+        novel_id = repo.novels.create(URL, followed=True).id
+        workers = [
+            make_worker(repo, adapter, awake, "worker-a", tmp_path),
+            make_worker(other_repo, adapter, awake, "worker-b", tmp_path),
+        ]
+        assert workers[0].step() == "task"  # the first import
+        repo.chapters.patch(novel_id, ChapterState.PENDING, list(range(1, CHAPTERS + 1)))
+        start = clock()
+        paused_until = start + timedelta(seconds=60)
+        resumed = threading.Event()
+
+        def done() -> bool:
+            if not resumed.is_set():
+                pending = [t for t in tasks_of_novel(repo) if t.state is TaskState.QUEUED]
+                if len(pending) == CHAPTERS and all(t.run_after == paused_until for t in pending):
+                    attempts = len(adapter.attempts)
+                    time.sleep(0.2)  # both workers keep going; none may contact the host
+                    assert len(adapter.attempts) == attempts
+                    clock.advance(seconds=61)
+                    resumed.set()
+                return False
+            return downloaded(repo, novel_id)
+
+        run_both(workers, done)
+
+        assert resumed.is_set()
+        assert reach_after(repo) is not None
+        assert sorted(adapter.fetched) == sorted(adapter.urls)  # each chapter once
+        assert len(adapter.attempts) == CHAPTERS + 1  # plus the one that was throttled
+        assert all(when >= paused_until for _, when in adapter.attempts[1:])
+
+
+def tasks_of_novel(repo: Repo) -> list[Any]:
+    with db.read(repo.engine) as conn:
+        rows = conn.execute(
+            select(tasks).where(tasks.c.kind == TaskKind.CHAPTER_DOWNLOAD.value)
+        ).all()
+    return [TaskRow.from_row(row) for row in rows]
 
 
 class TestTwoWorkers__WhenARefreshIsQueuedDuringARunningSync:
