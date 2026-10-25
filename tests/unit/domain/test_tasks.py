@@ -17,6 +17,7 @@ from novelhog.domain.tasks import (
     Done,
     Failed,
     Retry,
+    RetryCause,
     Skip,
     Started,
     StartResult,
@@ -87,6 +88,12 @@ class TestOutcome:
         assert Started() == Started()
         assert Skip("gone") == Skip("gone")
         assert Done(1) != Done(2)
+
+    def test_retry__is_an_infrastructure_retry_by_default(self) -> None:
+        assert Retry(T, "e").cause is RetryCause.INFRASTRUCTURE
+
+    def test_retry__compares_its_cause(self) -> None:
+        assert Retry(T, "e", RetryCause.TRANSIENT) != Retry(T, "e", RetryCause.HOST_PAUSED)
 
     @pytest.mark.parametrize(
         "outcome", [Done(1), Failed("boom"), Retry(T, "e"), Started(), Skip("gone")]
