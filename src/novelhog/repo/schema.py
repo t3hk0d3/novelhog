@@ -41,6 +41,10 @@ hosts = Table(
     Column("host", Text, primary_key=True),
     Column("supported", Boolean, nullable=False),
     Column("updated_at", UTCDateTime, nullable=False),
+    Column("reach_after", UTCDateTime),  # not contacted before this (pause or throttle)
+    Column("failures", Integer, nullable=False, server_default="0"),  # consecutive failures
+    Column("failing_since", UTCDateTime),
+    Column("last_failure", Text),  # FailureKind of the latest failure
 )
 
 novels = Table(
@@ -198,6 +202,7 @@ tasks = Table(
     Column("started_at", UTCDateTime),
     Column("finished_at", UTCDateTime),
     Column("duration_ms", Integer),
+    Column("retries", Integer, nullable=False, server_default="0"),  # transient retries used
     _id_check("ck_tasks_id", "TK"),
     _claim_check("ck_tasks_claim"),
     CheckConstraint(

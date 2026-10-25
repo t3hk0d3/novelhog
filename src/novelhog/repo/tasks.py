@@ -105,6 +105,7 @@ class TaskRow:
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
+    retries: int = 0  # transient retries used; not part of the Task object
 
     @classmethod
     def from_row(cls, row: Row[Any]) -> TaskRow:
