@@ -285,10 +285,11 @@ class TestListTasks__WithSince:
     ) -> None:
         novel = _novel(repo)
         task = _enqueue(repo, novel, priority=300)
-        cursor = client.get("/api/v1/tasks").json()["next_since"]
-        _finish(repo, task, TaskState.DONE)
-        body = client.get("/api/v1/tasks", params={"since": cursor}).json()
-        assert _ids(body) == [task.id]
+        first = client.get("/api/v1/tasks").json()
+        _finish(repo, task, TaskState.DONE)  # no longer live: only change_seq > since returns it
+        body = client.get("/api/v1/tasks", params={"since": first["next_since"]}).json()
+        assert [(item["id"], item["state"]) for item in first["items"]] == [(task.id, "queued")]
+        assert [(item["id"], item["state"]) for item in body["items"]] == [(task.id, "done")]
         assert (
             client.get("/api/v1/tasks", params={"since": body["next_since"]}).json()["items"] == []
         )

@@ -1274,20 +1274,22 @@ class TestLockOrder:
 class TestListPollingWithoutGaps:
     """`Tasks.list(since=...)` against a writer that commits late (tasks spec section 7)."""
 
-    def test_list__a_long_transaction_that_commits_late_is_returned_by_the_next_poll(
+    def test_list__a_task_finished_by_a_transaction_that_commits_late_is_in_the_next_poll(
         self, repo: Repo, queue: TaskQueue, other_repo: Repo
     ) -> None:
         if repo.engine.dialect.name != "postgresql":
             pytest.skip("needs concurrent readers during an open write transaction (Postgres)")
+        task = running(repo, queue)
         with db.write(repo.engine) as conn:
             assert lock_novel(conn, NOVEL)
-            task = queue.enqueue(conn, REFRESH, NOVEL, NOVEL, priority=300, run_after=NOW)
+            assert queue.finish(conn, task, ME, TaskState.DONE)
             queue.stamp(conn)
             before = other_repo.tasks.list(since=None)  # the writer has not committed yet
+        # Once done, the task is no longer live: only `change_seq > since` can bring it back.
         after = other_repo.tasks.list(since=before.next_since)
 
-        assert before.items == []
-        assert [item.id for item in after.items] == [task.id]
+        assert [(item.id, item.state) for item in before.items] == [(task.id, TaskState.RUNNING)]
+        assert [(item.id, item.state) for item in after.items] == [(task.id, TaskState.DONE)]
         assert after.items[0].change_seq > before.next_since
 
 
