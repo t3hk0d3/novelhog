@@ -7,7 +7,7 @@ of the section 8 table and fixes each one in its own transaction; the worker run
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import delete, insert, select, update
@@ -104,6 +104,11 @@ def _task(  # noqa: PLR0913
     return task_id
 
 
+def _found(repairs: list[Repair]) -> list[tuple[str, str | None, str]]:
+    """The `(problem, task_id, entity_id)` of each repair."""
+    return [(repair.problem, repair.task_id, repair.entity_id) for repair in repairs]
+
+
 def _all_tasks(repo: Repo) -> list[TaskRow]:
     with db.read(repo.engine) as conn:
         return [TaskRow.from_row(row) for row in conn.execute(select(tasks).order_by(tasks.c.id))]
@@ -159,7 +164,7 @@ class TestRepair__ChapterPendingWithoutTask:
         repairs = repo.tasks.repair()
 
         task = live_task(repo, chapter_id)
-        assert repairs == [Repair("chapter_pending_without_task", task.id, chapter_id)]
+        assert _found(repairs) == [("chapter_pending_without_task", task.id, chapter_id)]
 
     def test_repair__appends_the_chapter_event_with_its_queued_at(
         self, repo: Repo, novel_id: str, clock: FakeClock
@@ -187,12 +192,14 @@ class TestRepair__ChapterPendingWithoutPosition:
         repairs = repo.tasks.repair()
 
         assert [task.state for task in tasks_of(repo, chapter_id)] == [TaskState.CANCELLED]
-        assert repairs == [Repair("chapter_pending_without_position", task_id, chapter_id)]
+        assert _found(repairs) == [("chapter_pending_without_position", task_id, chapter_id)]
 
     def test_repair__reports_no_task_when_none_was_queued(self, repo: Repo, novel_id: str) -> None:
         chapter_id = _chapter(repo, novel_id, 3, "pending", positioned=False)
 
-        assert repo.tasks.repair() == [Repair("chapter_pending_without_position", None, chapter_id)]
+        assert _found(repo.tasks.repair()) == [
+            ("chapter_pending_without_position", None, chapter_id)
+        ]
 
     def test_repair__appends_the_chapter_event(self, repo: Repo, novel_id: str) -> None:
         chapter_id = _chapter(repo, novel_id, 3, "pending", positioned=False)
@@ -216,7 +223,7 @@ class TestRepair__ChapterDownloadingWithoutTask:
         task = live_task(repo, chapter_id)
         assert _state(repo, chapters, chapter_id) == "pending"
         assert (task.priority, task.ordinal) == (PRIORITY_USER, 3)
-        assert repairs == [Repair("chapter_downloading_without_task", task.id, chapter_id)]
+        assert _found(repairs) == [("chapter_downloading_without_task", task.id, chapter_id)]
 
     def test_repair__moves_an_unpositioned_chapter_to_not_requested(
         self, repo: Repo, novel_id: str
@@ -227,7 +234,7 @@ class TestRepair__ChapterDownloadingWithoutTask:
 
         assert _state(repo, chapters, chapter_id) == "not_requested"
         assert tasks_of(repo, chapter_id) == []
-        assert repairs == [Repair("chapter_downloading_without_task", None, chapter_id)]
+        assert _found(repairs) == [("chapter_downloading_without_task", None, chapter_id)]
 
     def test_repair__appends_the_chapter_event(self, repo: Repo, novel_id: str) -> None:
         chapter_id = _chapter(repo, novel_id, 3, "downloading")
@@ -247,7 +254,7 @@ class TestRepair__ExportBuildableWithoutTask:
         task = live_task(repo, export_id)
         assert (task.kind, task.priority, task.emit_event) == (BUILD, PRIORITY_BUILD, True)
         assert task.run_after == repo.clock() - timedelta(minutes=5)  # the export's created_at
-        assert repairs == [Repair("export_buildable_without_task", task.id, export_id)]
+        assert _found(repairs) == [("export_buildable_without_task", task.id, export_id)]
 
     def test_repair__appends_the_build_task_event(self, repo: Repo, novel_id: str) -> None:
         chapter_id = _chapter(repo, novel_id, 1, "downloaded")
@@ -265,7 +272,7 @@ class TestRepair__ExportBuildableWithoutTask:
         chapter_id = _chapter(repo, novel_id, 1, "not_requested")
         export_id = _export(repo, novel_id, chapter_id, "waiting")
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert tasks_of(repo, export_id) == []
 
 
@@ -280,7 +287,7 @@ class TestRepair__ExportBuildingWithoutTask:
 
         task = live_task(repo, export_id)
         assert _state(repo, exports, export_id) == "waiting"
-        assert repairs == [Repair("export_building_without_task", task.id, export_id)]
+        assert _found(repairs) == [("export_building_without_task", task.id, export_id)]
 
     def test_repair__enqueues_no_build_when_the_export_is_not_buildable(
         self, repo: Repo, novel_id: str
@@ -292,7 +299,7 @@ class TestRepair__ExportBuildingWithoutTask:
 
         assert _state(repo, exports, export_id) == "waiting"
         assert tasks_of(repo, export_id) == []
-        assert repairs == [Repair("export_building_without_task", None, export_id)]
+        assert _found(repairs) == [("export_building_without_task", None, export_id)]
 
     def test_repair__appends_the_export_event(self, repo: Repo, novel_id: str) -> None:
         chapter_id = _chapter(repo, novel_id, 1, "not_requested")
@@ -316,7 +323,7 @@ class TestRepair__NovelWithoutRefresh:
         task = live_task(repo, novel_id)
         assert (task.kind, task.priority) == (REFRESH, PRIORITY_REFRESH)
         assert (task.run_after, task.emit_event) == (last + timedelta(seconds=7200), False)
-        assert repairs == [Repair("novel_without_refresh", task.id, novel_id)]
+        assert _found(repairs) == [("novel_without_refresh", task.id, novel_id)]
 
     def test_repair__enqueues_a_never_refreshed_novel_now_with_emit_event(
         self, repo: Repo, novel_id: str, clock: FakeClock
@@ -355,7 +362,7 @@ class TestRepair__QueuedTaskOfAFinishedOrGoneEntity:
         repairs = repo.tasks.repair()
 
         assert [task.state for task in tasks_of(repo, chapter_id)] == [TaskState.CANCELLED]
-        assert repairs == [Repair("queued_task_not_needed", task_id, chapter_id)]
+        assert _found(repairs) == [("queued_task_not_needed", task_id, chapter_id)]
 
     def test_repair__appends_the_event_of_the_finished_chapter(
         self, repo: Repo, novel_id: str
@@ -376,7 +383,7 @@ class TestRepair__QueuedTaskOfAFinishedOrGoneEntity:
         repairs = repo.tasks.repair()
 
         assert [task.state for task in tasks_of(repo, "CH000000000099")] == [TaskState.CANCELLED]
-        assert repairs == [Repair("queued_task_not_needed", task_id, "CH000000000099")]
+        assert _found(repairs) == [("queued_task_not_needed", task_id, "CH000000000099")]
 
     @pytest.mark.parametrize(
         ("state", "values"),
@@ -395,7 +402,7 @@ class TestRepair__QueuedTaskOfAFinishedOrGoneEntity:
         repairs = repo.tasks.repair()
 
         assert [task.state for task in tasks_of(repo, export_id)] == [TaskState.CANCELLED]
-        assert repairs == [Repair("queued_task_not_needed", task_id, export_id)]
+        assert _found(repairs) == [("queued_task_not_needed", task_id, export_id)]
 
     def test_repair__cancels_the_build_of_a_gone_export(self, repo: Repo, novel_id: str) -> None:
         task_id = _task(repo, BUILD, "EX000000000099", novel_id, TaskState.QUEUED)
@@ -403,7 +410,39 @@ class TestRepair__QueuedTaskOfAFinishedOrGoneEntity:
         repairs = repo.tasks.repair()
 
         assert [task.state for task in tasks_of(repo, "EX000000000099")] == [TaskState.CANCELLED]
-        assert repairs == [Repair("queued_task_not_needed", task_id, "EX000000000099")]
+        assert _found(repairs) == [("queued_task_not_needed", task_id, "EX000000000099")]
+
+
+class TestRepair__Report:
+    def test_repair__carries_the_kind_and_attempts_of_the_cancelled_task(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        chapter_id = _chapter(repo, novel_id, 1, "downloaded")
+        task_id = _task(repo, DOWNLOAD, chapter_id, novel_id, TaskState.QUEUED)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(tasks).where(tasks.c.id == task_id).values(attempts=2))
+
+        [repair] = repo.tasks.repair()
+
+        assert (repair.kind, repair.attempts) == (DOWNLOAD, 2)
+
+    def test_repair__carries_the_kind_and_no_attempts_without_a_task(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        _chapter(repo, novel_id, 3, "pending", positioned=False)
+
+        [repair] = repo.tasks.repair()
+
+        assert (repair.task_id, repair.kind, repair.attempts) == (None, DOWNLOAD, None)
+
+    def test_repair__carries_the_attempts_of_an_enqueued_task(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        _drop_tasks(repo, novel_id)
+
+        [repair] = repo.tasks.repair()
+
+        assert (repair.kind, repair.attempts) == (REFRESH, 0)
 
 
 class TestRepair__WhenTheConditionNoLongerHolds:
@@ -427,7 +466,7 @@ class TestRepair__WhenTheConditionNoLongerHolds:
         monkeypatch.setattr(handler, "problems", scan_then_dequeue)
         before = _clock_value(repo)
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert tasks_of(repo, chapter_id) == []
         assert _events_of(repo, chapter_id) == []
         assert _clock_value(repo) == before
@@ -438,7 +477,7 @@ class TestRepair__RunningTasks:
         _drop_tasks(repo, novel_id)
         task_id = _task(repo, REFRESH, novel_id, novel_id, TaskState.RUNNING)
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert [task.id for task in tasks_of(repo, novel_id)] == [task_id]
 
     def test_repair__does_not_reset_a_building_export_with_a_valid_claim(
@@ -448,7 +487,7 @@ class TestRepair__RunningTasks:
         export_id = _export(repo, novel_id, chapter_id, "building")
         _task(repo, BUILD, export_id, novel_id, TaskState.RUNNING)
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert _state(repo, exports, export_id) == "building"
 
     @pytest.mark.parametrize("entity", ["downloaded", "gone"])
@@ -462,7 +501,7 @@ class TestRepair__RunningTasks:
         )
         task_id = _task(repo, DOWNLOAD, chapter_id, novel_id, TaskState.RUNNING)
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert [(task.id, task.state) for task in tasks_of(repo, chapter_id)] == [
             (task_id, TaskState.RUNNING)
         ]
@@ -473,7 +512,7 @@ class TestRepair__RunningTasks:
         chapter_id = _chapter(repo, novel_id, 1, "downloading", positioned=False)
         _task(repo, DOWNLOAD, chapter_id, novel_id, TaskState.RUNNING)
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert _state(repo, chapters, chapter_id) == "downloading"
 
 
@@ -487,7 +526,7 @@ class TestRepair__OnAConsistentDatabase:
         repo.exports.create(novel_id, 1, 1, Format.EPUB)  # buildable: its build is queued
         before = (_clock_value(repo), _all_tasks(repo))
 
-        assert repo.tasks.repair() == []
+        assert _found(repo.tasks.repair()) == []
         assert (_clock_value(repo), _all_tasks(repo)) == before
 
 
@@ -556,6 +595,25 @@ class TestStep__Repair:
         self, repo: Repo, worker: Worker, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(repo.tasks, "repair", _Ticks(RuntimeError("boom")))
+        ran: list[bool] = []
+
+        def runner_step() -> bool:
+            ran.append(True)
+            return False
+
+        monkeypatch.setattr(worker._runner, "step", runner_step)  # noqa: SLF001
+
+        with capture_logs() as logs:
+            assert worker.step() == "idle"
+
+        assert "task_repair_failed" in [entry["event"] for entry in logs]
+        assert ran == [True]
+
+    def test_step__a_failure_while_logging_repairs_is_logged_and_the_step_continues(
+        self, repo: Repo, worker: Worker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        malformed = Repair("novel_without_refresh", None, "NV000000000001", cast(Any, None), None)
+        monkeypatch.setattr(repo.tasks, "repair", _Ticks([malformed]))
         ran: list[bool] = []
 
         def runner_step() -> bool:

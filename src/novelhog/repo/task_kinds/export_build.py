@@ -171,8 +171,9 @@ class ExportBuildHandler:
             ).first()
             if holds is None:
                 return None
+            unneeded = task_queue.queued(conn, self.kind, export_id)
             task_queue.cancel(conn, self.kind, export_id, now=now)
-            return Repair(problem.name, problem.task_id, export_id)
+            return Repair.of(problem, self.kind, unneeded)
         holds = conn.execute(
             select(exports.c.id).where(exports.c.id == export_id, _export_checks()[problem.name])
         ).first()
@@ -183,7 +184,7 @@ class ExportBuildHandler:
         queued = task_queue.queued(conn, self.kind, export_id)
         if reset:
             self._emit(conn, problem.novel_id, export_id, now)
-        return Repair(problem.name, None if queued is None else queued.id, export_id)
+        return Repair.of(problem, self.kind, queued)
 
     def _emit(self, conn: Connection, novel_id: str, export_id: str, now: datetime) -> None:
         """Append the export's `EX` event; the snapshot is built after the clock is taken."""

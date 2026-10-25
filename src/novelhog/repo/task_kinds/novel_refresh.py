@@ -197,7 +197,7 @@ class NovelRefreshHandler:
             emit_event=last is None,
         )
         self._emit(conn, novel_id, now)
-        return Repair(problem.name, task.id, novel_id)
+        return Repair.of(problem, self.kind, task)
 
     def _result(
         self, conn: Connection, row: Any, outcome: Done[Any] | Failed[Any], now: datetime

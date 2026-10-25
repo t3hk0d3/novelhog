@@ -26,11 +26,9 @@ from typing import Literal
 from novelhog import log
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
-from novelhog.domain.errors import NotFound
-from novelhog.domain.tasks import TASK_REPAIR_INTERVAL, TaskKind
+from novelhog.domain.tasks import TASK_REPAIR_INTERVAL
 from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
-from novelhog.repo.tasks import Repair
 from novelhog.storage import StaticStorage
 from novelhog.worker import maintenance, refresh, runtime
 from novelhog.worker.reachability import Reachability
@@ -183,7 +181,8 @@ class Worker:
     def _repair(self) -> None:
         """Repair tasks at most once per `TASK_REPAIR_INTERVAL`; a failure is logged.
 
-        Logs `task_repaired` with the problem for each fix (tasks spec section 8).
+        Logs `task_repaired` with the problem for each fix (tasks spec section 8). Nothing here,
+        logging included, stops the step: a failure is logged as `task_repair_failed`.
         """
         now = self._clock()
         last = self._last_repair
@@ -192,29 +191,19 @@ class Worker:
         self._last_repair = now  # a failing run is retried next interval, not every pass
         logger = log.get(worker_id=self._settings.worker_id)
         try:
-            repairs = self._repo.tasks.repair()
+            for repair in self._repo.tasks.repair():
+                logger.warning(
+                    "task_repaired",
+                    problem=repair.problem,
+                    task_id=repair.task_id,
+                    kind=repair.kind.value,
+                    entity_id=repair.entity_id,
+                    attempts=repair.attempts,
+                )
         except Exception as error:  # noqa: BLE001 - repair must not stop the loop
             logger.error(
                 "task_repair_failed", error=f"{type(error).__name__}: {error}", exc_info=True
             )
-            return
-        for repair in repairs:
-            logger.warning("task_repaired", problem=repair.problem, **self._repaired(repair))
-
-    def _repaired(self, repair: Repair) -> dict[str, object]:
-        """The task fields of a `task_repaired` line; `attempts` is None without a task."""
-        attempts: int | None = None
-        if repair.task_id is not None:
-            try:
-                attempts = self._repo.tasks.get(repair.task_id).attempts
-            except NotFound:  # pruned or deleted with its novel since the fix
-                pass
-        return {
-            "task_id": repair.task_id,
-            "kind": TaskKind.for_entity(repair.entity_id).value,
-            "entity_id": repair.entity_id,
-            "attempts": attempts,
-        }
 
     def _maintain(self) -> None:
         """Run maintenance at most once per `MAINTENANCE_INTERVAL`; a failure is logged."""

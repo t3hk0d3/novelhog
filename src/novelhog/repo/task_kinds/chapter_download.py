@@ -243,11 +243,12 @@ class ChapterDownloadHandler:
             ).first()
             if holds is None:
                 return None
+            unneeded = task_queue.queued(conn, self.kind, chapter_id)
             task_queue.cancel(conn, self.kind, chapter_id, now=now)
             chapter = conn.execute(select(chapters.c.id).where(chapters.c.id == chapter_id)).first()
             if chapter is not None:
                 self._emit(conn, problem.novel_id, chapter_id, now)
-            return Repair(problem.name, problem.task_id, chapter_id)
+            return Repair.of(problem, self.kind, unneeded)
         row = conn.execute(
             select(chapters.c.position).where(
                 chapters.c.id == chapter_id, _chapter_checks()[problem.name]
@@ -255,8 +256,7 @@ class ChapterDownloadHandler:
         ).first()
         if row is None:
             return None
-        queued = task_queue.queued(conn, self.kind, chapter_id)
-        task_id = None if queued is None else queued.id
+        task = task_queue.queued(conn, self.kind, chapter_id)
         if problem.name == PENDING_WITHOUT_POSITION:
             conn.execute(
                 update(chapters)
@@ -270,7 +270,7 @@ class ChapterDownloadHandler:
         else:  # downloading without a running task: back in line, as recovery would
             requeue = self._reset(conn, chapter_id, now) is ChapterState.PENDING
         if requeue:
-            task_id = task_queue.enqueue(
+            task = task_queue.enqueue(
                 conn,
                 self.kind,
                 chapter_id,
@@ -279,9 +279,9 @@ class ChapterDownloadHandler:
                 ordinal=row.position,
                 run_after=now,
                 now=now,
-            ).id
+            )
         self._emit(conn, problem.novel_id, chapter_id, now)
-        return Repair(problem.name, task_id, chapter_id)
+        return Repair.of(problem, self.kind, task)
 
     def _emit(
         self,

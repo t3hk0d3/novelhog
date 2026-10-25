@@ -431,11 +431,28 @@ class Problem:
 
 @dataclass(frozen=True)
 class Repair:
-    """One applied repair: the problem's name, the task enqueued or cancelled, and the entity."""
+    """One applied repair: the problem's name, the task enqueued or cancelled, and the entity.
+
+    `kind` and `attempts` are read in the fix's transaction, so the worker logs `task_repaired`
+    without another read; `task_id` and `attempts` are None when no task was involved.
+    """
 
     problem: str
     task_id: str | None
     entity_id: str
+    kind: TaskKind
+    attempts: int | None
+
+    @classmethod
+    def of(cls, problem: Problem, kind: TaskKind, task: TaskRow | None) -> Repair:
+        """The repair of `problem` by the fix that enqueued or cancelled `task` (or none)."""
+        return cls(
+            problem=problem.name,
+            task_id=None if task is None else task.id,
+            entity_id=problem.entity_id,
+            kind=kind,
+            attempts=None if task is None else task.attempts,
+        )
 
 
 class TaskQueue:
