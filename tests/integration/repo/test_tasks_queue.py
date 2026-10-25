@@ -10,7 +10,16 @@ import pytest
 from sqlalchemy import Connection, delete, event, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from novelhog.domain.tasks import Done, Failed, Retry, Skip, StartResult, TaskKind, TaskState
+from novelhog.domain.tasks import (
+    Done,
+    Failed,
+    Retry,
+    RetryCause,
+    Skip,
+    StartResult,
+    TaskKind,
+    TaskState,
+)
 from novelhog.repo import Busy, Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo.novels import lock_novel
@@ -715,6 +724,31 @@ class TestRetry:
         task = running(repo, queue)
 
         assert retry(repo, queue, task, run_after=NOW, error="Timeout: slow") is True
+
+
+class TestRetry__Counting:
+    def test_retry__a_counted_retry_uses_one_of_the_tasks_retries(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        task = running(repo, queue)
+
+        _in_task_transaction(
+            repo,
+            queue,
+            NOVEL,
+            lambda conn: queue.retry(conn, task, ME, run_after=NOW, error="e", counts=True),
+        )
+
+        assert get(repo, task.id).retries == 1
+
+    def test_retry__an_uncounted_retry_leaves_retries_alone(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        task = running(repo, queue)
+
+        retry(repo, queue, task, run_after=NOW, error="e")
+
+        assert get(repo, task.id).retries == 0
 
 
 class TestRetry__WhenAnotherQueuedTaskAppearedMeanwhile:
@@ -1687,6 +1721,69 @@ class TestTasksFinish__WhenTheNovelIsGone:
             conn.execute(delete(novels).where(novels.c.id == NOVEL))
 
         assert handled.tasks.finish(task, ME, Done("ok")) is None
+
+
+class TestTasksReschedule:
+    def test_reschedule__puts_the_claimed_task_back_at_run_after_without_an_attempt(
+        self, handled: Repo, queue: TaskQueue
+    ) -> None:
+        task = claimed_task(handled, queue)
+        later = NOW + timedelta(minutes=5)
+
+        assert handled.tasks.reschedule(task, ME, later) is True
+
+        row = get(handled, task.id)
+        assert (row.state, row.run_after, row.claimed_by, row.claimed_until) == (
+            TaskState.QUEUED,
+            later,
+            None,
+            None,
+        )
+        assert row.attempts == 0
+
+    def test_reschedule__calls_the_handlers_rescheduled_hook_in_the_transaction(
+        self, handled: Repo, queue: TaskQueue, handler: RecordingHandler
+    ) -> None:
+        task = claimed_task(handled, queue)
+
+        handled.tasks.reschedule(task, ME, NOW + timedelta(minutes=5))
+
+        assert handler.calls == [("rescheduled", task.id, TaskState.QUEUED)]
+
+    def test_reschedule__moves_the_change_cursor(self, handled: Repo, queue: TaskQueue) -> None:
+        task = claimed_task(handled, queue)
+        before = get(handled, task.id).change_seq
+
+        handled.tasks.reschedule(task, ME, NOW + timedelta(minutes=5))
+
+        assert get(handled, task.id).change_seq > before
+
+    def test_reschedule__returns_false_and_changes_nothing_when_the_claim_was_lost(
+        self, handled: Repo, queue: TaskQueue, clock: FakeClock, handler: RecordingHandler
+    ) -> None:
+        task = claimed_task(handled, queue)
+        lapse(clock)
+        before = get(handled, task.id)
+
+        assert handled.tasks.reschedule(task, ME, NOW + timedelta(hours=1)) is False
+
+        assert get(handled, task.id) == before
+        assert handler.calls == []
+
+
+class TestTasksFinish__RetryCauses:
+    @pytest.mark.parametrize(
+        ("cause", "retries"),
+        [(RetryCause.TRANSIENT, 1), (RetryCause.HOST_PAUSED, 0), (RetryCause.INFRASTRUCTURE, 0)],
+    )
+    def test_finish__only_a_transient_retry_uses_a_retry(
+        self, handled: Repo, queue: TaskQueue, cause: RetryCause, retries: int
+    ) -> None:
+        task = started_task(handled, queue)
+
+        handled.tasks.finish(task, ME, Retry(NOW, "e", cause))
+
+        assert get(handled, task.id).retries == retries
 
 
 class TestTasksRecover:

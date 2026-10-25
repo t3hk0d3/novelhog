@@ -185,6 +185,9 @@ class ChapterDownloadHandler:
         """The lapsed download went back to the queue: its chapter goes back in line."""
         self._back_in_line(conn, task, now)
 
+    def rescheduled(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+        """Nothing changes for the chapter: it stays `pending` and `queued_at` is the task's."""
+
     def _back_in_line(self, conn: Connection, task: TaskRow, now: datetime) -> ChapterState | None:
         """Undo a started download: `pending`, keeping its place in line through the task.
 

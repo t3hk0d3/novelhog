@@ -169,6 +169,10 @@ class NovelRefreshHandler:
         """The lapsed refresh went back to the queue: the `NV` event shows `syncing` off."""
         self._emit(conn, task.entity_id, now)
 
+    def rescheduled(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+        """The refresh waits for its host: the `NV` event shows the new `next_refresh_at`."""
+        self._emit(conn, task.entity_id, now)
+
     def problems(self, conn: Connection) -> list[Problem]:
         """The novels without a live refresh task."""
         rows = conn.execute(
