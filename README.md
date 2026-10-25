@@ -134,6 +134,10 @@ docker compose up -d --build
 `NOVELHOG_BATCH_SIZE` is removed. If it is still set, it is ignored and the worker logs `config_ignored` at
 startup.
 
+A site that throttles, blocks or stops answering is paused for a while (up to an hour, growing with each failure)
+instead of failing chapters; its work waits and resumes on its own. `GET /api/v1/hosts` shows a paused host's
+`reach_after`.
+
 `VACUUM` is a manual operation if the database file has grown after large deletions. On SQLite, stop the worker
 while it runs:
 
