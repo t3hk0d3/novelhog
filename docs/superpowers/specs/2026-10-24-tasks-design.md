@@ -1,6 +1,6 @@
 # novelhog — Tasks Design Spec
 
-Status: draft, 2026-10-24. Branch `feat/tasks`, on top of `feat/novelhog-v1`.
+Status: implemented, 2026-10-25. Branch `feat/tasks`, on top of `feat/novelhog-v1`.
 
 Builds on the v1 spec `docs/superpowers/specs/2026-10-18-novelhog-design.md`,
 referred to below as **v1**. v1 stays binding for everything this spec does not
@@ -227,6 +227,11 @@ Every write that changes a field of the Task object (§7) sets the row's
 - An inserted task row gets `change_seq = 0` as a placeholder and its real
   value at the end of the same transaction; the placeholder is never visible
   to other transactions.
+- The task writes record the rows they touched in the transaction, and
+  `TaskQueue.stamp`, called last, writes the cursor for them. `db.write` rolls
+  back a transaction that touched a task row after its last `stamp`
+  (`UnstampedTaskWriteError`), so a writer that forgets `stamp` cannot commit a
+  missing or stale `change_seq`.
 - A `TK` event's payload is built inside `append`, after its seq is taken, so
   it carries the `change_seq` that the row ends up with.
 - The clock row stays locked until commit, so on Postgres task changes commit
@@ -243,9 +248,11 @@ Every write that changes a field of the Task object (§7) sets the row's
 
 ### Operations
 
-All of these are methods on `TaskQueue`. Each method that takes `conn` writes
-inside the caller's transaction, which already holds `lock_novel`. The others
-are their own transaction. "Fenced" means the write includes the "owned by me"
+All of these are methods on `TaskQueue`, except `get` and `list`, the reads of
+the public `Tasks` (`repo.tasks`). Each method that takes `conn` writes inside
+the caller's transaction, which already holds `lock_novel`, and the caller ends
+it with `stamp(conn)` (the change cursor, above). The others are their own
+transaction. "Fenced" means the write includes the "owned by me"
 condition (v1 §4) and returns `False` when it matched no row.
 
 | Method | Effect |
@@ -255,14 +262,15 @@ condition (v1 §4) and returns `False` when it matched no row.
 | `delete_for_novel(conn, novel_id)` | Deletes every task of the novel, in `id` order (`DELETE /novels`, v1 §5.3). Writes no task events. |
 | `claim(worker_id, ttl) -> TaskRow \| None` | One compare-and-set statement through `repo/claims.py` (v1 §4) with the eligibility of "Ordering". The outer `WHERE` repeats `state = 'queued' AND run_after <= :now` besides "free or expired", so a task cancelled meanwhile is never claimed; `repo/claims.py` gains this option. The task stays `queued`. Writes no events. Exempt from the lock order, like v1's batch claim. |
 | `start(conn, task, worker_id) -> StartResult` | Queued and owned, and no running task of the same `(kind, entity_id)` → `running`, `attempts + 1`, `started_at = now`; `error` is kept. Returns `StartResult.OK`; `Cancelled` (the task was cancelled after the claim); `Deferred` (a sibling is running: the claim is released, the task stays queued); or `Lost` (claim lapsed or row gone). |
-| `finish(conn, task, worker_id, outcome) -> bool` | Fenced: running and owned → `done` (`error` cleared), `failed` (with `error`) or `skipped`, with `finished_at` and `duration_ms` set and the claim cleared. |
-| `retry(conn, task, worker_id, *, run_after, error) -> bool` | Fenced: running and owned → the same row back to `queued`, claim cleared, `run_after` and `error` set, `duration_ms` set for the run just ended, `finished_at` left NULL. If another task was queued for the same entity meanwhile, this row merges into it (enqueue rules) and becomes `cancelled`. |
+| `finish(conn, task, worker_id, state, error=None) -> bool` | Fenced: running and owned → `state`: `done` (`error` cleared), `failed` (`error` required) or `skipped` (`error` stored if given, else kept), with `finished_at` and `duration_ms` set and the claim cleared. `Tasks.finish` maps the processor's `Outcome` to `state` and `error`. |
+| `retry(conn, task, worker_id, *, run_after, error) -> bool` | Fenced: running and owned → the same row back to `queued`, claim cleared, `run_after` and `error` set, `duration_ms` set for the run just ended, `finished_at` left NULL. If another task was queued for the same entity meanwhile, this row merges into it (enqueue rules; the successor also takes `error`) and becomes `cancelled`. |
 | `release(task, worker_id) -> bool` | Fenced: queued, claimed by me → claim cleared. Used on stop and on `Deferred`. |
 | `renew(task, worker_id, ttl) -> bool` | Heartbeat (v1 §4, unchanged). |
 | `lapsed(now) -> list[TaskRow]` | Tasks whose claim lapsed (recovery, §8). |
 | `prune(before)` | Deletes finished tasks with `finished_at < before`, in `id` order, in batches of 500. |
-| `get(task_id) -> TaskRow \| None` | One task by ID (API, §7). |
-| `list(*, novel_id=None, entity_id=None, kinds=(), states=(), changed_after=None, offset=None, limit=None) -> TaskPage` | Matching tasks in claim order, the total count and `next_since`; with `changed_after`, every live task plus tasks with `change_seq > changed_after`, unpaged (API, §7). |
+| `stamp(conn)` | Writes the `TK` events and the change cursor of the rows this transaction touched; called last (above). |
+| `Tasks.get(task_id) -> TaskView` | One task by ID; `NotFound` for an unknown, malformed or pruned ID (API, §7). |
+| `Tasks.list(*, novel_id=None, entity_id=None, kinds=(), states=(), since=None, offset=0, limit=50) -> TaskPage` | Matching tasks in claim order, the total count and `next_since`; with `since`, every live task plus tasks with `change_seq > since`, unpaged (API, §7). |
 
 The caller of a fenced method that returned `False` throws its result away and
 logs it, as in v1.
@@ -293,12 +301,15 @@ styleguide: no public `repo` method takes a `Connection`) and `repo` must not
 import `worker` (import contract `repo-is-standalone`):
 
 ```
-class TaskHandler(Protocol):                        # repo/task_kinds/, transactional half
+class TaskHandler[W](Protocol):                     # repo/task_kinds/, transactional half
     kind: ClassVar[TaskKind]
-    def begin(self, conn, task) -> Begin            # inside start's transaction
-    def complete(self, conn, task, outcome) -> object # inside finish's or retry's transaction;
-                                                      # returns a report for the worker to log (repo never logs)
-    def recover(self, conn, task) -> None           # inside recovery's transaction (§8)
+    def begin(self, conn, task, now) -> Begin       # inside start's transaction
+    def work(self, conn, task) -> W                 # inside start's transaction, after Started
+    def complete(self, conn, task, outcome, now) -> object  # inside finish's or retry's transaction;
+                                                    # returns a report for the worker to log (repo never logs)
+    def recover(self, conn, task, now) -> None      # inside recovery's transaction (§8)
+    def problems(self, conn) -> list[Problem]       # repair scan, in a plain read (§8)
+    def fix(self, conn, problem, now) -> Repair | None  # one repair, in its own transaction (§8)
 
 class TaskProcessor(Protocol):                      # worker/tasks/, network half
     kind: ClassVar[TaskKind]
@@ -310,7 +321,7 @@ class TaskProcessor(Protocol):                      # worker/tasks/, network hal
 The public `repo.tasks.start(task, worker_id)` runs `TaskQueue.start` and the
 handler's `begin` in one transaction and returns the start result together with
 the kind's work item (v1's `NovelClaim`, `ChapterClaim` or `ExportClaim`, read
-in that transaction). `repo.tasks.finish(task, worker_id, outcome)` runs
+by `work` in that transaction). `repo.tasks.finish(task, worker_id, outcome)` runs
 `finish` or `retry` and the handler's `complete` in one transaction. The
 processor's `run` gets the work item. Below, "processor" means both halves.
 
@@ -549,13 +560,17 @@ GET /api/v1/tasks/{task_id}
     `EX` event; refresh → an `NV` event (`syncing` turns off);
   - if a queued task for the same entity already exists, the recovered one
     merges into it and becomes `cancelled`.
-- **Retention:** maintenance deletes finished tasks whose `finished_at` is older
-  than `TASK_RETENTION` (7 d).
+- **Retention:** maintenance (`worker/maintenance.py`, through
+  `repo.tasks.prune`) deletes finished tasks whose `finished_at` is older than
+  `TASK_RETENTION` (7 d).
 - **Repair** runs at most every `TASK_REPAIR_INTERVAL` (1 h) from the loop,
   whether or not the worker is idle, so a backlog cannot postpone it. It scans
   for the §2 pairs that do not hold. Each fix runs in its own transaction, takes
   `lock_novel`, **re-checks its condition** there and does nothing if it no
-  longer holds; a fix is logged as `task_repaired`.
+  longer holds; a fix is logged as `task_repaired`. The scan and the fixes
+  are `repo.tasks.repair` (each handler's `problems` and `fix`); the loop's
+  `_repair` (`worker/loop.py`) schedules it and logs each returned `Repair`
+  with its kind and attempts.
 
   | Problem | Fix |
   |---|---|
@@ -609,23 +624,26 @@ mode with foreign keys off). Stop the workers before upgrading.
 
 | Path | Change |
 |---|---|
-| `repo/schema.py`, `repo/migrations/` | `tasks` table, column drops (§3, §9) |
-| `repo/tasks.py` | new: `TaskQueue` (§4), internal; public `Tasks` (`repo.tasks`) composing start, finish, recovery, repair and the read API |
-| `repo/task_kinds/{base,novel_refresh,chapter_download,export_build}.py` | new: `TaskHandler` protocol and the three handlers (§5); they take over the transactional parts of v1's `finish_sync`, `work.start/complete/fail/requeue` and `exports._started/finish/fail` |
-| `domain/tasks.py` | new: `TaskKind`, `TaskState`, priorities, `Begin`, `Outcome` |
-| `repo/claims.py` | claim's outer `WHERE` can repeat an eligibility condition (§4 `claim`) |
+| `repo/schema.py`, `repo/migrations/versions/0002_tasks.py` | `tasks` table, column drops (§3, §9) |
+| `repo/tasks.py` | new: `TaskQueue` (§4), internal; public `Tasks` (`repo.tasks`) composing start, finish, recovery, repair (`Tasks.repair`), retention (`Tasks.prune`) and the read API |
+| `repo/task_kinds/{base,novel_refresh,chapter_download,export_build}.py`, `repo/task_kinds/__init__.py` | new: `TaskHandler` protocol, the three handlers (§5) and their registry (`default_handlers`); they take over the transactional parts of v1's `finish_sync`, `work.start/complete/fail/requeue` and `exports._started/finish/fail`, and hold each kind's repair checks (§8) |
+| `domain/tasks.py` | new: `TaskKind`, `TaskState`, priorities, `TASK_RETENTION`, `TASK_REPAIR_INTERVAL`, `Begin`, `Outcome` |
+| `repo/claims.py` | claim's outer `WHERE` can repeat an eligibility condition (§4 `claim`); `CLAIMABLE` is `consumers` and `tasks` |
+| `repo/db.py` | per-transaction scratch (`transaction_info`) for the change cursor; `write` refuses a task write without `stamp` (§4) |
 | `repo/work.py` | loses `claim_batch` and chapter/novel/export recovery; keeps consumer recovery |
 | `repo/chapters.py`, `novels.py`, `exports.py` | entity transitions call `TaskQueue` in the same transaction; derived fields via join; build enqueueing (§5.1) |
-| `repo/events.py` | `TK → task` event kind; change cursor helper; `replay_status` accepts a seq without a row (§4) |
-| `domain/payloads.py` | `TaskPayload`; `NovelPayload`/`ChapterPayload` read derived fields |
+| `repo/events.py` | `TK → task` event kind; change cursor helpers (`take_clock`, `last_seq`); `replay_status` accepts a seq without a row (§4) |
+| `domain/payloads.py` | `TaskView`; `NovelView`/`ChapterView` read derived fields |
 | `api/routes_tasks.py`, `api/schemas.py` | new: the two read-only routes and the `Task` schema (§7) |
-| `api/routes_events.py` | streams `task` events |
-| `notifications/rules.py`, `notifications/dispatcher.py` | skip `TK` events |
-| `web/src/api/events.ts` | `task` stays out of `EVENT_NAMES`; the event type documents it |
-| `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py` | new: `TaskProcessor` protocol and the three processors' `run`; they take over the network parts of `worker/refresh.py`, `downloads.py`, `builds.py` |
-| `worker/runner.py` | new: `run_task`, processor registry, per-host politeness |
-| `worker/loop.py` | stages 4–6 replaced by the runner; repair on its own interval (§6) |
-| `worker/maintenance.py` | retention and repair (§8) |
+| `api/routes_events.py` | unchanged: it streams every event kind, `task` included |
+| `notifications/dispatcher.py` | skips `TK` events; `notifications/rules.py` is unchanged |
+| `web/src/api/events.ts` | `task` stays out of `EVENT_NAMES`; the `TaskEvent` type documents it |
+| `worker/tasks/{base,novel_refresh,chapter_download,export_build}.py`, `worker/tasks/__init__.py` | new: `TaskProcessor` protocol, the three processors' `run` and their registry (`default_processors`); they take over the network parts of v1's `worker/refresh.py`, `downloads.py` and `builds.py` |
+| `worker/downloads.py` | removed (into `worker/tasks/chapter_download.py`) |
+| `worker/refresh.py`, `worker/builds.py` | keep host publishing and the TOC adapter protocols, and the book input for a build |
+| `worker/runner.py` | new: `Runner` (claim, start, run, finish one task), per-host politeness |
+| `worker/loop.py` | stages 4–6 replaced by the runner; `_repair` on its own interval (§6, §8) |
+| `worker/maintenance.py` | prunes finished tasks (retention, §8) |
 | `config.py` | drops `batch_size`, logs `config_ignored` |
 
 ## 11. Testing
@@ -676,6 +694,7 @@ TaskQueue
           cleared; returns True
         When another queued task for the entity appeared meanwhile
             - merges into it and cancels the retried row
+            - the successor takes the retry's error
         When the claim was lost
             - returns False
     cancel
@@ -689,6 +708,7 @@ TaskQueue
         - change_seq is the row's own TK event seq, else the transaction's last event seq
         - a TK event payload's change_seq equals the row's change_seq after commit
         - change_seq order equals commit order on Postgres (two concurrent writers)
+        - db.write rolls back a task write not followed by stamp (UnstampedTaskWriteError)
         - a transaction without events takes one clock value of its own
         - an inserted row never shows change_seq 0 to another transaction
         - claim, release and renew do not change it
