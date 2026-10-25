@@ -751,6 +751,29 @@ class TestRetry__WhenAnotherQueuedTaskAppearedMeanwhile:
         )
         assert row.started_at == task.started_at
 
+    def test_retry__copies_the_error_onto_the_successor(
+        self, repo: Repo, queue: TaskQueue, clock: FakeClock
+    ) -> None:
+        task = running(repo, queue)
+        successor = enqueue(repo, queue)
+        clock.advance(seconds=2)
+
+        retry(repo, queue, task, run_after=NOW + timedelta(hours=1), error="Timeout: slow")
+
+        row = get(repo, successor.id)
+        assert (row.error, row.updated_at) == ("Timeout: slow", clock.current)
+        assert row.run_after == successor.run_after
+
+    def test_retry__stamps_the_successor_whose_error_changed(
+        self, repo: Repo, queue: TaskQueue
+    ) -> None:
+        task = running(repo, queue)
+        successor = get(repo, enqueue(repo, queue).id)
+
+        retry(repo, queue, task, run_after=NOW + timedelta(hours=1), error="Timeout: slow")
+
+        assert get(repo, successor.id).change_seq > successor.change_seq
+
 
 class TestRetry__WhenTheClaimWasLost:
     def test_retry__returns_false(self, repo: Repo, queue: TaskQueue, clock: FakeClock) -> None:

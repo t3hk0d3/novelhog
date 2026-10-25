@@ -328,19 +328,29 @@ def _merge(
     run_after: datetime,
     emit_event: bool,
     now: datetime,
+    error: str | None = None,
 ) -> TaskRow:
-    """Merge an enqueue into the queued task `current`; only a new `run_after` is visible."""
+    """Merge an enqueue into the queued task `current`.
+
+    Only a new `run_after`, or an `error` (a merging retry's) other than the task's, is visible.
+    """
     values: dict[str, object] = {
         "priority": max(current.priority, priority),
         "emit_event": current.emit_event or emit_event,
     }
-    moved = run_after < current.run_after
-    if moved:
-        values |= {"run_after": run_after, "updated_at": now}
+    visible = False
+    if run_after < current.run_after:
+        values["run_after"] = run_after
+        visible = True
+    if error is not None and error != current.error:
+        values["error"] = error
+        visible = True
+    if visible:
+        values["updated_at"] = now
     row = conn.execute(
         update(tasks).where(tasks.c.id == current.id).values(values).returning(*tasks.c)
     ).one()
-    if moved:
+    if visible:
         _touch(conn, current.id)
     return TaskRow.from_row(row)
 
@@ -621,8 +631,8 @@ class TaskQueue:
         """Fenced: put the running task back in the queue at `run_after`; False if not owned.
 
         The same row returns to `queued` with `error` and the run's `duration_ms`. If another task
-        was queued for the entity meanwhile, the row merges into it (enqueue rules) and becomes
-        `cancelled` instead.
+        was queued for the entity meanwhile, the row merges into it (enqueue rules, and the
+        successor takes `error`) and becomes `cancelled` instead.
         """
         now = self._clock()
         current = self._owned_running(conn, task.id, worker_id, now)
@@ -649,6 +659,7 @@ class TaskQueue:
                 run_after=run_after,
                 emit_event=current.emit_event,
                 now=now,
+                error=error,
             )
         return True
 
