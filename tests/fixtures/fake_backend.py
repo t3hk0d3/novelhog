@@ -35,6 +35,7 @@ TITLE = "The Fake Chronicle"
 CHAPTER_COUNT = 5
 FAILING_CHAPTER = 2
 FAILURE_MESSAGE = "chapter 2 is unreadable"
+IMAGE_CHAPTER = 5  # carries two images and a long unbroken word (the reader image e2e)
 COVER_URL = f"https://{HOST}/cover.png"
 SSE_POLL_S = 0.2
 GRACEFUL_S = 3
@@ -48,17 +49,20 @@ def chapter_url(toc_url: str, number: int) -> str:
     return f"{toc_url.rstrip('/')}/chapter-{number}"
 
 
-def _png() -> bytes:
-    """A valid 1x1 PNG, built in place so no binary fixture is needed."""
+def _png(width: int = 1, height: int = 1, rgb: tuple[int, int, int] = (0x2B, 0x6C, 0xB0)) -> bytes:
+    """A valid solid-colour PNG, built in place so no binary fixture is needed."""
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         body = kind + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
 
-    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    pixel = zlib.compress(b"\x00\x2b\x6c\xb0")
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = (b"\x00" + bytes(rgb) * width) * height
     return (
-        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixel) + chunk(b"IEND", b"")
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
     )
 
 
@@ -81,6 +85,14 @@ class FakeAdapter:
         if number == FAILING_CHAPTER:
             raise ValueError(FAILURE_MESSAGE)
         body = f"<p>Text of chapter {number}.</p>"
+        if number == IMAGE_CHAPTER:
+            body = (
+                "<p>Before the map.</p>"
+                f'<p><img src="https://{HOST}/wide.png" alt="A wide map"></p>'
+                f"<p>Between the images: {'x' * 200}</p>"
+                f'<p><img src="https://{HOST}/sigil.png" alt="A tiny sigil"></p>'
+                "<p>After the images.</p>"
+            )
         return FetchedChapter(title=f"Chapter {number}: Fake", body_html=body)
 
     def request_delay(self, host: str) -> float:
@@ -88,9 +100,13 @@ class FakeAdapter:
 
 
 class FakeImages:
-    """An image fetcher that returns the same tiny PNG for any URL."""
+    """An image fetcher: a 2400x800 PNG for "wide" URLs, a 64x64 one for "sigil" ones, else 1x1."""
 
     def fetch(self, url: str) -> FetchedImage | None:
+        if "wide" in url:
+            return FetchedImage(data=_png(2400, 800), mime="image/png")
+        if "sigil" in url:
+            return FetchedImage(data=_png(64, 64, (0xB0, 0x2B, 0x6C)), mime="image/png")
         return FetchedImage(data=_png(), mime="image/png")
 
 

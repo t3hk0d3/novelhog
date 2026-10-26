@@ -83,4 +83,21 @@ describe('Dialog', () => {
     );
     expect(screen.getByRole('dialog', { name: 'Sheet' }).className).toContain('mt-auto');
   });
+
+  it('is a medium column by default and a wide one when asked', () => {
+    const { unmount } = render(
+      <Dialog title="Plain" onClose={() => undefined}>
+        x
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-lg');
+    unmount();
+    render(
+      <Dialog title="Big" large onClose={() => undefined}>
+        x
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-3xl');
+    expect(screen.getByRole('dialog')).not.toHaveClass('max-w-lg');
+  });
 });

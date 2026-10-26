@@ -96,6 +96,74 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
     await expect(details).toBeHidden();
   });
 
+  await test.step('read a chapter: preview, Read, step through the chapters, back', async () => {
+    await chapter(page, 1).click();
+    const details = page.getByRole('dialog', { name: 'Chapter 1 of 5' });
+    await details.getByRole('button', { name: 'Preview' }).click();
+    const preview = page.getByRole('dialog').last();
+    await expect(preview.getByRole('region', { name: 'Chapter content' })).toContainText(
+      'Text of chapter 1.',
+    );
+    await preview.getByRole('button', { name: 'Back' }).click();
+    await details.getByRole('link', { name: 'Read' }).click();
+    await expect(page).toHaveURL(/\/novels\/[^/]+\/chapters\/[^/]+$/);
+    await expect(page.getByRole('progressbar', { name: 'Reading position' })).toHaveAttribute(
+      'aria-valuetext',
+      'Chapter 1 of 5',
+    );
+    await expect(page.getByText('Text of chapter 1.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Previous chapter' })).toBeDisabled();
+
+    await page.getByRole('button', { name: 'Next chapter' }).click();
+    await expect(page.getByRole('progressbar', { name: 'Reading position' })).toHaveAttribute(
+      'aria-valuetext',
+      'Chapter 2 of 5',
+    );
+    await expect(page.getByText("This chapter isn't downloaded yet.")).toBeVisible();
+    await page.getByRole('button', { name: 'Next chapter' }).click();
+    await expect(page.getByText('Text of chapter 3.')).toBeVisible();
+
+    if (testInfo.project.use.isMobile) {
+      // A reload is a direct visit: the chapter list loads after the page, and swipes must still work.
+      await page.reload();
+      await expect(page.getByText('Text of chapter 3.')).toBeVisible();
+      // A swipe to the right with the finger goes back one chapter (touch events from the page).
+      await page.getByTestId('reader-surface').evaluate(async (surface) => {
+        const touch = (x: number, y: number) =>
+          new Touch({ identifier: 1, target: surface, clientX: x, clientY: y });
+        const fire = (type: string, x: number, y: number, ended = false) => {
+          const points = ended ? [] : [touch(x, y)];
+          surface.dispatchEvent(
+            new TouchEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              touches: points,
+              changedTouches: [touch(x, y)],
+            }),
+          );
+        };
+        fire('touchstart', 50, 300);
+        for (const x of [130, 220, 310, 390]) {
+          fire('touchmove', x, 302);
+          await new Promise((resolve) => setTimeout(resolve, 16));
+        }
+        fire('touchend', 390, 302, true);
+      });
+      await expect(page.getByRole('progressbar', { name: 'Reading position' })).toHaveAttribute(
+        'aria-valuetext',
+        'Chapter 2 of 5',
+      );
+      await expect(page.getByRole('navigation', { name: 'Chapters' })).toBeInViewport();
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+    }
+
+    await page.getByRole('link', { name: 'Back to novel' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible();
+  });
+
   await test.step('export with missing chapters waits, then is ready and downloads', async () => {
     await page.getByRole('button', { name: 'Export…' }).click();
     const dialog = page.getByRole('dialog', { name: 'Export' });

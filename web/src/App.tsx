@@ -10,6 +10,7 @@ import { useLiveEvents } from './hooks/useLiveEvents';
 import { usePush } from './hooks/usePush';
 import { Library } from './routes/Library';
 import { Novel } from './routes/Novel';
+import { Reader } from './routes/Reader';
 
 const defaultQueryClient = new QueryClient();
 
@@ -29,7 +30,9 @@ function Shell() {
     setAdding(true);
   };
   return (
-    <>
+    // The shell fills the screen and main takes what the header leaves, so a short page (the
+    // reader) can put its bottom bar on the bottom edge instead of leaving blank page below it.
+    <div className="flex min-h-dvh flex-col">
       <Header
         addNovel={
           <button
@@ -43,10 +46,11 @@ function Shell() {
         bell={<NotificationsBell push={push} />}
       />
       <PushBanner push={push} />
-      <main className="mx-auto max-w-5xl p-4">
+      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col p-4">
         <Routes>
           <Route path="/" element={<Library onAddNovel={openAdd} />} />
           <Route path="/novels/:id" element={<Novel />} />
+          <Route path="/novels/:id/chapters/:chapterId" element={<Reader />} />
         </Routes>
       </main>
       {adding && (
@@ -56,7 +60,7 @@ function Shell() {
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

@@ -11,3 +11,32 @@ body {
     Roboto,
     sans-serif;
 }
+
+/* While the reader is open, pulling at the ends of the text turns chapters: no pull-to-refresh. */
+html.reader-open {
+  overscroll-behavior-y: contain;
+}
+
+@keyframes reader-enter-next {
+  from {
+    opacity: 0;
+    transform: translateX(30%);
+  }
+}
+
+@keyframes reader-enter-previous {
+  from {
+    opacity: 0;
+    transform: translateX(-30%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .reader-enter-next {
+    animation: reader-enter-next 200ms ease-out;
+  }
+
+  .reader-enter-previous {
+    animation: reader-enter-previous 200ms ease-out;
+  }
+}

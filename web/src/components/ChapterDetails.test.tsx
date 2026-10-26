@@ -34,7 +34,13 @@ function show(
     chapters = makeChapters(5),
     onStep = vi.fn(),
     onClose = vi.fn(),
-  }: { chapters?: Chapter[]; onStep?: (id: string) => void; onClose?: () => void } = {},
+    live = false,
+  }: {
+    chapters?: Chapter[];
+    onStep?: (id: string) => void;
+    onClose?: () => void;
+    live?: boolean;
+  } = {},
 ) {
   const all = chapters.map((c) => (c.id === chapter.id ? chapter : c));
   const utils = renderWithProviders(
@@ -46,11 +52,99 @@ function show(
       onStep={onStep}
       onClose={onClose}
     />,
+    { live },
   );
   return { ...utils, onStep, onClose, all };
 }
 
 describe('ChapterDetails', () => {
+  describe('Preview button', () => {
+    function stubContent() {
+      const fetchMock = vi.fn((url: string) => {
+        if (url.endsWith('/exports')) return Promise.resolve(Response.json([]));
+        return Promise.resolve(Response.json({ markdown: 'Story text' }));
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+    const contentCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
+      fetchMock.mock.calls.filter(([url]) => (url as string).includes('/content'));
+
+    it('is offered for a downloaded chapter, which shows no inline content', () => {
+      stubContent();
+      show(makeChapter(2), { live: true });
+      expect(screen.getByRole('button', { name: 'Preview' })).toBeEnabled();
+      expect(screen.queryByRole('region', { name: 'Chapter content' })).toBeNull();
+    });
+
+    it('does not request the content until it is opened', () => {
+      const fetchMock = stubContent();
+      show(makeChapter(2), { live: true });
+      expect(contentCalls(fetchMock)).toHaveLength(0);
+    });
+
+    it('opens the preview dialog over the details, and Close returns to the details', async () => {
+      stubContent();
+      show(makeChapter(2, { title: 'The Gate' }), { live: true });
+      await userEvent.click(screen.getByRole('button', { name: 'Preview' }));
+      const preview = screen.getByRole('dialog', { name: 'The Gate' });
+      expect(await within(preview).findByText('Story text')).toBeInTheDocument();
+      expect(screen.getByRole('dialog', { name: 'Chapter 2 of 5' })).toBeInTheDocument();
+      await userEvent.click(within(preview).getByRole('button', { name: 'Close' }));
+      expect(screen.queryByRole('dialog', { name: 'The Gate' })).toBeNull();
+      expect(screen.getByRole('dialog', { name: 'Chapter 2 of 5' })).toBeInTheDocument();
+    });
+
+    it('Back in the preview returns to the details', async () => {
+      stubContent();
+      show(makeChapter(2, { title: 'The Gate' }), { live: true });
+      await userEvent.click(screen.getByRole('button', { name: 'Preview' }));
+      await userEvent.click(
+        within(screen.getByRole('dialog', { name: 'The Gate' })).getByRole('button', {
+          name: 'Back',
+        }),
+      );
+      expect(screen.queryByRole('dialog', { name: 'The Gate' })).toBeNull();
+      expect(screen.getByRole('dialog', { name: 'Chapter 2 of 5' })).toBeInTheDocument();
+    });
+
+    it.each(['not_requested', 'pending', 'downloading', 'error'] as const)(
+      'is not offered while the chapter is %s',
+      (state) => {
+        stubContent();
+        show(makeChapter(2, { state }), { live: true });
+        expect(screen.queryByRole('button', { name: 'Preview' })).toBeNull();
+        expect(screen.queryByRole('link', { name: 'Read' })).toBeNull();
+      },
+    );
+
+    it('is an inline button among the fields, not in the bottom toolbar', () => {
+      stubContent();
+      show(makeChapter(2), { live: true });
+      expect(screen.getByRole('button', { name: 'Preview' }).closest('dl')).not.toBeNull();
+    });
+
+    it('puts Read last in the toolbar, after the state-dependent action', () => {
+      stubContent();
+      show(makeChapter(2), { live: true });
+      const toolbar = screen.getByRole('link', { name: 'Open on site' }).parentElement;
+      expect(toolbar?.lastElementChild).toHaveTextContent('Read');
+      expect(screen.getByRole('button', { name: 'Download again' }).nextElementSibling).toBe(
+        screen.getByRole('link', { name: 'Read' }),
+      );
+    });
+
+    it('has a Read link to the reader page in the toolbar', () => {
+      stubContent();
+      const chapter = makeChapter(2);
+      show(chapter, { live: true });
+      expect(screen.getByRole('link', { name: 'Read' })).toHaveAttribute(
+        'href',
+        `/novels/${NOVEL}/chapters/${chapter.id}`,
+      );
+    });
+  });
+
   describe('layout', () => {
     it('is a modal dialog at 720 px and wider', () => {
       show(makeChapter(2));

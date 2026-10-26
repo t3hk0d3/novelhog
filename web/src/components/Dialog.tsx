@@ -9,6 +9,8 @@ interface DialogProps {
   children: ReactNode;
   /** Anchor to the bottom edge as a sheet (phone layouts) instead of centring. */
   sheet?: boolean;
+  /** A wide dialog (desktop) for content that wants columns; the default is a narrow column. */
+  large?: boolean;
 }
 
 /**
@@ -17,7 +19,7 @@ interface DialogProps {
  * before. Escape (the native `cancel` event) and the Close button call `onClose`; the owner
  * unmounts it. Mark the element that should start focused with `data-autofocus`.
  */
-export function Dialog({ title, onClose, children, sheet = false }: DialogProps) {
+export function Dialog({ title, onClose, children, sheet = false, large = false }: DialogProps) {
   const titleId = useId();
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -62,7 +64,7 @@ export function Dialog({ title, onClose, children, sheet = false }: DialogProps)
       className={`w-full bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50 ${
         sheet
           ? 'mx-0 mb-0 mt-auto max-w-none rounded-t-2xl transition-transform duration-200 starting:translate-y-full motion-reduce:transition-none'
-          : 'm-auto max-w-lg rounded-2xl'
+          : `m-auto rounded-2xl ${large ? 'max-w-3xl' : 'max-w-lg'}`
       }`}
     >
       <div className="flex items-center justify-between">

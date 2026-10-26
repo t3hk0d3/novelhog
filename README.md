@@ -4,6 +4,12 @@ Self-hosted web-novel downloader: a web UI and a worker around
 [web-novel-scraper](https://pypi.org/project/web-novel-scraper/). Import a novel by its table-of-contents
 URL, follow it, download chapters and export EPUBs.
 
+## Reading
+
+Downloaded chapters open in a reading page built for phones: swipe to turn chapters, themes and fonts (your own
+too), the place you left off in every chapter, and a bottom bar that gets out of the way. See
+[the reader guide](docs/reader.md).
+
 ## Deploy with Compose
 
 ```sh
