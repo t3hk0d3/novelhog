@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import ColumnElement, Connection, case, select, update
+from sqlalchemy import ColumnElement, Connection, case, func, select, update
 
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.tasks import (
@@ -159,7 +159,8 @@ class ChapterDownloadHandler:
             state = ChapterState.DOWNLOADED
             markdown = outcome.result.markdown
             values: dict[str, object] = {
-                "title": outcome.result.title,
+                # A title the TOC gave wins over the page's own (spec section 6.2).
+                "title": func.coalesce(chapters.c.title, outcome.result.title),
                 "has_images": outcome.result.has_images,
             }
         elif isinstance(outcome, Failed):

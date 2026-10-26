@@ -1,8 +1,13 @@
-"""Title and cover finders (spec section 6.7)."""
+"""Title, chapter title and cover finders (spec section 6.7)."""
 
 import pytest
 
-from novelhog.scraper_adapter.finders import find_cover_url, find_title
+from novelhog.scraper_adapter.finders import (
+    clean_chapter_title,
+    find_chapter_titles,
+    find_cover_url,
+    find_title,
+)
 
 TOC = "https://example.org/series/12/lantern/"
 
@@ -184,3 +189,88 @@ class TestFindCoverUrl__NothingMatches:
     def test_find_cover_url__returns_none(self) -> None:
         html = page(body='<img src="/a.jpg" alt="Banner">')
         assert find_cover_url(html, TOC, "Glass Orchard") is None
+
+
+FANMTL_LINK = (
+    '<a href="/novel/x_1.html" title="X Chapter 1"><span class="chapter-no">1</span>'
+    '<strong class="chapter-title"> Chapter 1: Paper Tide </strong>'
+    '<time class="chapter-update">2 days ago</time></a>'
+)
+
+
+class TestFindChapterTitles__Sources:
+    def test_find_chapter_titles__takes_the_element_whose_class_names_a_title(self) -> None:
+        titles = find_chapter_titles([page(body=FANMTL_LINK)], TOC)
+        assert titles == {"https://example.org/novel/x_1.html": "Chapter 1: Paper Tide"}
+
+    def test_find_chapter_titles__takes_the_text_of_a_text_only_link(self) -> None:
+        html = page(body='<a href="https://example.org/c/2">Chapter 2:\n  Copper Fog</a>')
+        assert find_chapter_titles([html], TOC) == {
+            "https://example.org/c/2": "Chapter 2: Copper Fog"
+        }
+
+    def test_find_chapter_titles__skips_a_link_with_markup_but_no_title_element(self) -> None:
+        html = page(body='<a href="/c/3"><span>3</span><time>today</time></a>')
+        assert find_chapter_titles([html], TOC) == {}
+
+    def test_find_chapter_titles__collects_every_page(self) -> None:
+        pages = [page(body='<a href="/c/1">One</a>'), page(body='<a href="/c/2">Two</a>')]
+        assert find_chapter_titles(pages, TOC) == {
+            "https://example.org/c/1": "One",
+            "https://example.org/c/2": "Two",
+        }
+
+
+class TestFindChapterTitles__Urls:
+    def test_find_chapter_titles__resolves_and_normalises_hrefs(self) -> None:
+        html = page(body='<a href="https://www.example.org/c/1/">One</a><a href="../2">Two</a>')
+        assert find_chapter_titles([html], TOC) == {
+            "https://example.org/c/1": "One",
+            "https://example.org/series/12/2": "Two",
+        }
+
+    def test_find_chapter_titles__first_link_to_a_url_wins(self) -> None:
+        html = page(body='<a href="/c/1">One</a><a href="/c/1">Again</a>')
+        assert find_chapter_titles([html], TOC) == {"https://example.org/c/1": "One"}
+
+    def test_find_chapter_titles__skips_links_without_a_usable_url(self) -> None:
+        html = page(body='<a href="mailto:x@example.org">Mail</a><a>No href</a>')
+        assert find_chapter_titles([html], TOC) == {}
+
+
+class TestFindChapterTitles__SeveralLinksToOneChapter:
+    def test_find_chapter_titles__a_title_element_beats_earlier_link_text(self) -> None:
+        html = page(body=f'<a href="/novel/x_1.html">Chapter 1</a> {FANMTL_LINK}')
+        assert find_chapter_titles([html], TOC) == {
+            "https://example.org/novel/x_1.html": "Chapter 1: Paper Tide"
+        }
+
+    def test_find_chapter_titles__later_link_text_does_not_replace_a_title_element(self) -> None:
+        html = page(body=f'{FANMTL_LINK} <a href="/novel/x_1.html">Chapter 1</a>')
+        assert find_chapter_titles([html], TOC) == {
+            "https://example.org/novel/x_1.html": "Chapter 1: Paper Tide"
+        }
+
+
+class TestFindChapterTitles__FailSoft:
+    def test_find_chapter_titles__logs_and_gives_nothing_when_a_page_is_not_text(self) -> None:
+        assert find_chapter_titles([None], TOC) == {}  # type: ignore[list-item]
+
+
+class TestCleanChapterTitle:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Dog blood&#039;s life", "Dog blood's life"),
+            ("Tom &amp; Jerry", "Tom & Jerry"),
+            ("  Chapter\n 1:\tStart  ", "Chapter 1: Start"),
+            ("Bad\x00 char", "Bad char"),
+            ("Plain", "Plain"),
+        ],
+    )
+    def test_clean_chapter_title__gives_plain_text(self, raw: str, expected: str) -> None:
+        assert clean_chapter_title(raw) == expected
+
+    @pytest.mark.parametrize("raw", [None, "", "  ", "\x00"])
+    def test_clean_chapter_title__gives_none_when_nothing_is_left(self, raw: str | None) -> None:
+        assert clean_chapter_title(raw) is None

@@ -63,6 +63,7 @@ class TocAdapter(FakeAdapter):
         self.urls = [f"{URL}/1", f"{URL}/2"]
         self.syncs = 0
         self.during_toc: Any = None
+        self.chapter_titles: dict[str, str] = {}
 
     def sync_toc(self, novel_id: str, host: str, toc_url: str) -> TocResult:
         self.syncs += 1
@@ -70,7 +71,14 @@ class TocAdapter(FakeAdapter):
             self.during_toc()
         if self.toc_error is not None:
             raise self.toc_error
-        return TocResult("Lantern", "en", COVER_URL, list(self.urls), "<html></html>")
+        return TocResult(
+            "Lantern",
+            "en",
+            COVER_URL,
+            list(self.urls),
+            "<html></html>",
+            chapter_titles=dict(self.chapter_titles),
+        )
 
 
 @pytest.fixture
@@ -208,6 +216,21 @@ class TestNovelRefresh__OnDoneOrFailed:
                 select(chapters.c.position).where(chapters.c.novel_id == novel_id)
             ).scalars()
             assert sorted(positions) == [1, 2]
+
+    def test_finish__titles_the_chapters_by_the_toc(
+        self, repo: Repo, novel_id: str, adapter: TocAdapter, runner: Runner
+    ) -> None:
+        adapter.chapter_titles = {f"{URL}/1": "Chapter 1: Start"}
+
+        runner.step()
+
+        with db.read(repo.engine) as conn:
+            titles = conn.execute(
+                select(chapters.c.position, chapters.c.title)
+                .where(chapters.c.novel_id == novel_id)
+                .order_by(chapters.c.position)
+            ).all()
+        assert [tuple(t) for t in titles] == [(1, "Chapter 1: Start"), (2, None)]
 
     def test_finish__applies_import_error_and_backed_off_interval_on_a_site_error(
         self, repo: Repo, novel_id: str, runner: Runner, adapter: TocAdapter

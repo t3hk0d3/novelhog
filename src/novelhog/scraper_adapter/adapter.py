@@ -3,7 +3,7 @@
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -23,7 +23,12 @@ from novelhog.scraper_adapter.errors import (
     SiteTransient,
     SiteUnreachable,
 )
-from novelhog.scraper_adapter.finders import find_cover_url, find_title
+from novelhog.scraper_adapter.finders import (
+    clean_chapter_title,
+    find_chapter_titles,
+    find_cover_url,
+    find_title,
+)
 from novelhog.scraper_adapter.guard import (
     CloudflareChallengeError,
     ServerResponseError,
@@ -44,13 +49,16 @@ from novelhog.scraper_adapter.scraper import (
 
 @dataclass(frozen=True)
 class TocResult:
-    """A synced table of contents. `title` and `cover_url` are detected from the first TOC page."""
+    """A synced table of contents. `title` and `cover_url` are detected from the first TOC page;
+    `chapter_titles` holds the titles the TOC links give, by normalised chapter URL.
+    """
 
     title: str | None
     language: str | None
     cover_url: str | None
     urls: list[str]
     toc_html: str
+    chapter_titles: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,18 +199,21 @@ class ScraperAdapter:
             novel = self._open(novel_id, host, toc_url)
             with page_budget(self._settings.max_toc_pages):
                 novel.sync_toc()
-            first_page: str = novel.novel_data_helper.get_all_toc_fragments()[0]
+            pages: list[str] = novel.novel_data_helper.get_all_toc_fragments()
             urls = self._normalised(novel.chapters_url_list)
         if not urls:
             msg = "The table of contents has no chapters"
             raise SiteError(msg)
+        first_page = pages[0]
         title = find_title(first_page)
+        linked = find_chapter_titles(pages, toc_url)
         return TocResult(
             title=title,
             language=_html_language(first_page),
             cover_url=find_cover_url(first_page, toc_url, title),
             urls=urls,
             toc_html=first_page,
+            chapter_titles={url: linked[url] for url in urls if url in linked},
         )
 
     def fetch_chapter(self, novel_id: str, host: str, toc_url: str, url: str) -> FetchedChapter:
@@ -219,7 +230,7 @@ class ScraperAdapter:
             try:
                 novel.scrap_chapter(chapter, reload_file=True)
                 # The scraper invents a title when the page has none; ask the decoder instead.
-                title: str | None = novel.decoder.get_chapter_title(chapter.chapter_html) or None
+                title = clean_chapter_title(novel.decoder.get_chapter_title(chapter.chapter_html))
             finally:
                 if chapter.chapter_html_filename:
                     novel.novel_data_helper.delete_chapter_html(chapter.chapter_html_filename)

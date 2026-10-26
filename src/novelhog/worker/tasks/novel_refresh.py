@@ -114,7 +114,18 @@ class NovelRefreshProcessor:
                 now + timedelta(seconds=jittered(interval, ctx.rng)),
             )
             return Failed(message, failed)
-        return Done(SyncSucceeded(toc.urls, toc.title, toc.language, cover, min_s, max_s, ctx.rng))
+        return Done(
+            SyncSucceeded(
+                toc.urls,
+                toc.title,
+                toc.language,
+                cover,
+                min_s,
+                max_s,
+                ctx.rng,
+                chapter_titles=toc.chapter_titles,
+            )
+        )
 
     def stored_keys(self, outcome: Outcome[RefreshResult]) -> list[str]:
         """The cover `run` stored, if any."""

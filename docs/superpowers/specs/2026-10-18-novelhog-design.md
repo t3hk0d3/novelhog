@@ -248,7 +248,7 @@ CREATE TABLE chapters (
     url           TEXT NOT NULL,                          -- normalised; the chapter's identity
     position      INTEGER CHECK (position >= 1),          -- current 1-based TOC place; NULL = removed
     removed_at    TEXT,                                   -- set when the URL left the TOC
-    title         TEXT,                                   -- set after download
+    title         TEXT,                                   -- from the TOC, else the page at download
     state         TEXT NOT NULL DEFAULT 'not_requested'
                   CHECK (state IN ('not_requested', 'pending', 'downloading',
                                    'downloaded', 'error')),
@@ -1003,10 +1003,11 @@ refresh(novel):                                       # novel claimed by me; hea
 finish_sync(...):                                     # ONE fenced transaction; nothing if the claim was lost
     succeeded:
         diff toc.urls against the novel's chapter rows by normalised url:
-            new url       → insert at its position; released_at = null if initial else now;
+            new url       → insert at its position with its TOC title; released_at = null if initial else now;
                             state = pending (queued_at = now, priority = 1) if followed and not initial,
                             else not_requested
-            known url     → position = its index (+1); a removed chapter that came back gets removed_at = null
+            known url     → position = its index (+1); a removed chapter that came back gets removed_at = null;
+                            a TOC title that differs from the stored one replaces it (a CH event)
             missing url   → position = null, removed_at = now (state and content kept, except that a
                             pending chapter is dequeued; logged as a warning)
         title = toc.title if novel.title is null; language = toc.language; cover_key if found
@@ -1063,7 +1064,8 @@ download(batch):                                       # chapters pending, claim
         try:
             fetched = adapter.fetch_chapter(novel, chapter.url)     # {title, body_html}
             conversion = html_to_markdown.convert(fetched.body_html, image_fetcher.fetch)
-            complete(chapter, markdown, title or "Chapter <position>", has_images)   # fenced; upserts content
+            complete(chapter, markdown, title or "Chapter <position>", has_images)   # fenced; upserts content;
+                                                                                     # a stored (TOC) title wins
         except InfrastructureError: requeue(chapter); release the rest; backoff; return
         except Exception as e: fail(chapter, '<Type>: <summary>')  # fenced
         stop.wait(delay)
@@ -1212,10 +1214,11 @@ dispatch_notifications():
     the host's next direct requests and images. FlareSolverr failing to load
     the page is an unsolved challenge (`SiteChallenged`); FlareSolverr down is
     an `InfrastructureError`.
-- `sync_toc(novel) → TocResult{title, language, cover_url, urls}`:
+- `sync_toc(novel) → TocResult{title, language, cover_url, urls, chapter_titles}`:
   `Novel.sync_toc()` (which applies the decoder's TOC rules, URL processors,
   pagination and descending-order flags), then reads the first TOC page's HTML
-  from the cache directory for `find_title`, `<html lang>` and `find_cover_url`.
+  from the cache directory for `find_title`, `<html lang>` and `find_cover_url`,
+  and every TOC page for `find_chapter_titles`.
   URLs are normalised; duplicates keep their first position.
 - **TOC loop guard.** The adapter wraps the scraper's page requests with a
   per-operation budget: more than `NOVELHOG_MAX_TOC_PAGES` (default 1000)
@@ -1225,7 +1228,15 @@ dispatch_notifications():
   (the scraper otherwise prepends an `<h4>` title or crashes when the title is
   missing). For most hosts `body_html` is the list of `<p>` fragments the host's
   content selector matched; lists and images outside those are lost (documented
-  limitation). The chapter's cached HTML file is deleted afterwards.
+  limitation). The chapter's cached HTML file is deleted afterwards. The title
+  goes through `clean_chapter_title`.
+- `find_chapter_titles(toc_pages, toc_url)`: for every link, the text of an
+  element inside it whose class mentions "title" (fanmtl's
+  `<strong class="chapter-title">`), else the text of a link that holds text
+  only; keyed by the normalised, resolved `href` (an element title beats plain link text, else the first link wins), kept
+  for TOC chapter URLs only. Titles go through `clean_chapter_title`: HTML
+  entities decoded once more (sites escape titles twice: `&amp;#039;`),
+  whitespace collapsed, XML-invalid characters removed, empty → `null`.
 - `find_title(toc_html)`: `og:title`, then `<title>` with a trailing site suffix
   (" - Site", " | Site") removed, then the first `<h1>`; `null` if none. A
   `<title>` that is the `<h1>` followed by more words ("Star Forge Titan Novel

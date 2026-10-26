@@ -12,7 +12,8 @@ A syncing novel has a running refresh task, so it is never a problem.
 """
 
 import random
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
@@ -70,7 +71,9 @@ class NovelClaim:
 
 @dataclass(frozen=True)
 class SyncSucceeded:
-    """A fetched TOC. `title`, `language` and `cover_key` are None when nothing was found."""
+    """A fetched TOC. `title`, `language` and `cover_key` are None when nothing was found;
+    `chapter_titles` holds the chapter titles the TOC gave, by normalised URL.
+    """
 
     urls: list[str]
     title: str | None
@@ -79,6 +82,7 @@ class SyncSucceeded:
     min_s: int
     max_s: int
     rng: random.Random
+    chapter_titles: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -224,6 +228,7 @@ class NovelRefreshHandler:
                 initial=row.last_refreshed_at is None,
                 followed=row.followed,
                 now=now,
+                titles=result.chapter_titles,
             )
             interval = next_interval(
                 row.refresh_interval,
