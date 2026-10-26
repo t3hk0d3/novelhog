@@ -21,7 +21,6 @@ class TestLoad__WithNoVariables:
         assert s.static_base_url == "/static"
         assert s.refresh_min_interval == 21600
         assert s.refresh_max_interval == 2592000
-        assert s.batch_size == 10
         assert s.claim_ttl == 300
         assert s.idle_sleep == 30
         assert s.request_delay == 1.0
@@ -96,8 +95,8 @@ class TestLoad__WithAllowPrivateFetch:
 
 class TestLoad__WithNonNumericValue:
     def test_load__integer_variable_raises_naming_the_variable(self) -> None:
-        with pytest.raises(ValueError, match="NOVELHOG_BATCH_SIZE"):
-            config.load({"NOVELHOG_BATCH_SIZE": "ten"})
+        with pytest.raises(ValueError, match="NOVELHOG_CLAIM_TTL"):
+            config.load({"NOVELHOG_CLAIM_TTL": "ten"})
 
     def test_load__float_variable_raises_naming_the_variable(self) -> None:
         with pytest.raises(ValueError, match="NOVELHOG_REQUEST_DELAY"):
@@ -106,8 +105,8 @@ class TestLoad__WithNonNumericValue:
 
 class TestLoad__WithNumericOverrides:
     def test_load__parses_integer_and_float_values(self) -> None:
-        s = config.load({"NOVELHOG_BATCH_SIZE": "25", "NOVELHOG_REQUEST_DELAY": "0.5"})
-        assert s.batch_size == 25
+        s = config.load({"NOVELHOG_CLAIM_TTL": "25", "NOVELHOG_REQUEST_DELAY": "0.5"})
+        assert s.claim_ttl == 25
         assert s.request_delay == 0.5
 
 
@@ -124,10 +123,23 @@ class TestLoad__WithEmptyValues:
         assert s.database_url == "sqlite:////data/db/app.db"
 
     def test_load__empty_numeric_value_uses_the_default(self) -> None:
-        assert config.load({"NOVELHOG_BATCH_SIZE": ""}).batch_size == 10
+        assert config.load({"NOVELHOG_CLAIM_TTL": ""}).claim_ttl == 300
 
 
 class TestLoad__WithMixedCaseAllowedHosts:
     def test_load__lowercases_names_and_drops_empty_entries(self) -> None:
         s = config.load({"NOVELHOG_ALLOWED_HOSTS": "A.Lan,, B.LAN ,"})
         assert s.allowed_hosts == ("a.lan", "b.lan")
+
+
+class TestLoad__WithTheRemovedBatchSize:
+    @pytest.mark.parametrize("value", ["10", "ten"])
+    def test_load__ignores_it_and_names_it_in_ignored(self, value: str) -> None:
+        s = config.load({"NOVELHOG_BATCH_SIZE": value})
+
+        assert not hasattr(s, "batch_size")
+        assert s.ignored == ("NOVELHOG_BATCH_SIZE",)
+
+    def test_load__ignores_nothing_when_it_is_unset_or_empty(self) -> None:
+        assert config.load({}).ignored == ()
+        assert config.load({"NOVELHOG_BATCH_SIZE": ""}).ignored == ()

@@ -12,20 +12,44 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import Connection, delete, func, insert, select, update
+from sqlalchemy import Connection, delete, func, insert, or_, select, update
 
 from novelhog.repo import db
 from novelhog.repo.context import RepoContext
 from novelhog.repo.schema import consumers, event_clock
 from novelhog.repo.schema import events as events_table
 
-_KINDS: dict[str, Literal["novel", "chapter", "export"]] = {
+EventKind = Literal["novel", "chapter", "export", "task"]
+
+_KINDS: dict[str, EventKind] = {
     "NV": "novel",
     "CH": "chapter",
     "EX": "export",
+    "TK": "task",
 }
 
 Payload = dict[str, object] | Callable[[], dict[str, object]]
+
+_LAST_SEQ = "events_last_seq"
+
+
+def take_clock(conn: Connection) -> int:
+    """Take the next value of `event_clock` without writing an event row, and return it.
+
+    The clock row stays locked until the transaction ends, as with `append`, so the same lock
+    order applies: call it last. The task change cursor uses it in transactions without events
+    (tasks spec section 4, "Change cursor").
+    """
+    statement = update(event_clock).values(seq=event_clock.c.seq + 1).returning(event_clock.c.seq)
+    seq = int(conn.execute(statement.where(event_clock.c.id == 1)).scalar_one())
+    db.transaction_info(conn)[_LAST_SEQ] = seq
+    return seq
+
+
+def last_seq(conn: Connection) -> int | None:
+    """The last clock value this transaction took (by `append` or `take_clock`), or None."""
+    seq: int | None = db.transaction_info(conn).get(_LAST_SEQ)
+    return seq
 
 
 def append(
@@ -45,15 +69,14 @@ def append(
     lock may be taken after the first `append`. Taking the clock first in one transaction and
     last in another deadlocks on Postgres.
     """
-    statement = update(event_clock).values(seq=event_clock.c.seq + 1).returning(event_clock.c.seq)
-    seq = conn.execute(statement.where(event_clock.c.id == 1)).scalar_one()
+    seq = take_clock(conn)
     data = payload() if callable(payload) else payload
     conn.execute(
         insert(events_table).values(
             seq=seq, novel_id=novel_id, entity_id=entity_id, payload=data, at=now
         )
     )
-    return int(seq)
+    return seq
 
 
 def emit_novel_change(
@@ -77,6 +100,10 @@ def emit_novel_change(
     inside `append`. `failed_export_ids` are exports the same transaction just moved to `failed`
     (a user dequeue, spec section 5.5); they are no longer waiting, so they get their `EX` event
     here, once, after the others.
+
+    Every caller first queues the builds the change made buildable, before this first append
+    (`exports.enqueue_buildable` with `exports.affected_waiting`, tasks spec 5.1), and calls
+    `TaskQueue.stamp` after it.
     """
     # Imported here: novels, chapters and exports import this module.
     from novelhog.repo import chapters, exports, novels  # noqa: PLC0415
@@ -113,7 +140,7 @@ class EventRow:
     at: datetime
 
     @property
-    def kind(self) -> Literal["novel", "chapter", "export"]:
+    def kind(self) -> EventKind:
         """The SSE event name, derived from the `entity_id` prefix."""
         return _KINDS[self.entity_id[:2]]
 
@@ -182,8 +209,11 @@ class Events:
     ) -> Literal["ok", "resync"]:
         """Say whether a client that last saw `seq` can be sent the events after it.
 
-        `resync` when `seq` is above the clock, its row is gone (pruned) or older than `max_age_s`,
-        or more than `max_rows` events follow. An empty log accepts only `seq` 0.
+        `resync` when `seq` is above the clock, or the first event after it is older than
+        `max_age_s`, or more than `max_rows` events follow. `seq` needs no row of its own: a clock
+        value taken without an event (a task-only transaction, the migration) is a valid resume
+        point (tasks spec section 4, "Change cursor"). A pruned row is therefore told apart only by
+        the age of what follows it. With no event after `seq` the client is up to date.
         """
         threshold = self._clock() - timedelta(seconds=max_age_s)
         with db.read(self._engine) as conn:
@@ -192,12 +222,15 @@ class Events:
             )
             if seq > latest:
                 return "resync"
-            if seq == latest == 0:
-                return "ok"
-            at = conn.execute(
-                select(events_table.c.at).where(events_table.c.seq == seq)
+            first = conn.execute(
+                select(events_table.c.at)
+                .where(events_table.c.seq > seq)
+                .order_by(events_table.c.seq)
+                .limit(1)
             ).scalar_one_or_none()
-            if at is None or at < threshold:
+            if first is None:
+                return "ok"
+            if first < threshold:
                 return "resync"
             following = conn.execute(
                 select(func.count()).select_from(events_table).where(events_table.c.seq > seq)
@@ -205,7 +238,9 @@ class Events:
             return "resync" if following > max_rows else "ok"
 
     def prune(self, *, keep_s: int = 86400, max_consumer_lag_s: int = 604800) -> PruneReport:
-        """Delete old events, keeping the newest of every entity and all a consumer still needs.
+        """Delete old events, keeping what a consumer still needs and each entity's newest row.
+
+        The newest-row exception covers `NV`, `CH` and `EX` events; `TK` events go by age alone.
 
         The boundary is the first `seq` younger than `keep_s`, capped at the slowest consumer's
         `last_seq + 1`. A consumer whose next event is older than `max_consumer_lag_s` is first
@@ -248,7 +283,11 @@ class Events:
                 )
                 .exists()
             )
+            # `TK` events are pruned by age alone: a finished task leaves no row behind.
             deleted = conn.execute(
-                delete(events_table).where(events_table.c.seq < boundary, has_newer)
+                delete(events_table).where(
+                    events_table.c.seq < boundary,
+                    or_(events_table.c.entity_id.like("TK%"), has_newer),
+                )
             ).rowcount
         return PruneReport(deleted=deleted, consumers_moved=moved)

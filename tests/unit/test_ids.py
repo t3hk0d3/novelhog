@@ -15,6 +15,11 @@ class TestNewId__WithKnownPrefix:
         assert ids.new_id("CH") != ids.new_id("CH")
 
 
+class TestNewId__WithTaskPrefix:
+    def test_new_id__accepts_tk(self) -> None:
+        assert re.fullmatch(r"TK[a-z0-9]{12}", ids.new_id("TK"))
+
+
 class TestNewId__WithUnknownPrefix:
     def test_new_id__raises_value_error(self) -> None:
         with pytest.raises(ValueError):

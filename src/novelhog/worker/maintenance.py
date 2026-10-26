@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from novelhog import log
+from novelhog.domain.tasks import TASK_RETENTION
 from novelhog.repo import Repo
 from novelhog.storage import InvalidKey, StaticStorage
 
 
 @dataclass(frozen=True)
 class MaintenanceReport:
-    """What one `maintain` run did: when, events pruned, and consumers moved forward.
+    """What one `maintain` run did: when, events pruned, consumers moved forward, tasks pruned.
 
     Each moved consumer is `(name, old last_seq, new last_seq, skipped_releases)`.
     """
@@ -18,6 +19,7 @@ class MaintenanceReport:
     at: datetime
     deleted: int
     consumers_moved: list[tuple[str, int, int, int]]
+    tasks_pruned: int = 0
 
 
 def empty_trash(repo: Repo, storage: StaticStorage, *, limit: int = 100) -> int:
@@ -37,7 +39,10 @@ def empty_trash(repo: Repo, storage: StaticStorage, *, limit: int = 100) -> int:
 
 
 def maintain(repo: Repo, *, now: datetime) -> MaintenanceReport:
-    """Prune the event log, warn about moved consumers, then optimize the database."""
+    """Prune the event log, warn about moved consumers, prune finished tasks, then optimize.
+
+    Finished tasks are kept for `TASK_RETENTION` after they finished (tasks spec section 8).
+    """
     pruned = repo.events.prune()
     logger = log.get()
     for name, old_seq, new_seq, skipped_releases in pruned.consumers_moved:
@@ -48,5 +53,11 @@ def maintain(repo: Repo, *, now: datetime) -> MaintenanceReport:
             skipped_to_seq=new_seq,
             skipped_releases=skipped_releases,
         )
+    tasks_pruned = repo.tasks.prune(now - TASK_RETENTION)
     repo.optimize()
-    return MaintenanceReport(at=now, deleted=pruned.deleted, consumers_moved=pruned.consumers_moved)
+    return MaintenanceReport(
+        at=now,
+        deleted=pruned.deleted,
+        consumers_moved=pruned.consumers_moved,
+        tasks_pruned=tasks_pruned,
+    )

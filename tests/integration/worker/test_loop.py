@@ -1,4 +1,4 @@
-"""The worker main loop (spec section 6.1)."""
+"""The worker main loop (spec section 6.1, tasks spec section 6)."""
 
 import json
 import threading
@@ -22,6 +22,7 @@ from tests.conftest import FakeClock
 from tests.integration.worker.conftest import (
     HOST,
     IDLE,
+    URL,
     FakeAdapter,
     FakeFetcher,
     RecordingStop,
@@ -53,7 +54,7 @@ class TestStep__OrderOfWork:
     def test_step__recovers_expired_claims_first(
         self, repo: Repo, novel_id: str, worker: Worker, clock: FakeClock
     ) -> None:
-        repo.novels.claim_due_refresh("other", 10)  # keeps the refresh out of the way
+        repo.tasks.claim("other", 10)  # keeps the refresh out of the way
         chapter_id = add_chapter(
             repo,
             novel_id,
@@ -63,26 +64,59 @@ class TestStep__OrderOfWork:
             claimed_until=clock() - timedelta(seconds=1),
         )
 
-        assert worker.step() == "download"
+        assert worker.step() == "task"
         assert chapter_of(repo, chapter_id).state == "downloaded"
 
-    def test_step__prefers_a_due_refresh_over_a_download(
-        self, repo: Repo, novel_id: str, worker: Worker
+    def test_step__runs_a_due_refresh_before_queued_downloads_one_task_per_claim(
+        self, repo: Repo, novel_id: str, worker: Worker, adapter: FakeAdapter
     ) -> None:
-        chapter_id = add_chapter(repo, novel_id, 1)
+        first = add_chapter(repo, novel_id, 1)
+        second = add_chapter(repo, novel_id, 2)
+        adapter.toc_urls = [f"{URL}/1", f"{URL}/2"]
 
-        assert worker.step() == "refresh"
-        assert chapter_of(repo, chapter_id).state == "pending"
-        assert worker.step() == "download"
-        assert chapter_of(repo, chapter_id).state == "downloaded"
+        assert worker.step() == "task"  # the refresh
+        assert (chapter_of(repo, first).state, adapter.fetched) == ("pending", [])
+        assert worker.step() == "task"  # one download
+        assert (chapter_of(repo, first).state, chapter_of(repo, second).state) == (
+            "downloaded", "pending",
+        )  # fmt: skip
+        assert worker.step() == "task"
+        assert chapter_of(repo, second).state == "downloaded"
 
-    def test_step__returns_build_when_an_export_was_built(
-        self, novel_id: str, worker: Worker, monkeypatch: pytest.MonkeyPatch
+    def test_step__runs_recover_notifications_trash_repair_runner_then_maintenance_in_order(
+        self, worker: Worker, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(Worker, "_build_export", lambda self: True)
+        calls: list[str] = []
+        runner = worker._runner  # noqa: SLF001
+        monkeypatch.setattr(runner, "recover", lambda: calls.append("recover"))
+        monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("notify"))
+        monkeypatch.setattr(worker, "_empty_trash", lambda: calls.append("trash"))
+        monkeypatch.setattr(worker, "_repair", lambda: calls.append("repair"))
 
-        assert worker.step() == "refresh"
-        assert worker.step() == "build"
+        def nothing_claimable() -> bool:
+            calls.append("runner")
+            return False
+
+        monkeypatch.setattr(runner, "step", nothing_claimable)
+        monkeypatch.setattr(worker, "_maintain", lambda: calls.append("maintain"))
+
+        assert worker.step() == "idle"
+
+        assert calls == ["recover", "notify", "trash", "repair", "runner", "maintain"]
+
+    def test_step__skips_maintenance_while_the_notifier_is_behind(
+        self, worker: Worker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(worker, "_dispatch_notifications", lambda: True)
+        monkeypatch.setattr(worker, "_maintain", lambda: calls.append("maintain"))
+
+        assert worker.step() == "notify"
+
+        assert calls == []
+
+    def test_step__has_no_stage_besides_the_runner_for_downloads(self, worker: Worker) -> None:
+        assert not hasattr(worker, "_download_batch")
 
     def test_step__runs_notification_dispatch_before_the_work(
         self, novel_id: str, worker: Worker, monkeypatch: pytest.MonkeyPatch
@@ -156,6 +190,22 @@ class TestRun__WhenIdle:
         assert chapter_of(repo, chapter_id).state == "downloaded"
 
 
+class TestRun__WithTheRemovedBatchSizeSet:
+    def test_run__starts_and_logs_config_ignored_once(
+        self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, settings: Settings,
+        tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        log.setup("worker")
+        ignored = Settings(**{**settings.__dict__, "ignored": ("NOVELHOG_BATCH_SIZE",)})
+        stop = RecordingStop(stop_after_waits=3)
+
+        make_worker(repo, adapter, fetcher, ignored, tmp_path, stop).run()
+
+        lines = [line for line in _log_lines(capsys) if line["event"] == "config_ignored"]
+        assert [line["variable"] for line in lines] == ["NOVELHOG_BATCH_SIZE"]
+        assert stop.waits == [IDLE, IDLE, IDLE]
+
+
 class TestRun__WhenAStepRaises:
     def test_run__logs_and_backs_off_5_10_20_capped_at_idle_sleep(
         self, repo: Repo, adapter: FakeAdapter, fetcher: FakeFetcher, tmp_path: Path,
@@ -196,7 +246,7 @@ class TestRun__AfterRequestStop:
         second = add_chapter(repo, novel_id, 2)
         worker = make_worker(repo, adapter, fetcher, settings, tmp_path)
         adapter.hook = lambda url: worker.request_stop()
-        repo.novels.claim_due_refresh("other", 10)  # keeps the refresh out of the way
+        repo.tasks.claim("other", 10)  # keeps the refresh out of the way
 
         worker.run()
 
@@ -276,10 +326,10 @@ class TestStep__Notifications:
         storage = LocalStaticStorage(tmp_path / "static", "/static")
         worker = Worker(repo, adapter, fetcher, storage, broken, settings, stop=RecordingStop())
 
-        assert worker.step() == "refresh"
+        assert worker.step() == "task"
         assert any(line["event"] == "notification_dispatch_failed" for line in _log_lines(capsys))
 
-    def test_step__dispatches_before_refreshing(
+    def test_step__dispatches_before_running_a_task(
         self,
         repo: Repo,
         adapter: FakeAdapter,
@@ -292,15 +342,15 @@ class TestStep__Notifications:
         worker = make_worker(repo, adapter, fetcher, settings, tmp_path, RecordingStop())
         monkeypatch.setattr(worker, "_dispatch_notifications", lambda: calls.append("dispatch"))
 
-        def refresh_due() -> bool:
-            calls.append("refresh")
+        def run_task() -> bool:
+            calls.append("task")
             return True
 
-        monkeypatch.setattr(worker, "_refresh_due", refresh_due)
+        monkeypatch.setattr(worker._runner, "step", run_task)  # noqa: SLF001
 
         worker.step()
 
-        assert calls == ["dispatch", "refresh"]
+        assert calls == ["dispatch", "task"]
 
 
 FULL = dispatcher.DispatchReport(claimed=True, events=dispatcher.BATCH, advanced=True)

@@ -1,7 +1,5 @@
 """Tests for the exports routes."""
 
-from datetime import timedelta
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
@@ -163,15 +161,7 @@ class TestDeleteExport:
             "id"
         ]
         with db.write(repo.engine) as conn:
-            conn.execute(
-                update(exports)
-                .where(exports.c.id == export_id)
-                .values(
-                    state="building",
-                    claimed_by="w",
-                    claimed_until=repo.clock() + timedelta(hours=1),
-                )
-            )
+            conn.execute(update(exports).where(exports.c.id == export_id).values(state="building"))
         _assert_error(client.delete(f"{_url(novel_id)}/{export_id}"), 409, "export_building")
 
     @pytest.mark.parametrize(

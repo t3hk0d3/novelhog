@@ -1,10 +1,11 @@
 """Compare-and-set claims, fencing and expiry for claimable rows (spec section 4, "Claims").
 
-Every claimable table has `claimed_by` / `claimed_until`. A claim is one `UPDATE … RETURNING`
-whose outer `WHERE` repeats the "free or expired" condition, so concurrent workers never claim the
-same row; there is no `SELECT … FOR UPDATE`. Writes that finish claimed work are fenced by
-`owned`. Timestamps are computed in Python and passed in; no arithmetic happens in SQL.
-These helpers are internal to `repo`.
+The claimable tables, `CLAIMABLE`, are `consumers` and `tasks`: the tables with `claimed_by` /
+`claimed_until`. Chapter downloads and export builds are claimed through their task. A claim is
+one `UPDATE … RETURNING` whose outer `WHERE` repeats the "free or expired" condition, so
+concurrent workers never claim the same row; there is no `SELECT … FOR UPDATE`.
+Writes that finish claimed work are fenced by `owned`. Timestamps are computed in Python and
+passed in; no arithmetic happens in SQL. These helpers are internal to `repo`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -15,9 +16,9 @@ from sqlalchemy import Column, ColumnElement, Connection, Row, Table, and_, exis
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import UnaryExpression
 
-from novelhog.repo.schema import chapters, consumers, exports, novels
+from novelhog.repo.schema import consumers, tasks
 
-CLAIMABLE: tuple[Table, ...] = (novels, chapters, exports, consumers)
+CLAIMABLE: tuple[Table, ...] = (consumers, tasks)
 
 
 def _key(table: Table) -> Column[Any]:
@@ -70,6 +71,7 @@ def claim(
     extra_set: Mapping[str, object] = {},  # noqa: B006  (read-only default)
     returning: list[Column[Any]],
     retries: int = 3,
+    recheck: ColumnElement[bool] | None = None,
 ) -> list[Row[Any]]:
     """Claim up to `n` eligible, available rows for `owner` and return them sorted by `priority`.
 
@@ -77,6 +79,10 @@ def claim(
     on eligible rows; a priority column missing from `returning` is added to the returned rows.
     A statement that claims fewer than `n` rows while eligible rows remain (a lost race) is
     retried up to `retries` times.
+
+    `recheck` is added to the outer `WHERE` beside "free or expired". On Postgres the outer
+    `WHERE` is re-evaluated against the newest row version after a concurrent update, so a row
+    that stopped satisfying `recheck` meanwhile (for example a cancelled task) is not claimed.
     """
     _reject_claim_columns(extra_set)
     key = _key(table)
@@ -90,7 +96,7 @@ def claim(
         candidates = select(key).where(and_(eligible, free)).order_by(*priority, key).limit(wanted)
         statement = (
             table.update()
-            .where(key.in_(candidates), free)
+            .where(key.in_(candidates), free if recheck is None else and_(free, recheck))
             .values({"claimed_by": owner, "claimed_until": until, **extra_set})
             .returning(*columns)
         )

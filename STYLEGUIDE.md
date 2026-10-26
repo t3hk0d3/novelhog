@@ -26,6 +26,11 @@ One styleguide for the whole project. Later plans follow it and extend it here.
   `append`. Snapshots are built lazily inside `append` (callable payload), after the clock is
   taken (spec section 4, "Lock order").
 
+- Task handlers (`repo/task_kinds/`) are the transactional half of a task kind and processors
+  (`worker/tasks/`) the network half (tasks spec section 5); a processor never opens a
+  transaction and a handler never does network I/O.
+- Task log events are named `task_<verb>` (`task_started`, `task_retry`, ...).
+
 ## TypeScript
 
 - Strict mode; `eslint` + `prettier`.
@@ -41,6 +46,8 @@ src/novelhog/{api,worker,domain,repo,scraper_adapter,exporter,notifications,
               storage.py,html_to_markdown.py,image_fetcher.py,images.py,net.py,
               chapter_store.py,vapid.py,ids.py,config.py,log.py,cli.py}
 src/novelhog/repo/migrations/   (Alembic: env.py, versions/)
+src/novelhog/repo/task_kinds/   (per-kind repo handlers: the transactional half of a task)
+src/novelhog/worker/tasks/      (per-kind processors: the network half of a task)
 web/src/{routes,components,api,hooks,theme}   web/public/{sw.js,manifest.webmanifest,icons}
 tests/{unit,integration/{repo,worker,notifications},api,container,fixtures}
 tools/             (repository tooling, e.g. import-linter contract types)
@@ -53,7 +60,8 @@ docs/superpowers/specs/
 - Every test directory has an `__init__.py` (module names repeat across `unit`, `integration`
   and `api`).
 - One test per BDD effect, grouped in classes named after the scenario, for example
-  `class TestClaimBatch__OnClaimedNovel`.
+  `class TestClaimBatch__OnClaimedNovel`. Test classes for task kinds are named
+  `TestNovelRefresh__<scenario>`, `TestChapterDownload__<scenario>`, `TestExportBuild__<scenario>`.
 - Fixtures live in `tests/conftest.py`.
 - Integration tests use a real temporary database (SQLite by default, PostgreSQL via
   `NOVELHOG_TEST_DATABASE_URL`). They never mock `repo`.

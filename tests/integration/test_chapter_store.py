@@ -17,7 +17,7 @@ def novel_id(repo: Repo) -> str:
 
 class TestChapterStore__Get:
     def test_get__returns_the_stored_markdown(self, repo: Repo, novel_id: str) -> None:
-        chapter_id = add_chapter(repo, novel_id, 1, state="downloaded", queued_at=None)
+        chapter_id = add_chapter(repo, novel_id, 1, state="downloaded")
         with db.write(repo.engine) as conn:
             contents_repo.put(conn, chapter_id, "# Hello\n\nWorld", repo.clock())
 

@@ -23,10 +23,19 @@ from sqlalchemy.schema import SchemaItem
 SQLITE_BUSY_TIMEOUT_MS = 15000
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _WRITE_OPTION = "novelhog_write"
+# The `transaction_info` key of the task rows touched since the last `TaskQueue.stamp`.
+TASKS_TOUCHED = "tasks_touched"
 
 
 class Busy(Exception):  # noqa: N818  (public name fixed by the spec: `repo.Busy`)
     """A write found the database locked (SQLite), or hit a deadlock or lock timeout (Postgres)."""
+
+
+class UnstampedTaskWriteError(RuntimeError):
+    """A write transaction changed a task row and did not call `TaskQueue.stamp` after it.
+
+    The rows would commit without their change cursor, so `since` polling would miss them.
+    """
 
 
 class SchemaOutdated(Exception):  # noqa: N818  (public name fixed by the spec)
@@ -105,12 +114,18 @@ def write(engine: Engine) -> Iterator[Connection]:
     On SQLite the transaction starts with `BEGIN IMMEDIATE`; a lock that outlasts the busy
     timeout is raised as `Busy`. On Postgres a deadlock (40P01) or lock timeout (55P03) is
     raised as `Busy` too (spec section 4, "Lock order").
+
+    A transaction that touched a task row after its last `TaskQueue.stamp` is rolled back with
+    `UnstampedTaskWriteError` (tasks spec section 4, "Change cursor").
     """
     try:
         with engine.connect() as connection:
             connection.execution_options(**{_WRITE_OPTION: True})
             with connection.begin():
                 yield connection
+                if transaction_info(connection).get(TASKS_TOUCHED):
+                    message = "a task write was not followed by TaskQueue.stamp"
+                    raise UnstampedTaskWriteError(message)
     except OperationalError as error:
         if _is_busy(error):
             raise Busy(str(error.orig)) from error
@@ -132,6 +147,24 @@ def optimize(engine: Engine) -> None:
         cursor.close()
     finally:
         connection.close()
+
+
+_TRANSACTION_INFO = "novelhog_transaction_info"
+
+
+def transaction_info(conn: Connection) -> dict[str, Any]:
+    """Return a scratch dict that lives as long as the connection's current transaction.
+
+    `Connection.info` belongs to the pooled DBAPI connection and outlives the transaction, so the
+    dict is tied to the transaction object and starts empty in every new transaction.
+    """
+    transaction = conn.get_transaction()
+    held = conn.info.get(_TRANSACTION_INFO)
+    if held is None or held[0] is not transaction:
+        held = (transaction, {})
+        conn.info[_TRANSACTION_INFO] = held
+    info: dict[str, Any] = held[1]
+    return info
 
 
 @contextmanager

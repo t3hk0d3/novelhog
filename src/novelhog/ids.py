@@ -3,7 +3,7 @@
 import re
 import secrets
 
-PREFIXES: frozenset[str] = frozenset({"NV", "CH", "EX", "SB"})
+PREFIXES: frozenset[str] = frozenset({"NV", "CH", "EX", "SB", "TK"})
 
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _BODY_LENGTH = 12

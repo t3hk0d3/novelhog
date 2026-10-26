@@ -32,9 +32,9 @@ from novelhog.repo.claims import (
     release,
     renew,
 )
-from novelhog.repo.schema import chapters, consumers, exports, novels
+from novelhog.repo.schema import consumers, metadata, tasks
 from novelhog.repo.types import UTCDateTime
-from tests.integration.helpers import NOW, chapter_row, insert_novel_with_chapter
+from tests.integration.helpers import NOW
 
 TTL = timedelta(minutes=5)
 
@@ -92,8 +92,12 @@ def _ids(rows: list[Row[Any]]) -> list[int]:
 
 
 class TestClaimable:
-    def test_claimable__lists_the_four_claimable_tables(self) -> None:
-        assert CLAIMABLE == (novels, chapters, exports, consumers)
+    def test_claimable__lists_the_claimable_tables(self) -> None:
+        assert CLAIMABLE == (consumers, tasks)
+
+    def test_claimable__are_exactly_the_tables_with_claim_columns(self) -> None:
+        with_claims = {table.name for table in metadata.sorted_tables if "claimed_by" in table.c}
+        assert {table.name for table in CLAIMABLE} == with_claims
 
 
 class TestClaim__WithAnAvailableEligibleRow:
@@ -363,49 +367,6 @@ class TestClaim__Statements:
         assert not any("FOR UPDATE" in s.upper() for s in statements)
 
 
-class TestClaim__OnChapters:
-    def test_claim__claims_pending_chapters_in_queue_order(self, repo: Repo) -> None:
-        with db.write(repo.engine) as connection:
-            insert_novel_with_chapter(connection)
-            queued = {"state": "pending", "queued_at": NOW}
-            connection.execute(
-                chapters.update().where(chapters.c.id == "CH000000000001").values(**queued)
-            )
-            for row in (
-                chapter_row(
-                    id="CH000000000002", url="https://example.com/novel/2", position=2, **queued
-                ),
-                chapter_row(
-                    id="CH000000000003",
-                    url="https://example.com/novel/3",
-                    position=3,
-                    priority=True,
-                    **queued,
-                ),
-                chapter_row(id="CH000000000004", url="https://example.com/novel/4", position=4),
-            ):
-                connection.execute(insert(chapters).values(**row))
-
-        with db.write(repo.engine) as connection:
-            rows = claim(
-                connection,
-                chapters,
-                eligible=chapters.c.state == "pending",
-                priority=[chapters.c.priority.desc(), chapters.c.queued_at, chapters.c.position],
-                owner="w1",
-                now=NOW,
-                ttl=TTL,
-                n=10,
-                returning=[chapters.c.id],
-            )
-
-        assert [row.id for row in rows] == ["CH000000000003", "CH000000000001", "CH000000000002"]
-        with db.read(repo.engine) as connection:
-            owners = dict(connection.execute(select(chapters.c.id, chapters.c.claimed_by)).all())
-        assert owners["CH000000000004"] is None
-        assert owners["CH000000000003"] == "w1"
-
-
 class TestClaim__Validation:
     def test_claim__rejects_extra_values_that_set_the_claim_columns(self, engine: Engine) -> None:
         for column in ("claimed_by", "claimed_until"):
@@ -421,6 +382,46 @@ class TestClaim__Validation:
         _add_jobs(engine, _job(1, rank=2), _job(2, rank=2), _job(3, rank=1))
 
         assert _ids(_claim(engine, "w1", n=3, priority=[jobs.c.rank.desc()])) == [1, 2, 3]
+
+
+class TestClaim__WithRecheck:
+    def test_claim__a_row_that_fails_recheck_when_the_update_runs_is_not_claimed(
+        self, engine: Engine
+    ) -> None:
+        _add_jobs(engine, _job(1, note="changed"), _job(2, note=None))
+
+        rows = _claim(engine, "w1", n=2, recheck=jobs.c.note.is_(None))
+
+        assert _ids(rows) == [2]
+        assert _state(engine, 1).claimed_by is None
+
+    def test_claim__a_row_changed_by_a_concurrent_transaction_is_not_claimed(
+        self, engine: Engine
+    ) -> None:
+        if engine.dialect.name != "postgresql":
+            pytest.skip("SQLite serialises writers; the blocked claim only happens on Postgres")
+        _add_jobs(engine, _job(1))
+        outcome: list[list[int]] = []
+        failures: list[BaseException] = []
+
+        def blocked_claim() -> None:
+            try:
+                outcome.append(_ids(_claim(engine, "b", recheck=jobs.c.note.is_(None))))
+            except BaseException as error:  # noqa: BLE001  (re-raised in the main thread)
+                failures.append(error)
+
+        with db.write(engine) as connection:
+            connection.execute(jobs.update().where(jobs.c.id == 1).values(note="changed"))
+            thread = threading.Thread(target=blocked_claim)
+            thread.start()
+            thread.join(timeout=1)
+            assert thread.is_alive(), "the claim should block on the concurrent update's row lock"
+        thread.join(timeout=30)
+
+        if failures:
+            raise failures[0]
+        assert outcome == [[]]
+        assert _state(engine, 1).claimed_by is None
 
 
 class TestRenew:

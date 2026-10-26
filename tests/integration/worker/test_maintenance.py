@@ -1,18 +1,19 @@
 """Worker trash emptying and periodic maintenance (spec sections 4 and 6.1)."""
 
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from structlog.testing import capture_logs
 
 from novelhog.config import Settings
+from novelhog.domain.tasks import TASK_RETENTION, TaskKind, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo import trash as trash_table
-from novelhog.repo.schema import consumers
+from novelhog.repo.schema import consumers, tasks
 from novelhog.repo.schema import events as events_table
 from novelhog.repo.trash import TRASH_GRACE_S
 from novelhog.storage import LocalStaticStorage
@@ -150,6 +151,66 @@ class TestMaintain:
         repo.optimize()  # must not raise on either database
 
 
+class TestMaintain__TaskRetention:
+    @pytest.fixture
+    def novel(self, repo: Repo) -> str:
+        repo.hosts.publish(["example.com"])
+        return repo.novels.create("https://example.com/novel", followed=True).id
+
+    def _finished(self, repo: Repo, novel: str, number: int, finished_at: datetime) -> str:
+        """Insert a `done` refresh task of the novel that finished at `finished_at`."""
+        task_id = f"TK{number:012d}"
+        with db.write(repo.engine) as conn:
+            conn.execute(
+                insert(tasks).values(
+                    id=task_id,
+                    kind=TaskKind.NOVEL_REFRESH.value,
+                    entity_id=novel,
+                    novel_id=novel,
+                    state=TaskState.DONE.value,
+                    priority=300,
+                    run_after=finished_at,
+                    change_seq=1,
+                    created_at=finished_at,
+                    updated_at=finished_at,
+                    finished_at=finished_at,
+                )
+            )
+        return task_id
+
+    def _task_ids(self, repo: Repo) -> set[str]:
+        with db.read(repo.engine) as conn:
+            return set(conn.execute(select(tasks.c.id)).scalars())
+
+    def test_maintain__deletes_finished_tasks_older_than_task_retention(
+        self, repo: Repo, novel: str, clock: FakeClock
+    ) -> None:
+        old = self._finished(repo, novel, 1, clock() - TASK_RETENTION - timedelta(seconds=1))
+
+        maintenance.maintain(repo, now=clock())
+
+        assert old not in self._task_ids(repo)
+
+    def test_maintain__keeps_live_tasks_and_newer_finished_ones(
+        self, repo: Repo, novel: str, clock: FakeClock
+    ) -> None:
+        live = self._task_ids(repo)  # the novel's queued refresh
+        clock.advance(days=30)  # the live task is old, but not finished
+        recent = self._finished(repo, novel, 1, clock() - TASK_RETENTION + timedelta(seconds=1))
+
+        maintenance.maintain(repo, now=clock())
+
+        assert self._task_ids(repo) == live | {recent}
+
+    def test_maintain__reports_tasks_pruned(self, repo: Repo, novel: str, clock: FakeClock) -> None:
+        for number in (1, 2):
+            self._finished(repo, novel, number, clock() - TASK_RETENTION - timedelta(hours=1))
+
+        report = maintenance.maintain(repo, now=clock())
+
+        assert report.tasks_pruned == 2
+
+
 class TestStep__Housekeeping:
     @pytest.fixture
     def worker(
@@ -207,9 +268,9 @@ class TestStep__Housekeeping:
     ) -> None:
         calls: list[object] = []
         monkeypatch.setattr(maintenance, "maintain", lambda _repo, *, now: calls.append(now))
-        monkeypatch.setattr(worker, "_download_batch", lambda: True)
+        monkeypatch.setattr(worker._runner, "step", lambda: True)  # noqa: SLF001
 
-        assert worker.step() == "download"
+        assert worker.step() == "task"
         assert calls == []
 
     def test_step__logs_a_maintenance_failure_and_waits_an_hour_to_retry(

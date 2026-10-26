@@ -9,13 +9,16 @@ from sqlalchemy import insert, select, update
 
 from novelhog.domain.chapters import ChapterRange, ChapterState
 from novelhog.domain.errors import NotFound, ValidationFailed
+from novelhog.domain.tasks import PRIORITY_USER, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import chapters as chapters_repo
 from novelhog.repo import events as event_log
 from novelhog.repo.chapters import error_of
 from novelhog.repo.schema import chapter_contents, chapters, events, exports
 from tests.conftest import FakeClock
-from tests.integration.helpers import assert_no_events_after_delete, chapter_row, export_row
+from tests.integration.helpers import assert_no_events_after_delete, export_row
+from tests.integration.task_fakes import claim_task, tasks_of
+from tests.integration.worker.conftest import add_chapter
 
 URL = "https://example.com/novel"
 
@@ -31,14 +34,12 @@ def chapter_id(position: int) -> str:
 
 
 def add_chapters(repo: Repo, novel_id: str, specs: list[dict[str, Any]]) -> None:
-    """Insert chapters at positions 1..n with `specs[i]` overrides."""
-    with db.write(repo.engine) as conn:
-        for i, spec in enumerate(specs, start=1):
-            row = (
-                chapter_row(id=chapter_id(i), novel_id=novel_id, url=f"{URL}/{i}", position=i)
-                | spec
-            )
-            conn.execute(insert(chapters).values(**row))
+    """Insert chapters at positions 1..n, `not_requested` unless `specs[i]` overrides it.
+
+    A `pending` chapter gets its queued download task, a `downloading` one its running task.
+    """
+    for i, spec in enumerate(specs, start=1):
+        add_chapter(repo, novel_id, i, **({"state": "not_requested"} | spec))
 
 
 def set_state(repo: Repo, at: int, **values: Any) -> None:
@@ -182,15 +183,19 @@ class TestGet:
 
 class TestPatch__ToPending:
     @pytest.mark.parametrize("state", ["not_requested", "error", "downloaded"])
-    def test_patch__sets_pending_queued_at_now_priority_0(
+    def test_patch__sets_pending_and_queues_a_user_download_due_now(
         self, repo: Repo, novel_id: str, clock: FakeClock, state: str
     ) -> None:
-        add_chapters(repo, novel_id, [{"state": state, "priority": 1}])
+        add_chapters(repo, novel_id, [{"state": state}])
         clock.advance(minutes=5)
         result = repo.chapters.patch(novel_id, ChapterState.PENDING, [1])
         row = row_of(repo, 1)
-        assert (row.state, row.queued_at, row.priority) == ("pending", clock.current, 0)
-        assert row.updated_at == clock.current
+        assert (row.state, row.updated_at) == ("pending", clock.current)
+        assert repo.chapters.get(chapter_id(1)).queued_at == clock.current
+        [task] = tasks_of(repo, chapter_id(1))
+        assert (task.state, task.priority, task.ordinal, task.run_after) == (
+            TaskState.QUEUED, PRIORITY_USER, 1, clock.current,
+        )  # fmt: skip
         assert result.updated == [1]
         assert result.skipped == []
 
@@ -259,31 +264,26 @@ class TestPatch__ToPending:
 
 
 class TestPatch__ToNotRequested:
-    def test_patch__clears_queued_at(self, repo: Repo, novel_id: str, clock: FakeClock) -> None:
-        add_chapters(repo, novel_id, [{"state": "pending", "queued_at": clock.current}])
+    def test_patch__cancels_the_queued_download_and_clears_queued_at(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "pending"}])
         result = repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
-        row = row_of(repo, 1)
-        assert (row.state, row.queued_at) == ("not_requested", None)
+        assert row_of(repo, 1).state == "not_requested"
+        assert repo.chapters.get(chapter_id(1)).queued_at is None
+        assert [t.state for t in tasks_of(repo, chapter_id(1))] == [TaskState.CANCELLED]
         assert result.updated == [1]
 
-    def test_patch__clears_the_claim_of_an_unstarted_chapter(
-        self, repo: Repo, novel_id: str, clock: FakeClock
+    def test_patch__cancels_the_claimed_task_of_an_unstarted_chapter(
+        self, repo: Repo, novel_id: str
     ) -> None:
-        add_chapters(
-            repo,
-            novel_id,
-            [
-                {
-                    "state": "pending",
-                    "queued_at": clock.current,
-                    "claimed_by": "w1",
-                    "claimed_until": clock.current + timedelta(minutes=5),
-                }
-            ],
-        )
+        add_chapters(repo, novel_id, [{"state": "pending"}])
+        claim_task(repo, chapter_id(1), "w1")
         repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
-        row = row_of(repo, 1)
-        assert (row.state, row.claimed_by, row.claimed_until) == ("not_requested", None, None)
+        [task] = tasks_of(repo, chapter_id(1))
+        assert (row_of(repo, 1).state, task.state, task.claimed_by) == (
+            "not_requested", TaskState.CANCELLED, None,
+        )  # fmt: skip
 
 
 def add_export(
@@ -308,7 +308,7 @@ def export_of(repo: Repo, export_id: str) -> Any:
         return conn.execute(select(exports).where(exports.c.id == export_id)).one()
 
 
-PENDING = {"state": "pending", "queued_at": export_row()["created_at"]}
+PENDING = {"state": "pending"}
 
 
 class TestPatch__DequeueNeededByAWaitingExport:
@@ -371,16 +371,7 @@ class TestPatch__DequeueNeededByAWaitingExport:
         self, repo: Repo, novel_id: str
     ) -> None:
         add_chapters(repo, novel_id, [PENDING])
-        add_export(
-            repo,
-            novel_id,
-            "EX000000000001",
-            1,
-            1,
-            state="building",
-            claimed_by="w1",
-            claimed_until=repo.clock() + timedelta(minutes=5),
-        )
+        add_export(repo, novel_id, "EX000000000001", 1, 1, state="building")
         add_export(
             repo, novel_id, "EX000000000002", 1, 1, state="ready", storage_key="k", size_bytes=1
         )
@@ -411,11 +402,10 @@ class TestPatch__OnOtherStates:
                 {},
                 {
                     "state": "downloading",
-                    "queued_at": clock.current,
                     "claimed_by": "w1",
                     "claimed_until": clock.current + timedelta(minutes=5),
                 },
-                {"state": "pending", "queued_at": clock.current},
+                {"state": "pending"},
             ],
         )
         result = repo.chapters.patch(novel_id, ChapterState.PENDING, [1, 2, 3])
@@ -432,7 +422,6 @@ class TestPatch__OnOtherStates:
             [
                 {
                     "state": "downloading",
-                    "queued_at": clock.current,
                     "claimed_by": "w1",
                     "claimed_until": clock.current + timedelta(minutes=5),
                 }
@@ -441,6 +430,7 @@ class TestPatch__OnOtherStates:
         result = repo.chapters.patch(novel_id, ChapterState.NOT_REQUESTED, [1])
         assert result.updated == []
         assert result.skipped == [(1, ChapterState.DOWNLOADING)]
+        assert [t.state for t in tasks_of(repo, chapter_id(1))] == [TaskState.RUNNING]
 
     def test_patch__nothing_changed_appends_no_events(self, repo: Repo, novel_id: str) -> None:
         add_chapters(repo, novel_id, [{"state": "downloaded"}])

@@ -15,3 +15,4 @@ class RepoContext:
     clock: Callable[[], datetime]
     static_base_url: str
     refresh_min_interval: int
+    refresh_max_interval: int

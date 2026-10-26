@@ -6,6 +6,8 @@ from typing import Any
 import pytest
 from sqlalchemy import insert, select, update
 
+from novelhog.domain.chapters import ChapterState
+from novelhog.domain.tasks import PRIORITY_RELEASE, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import events as event_log
 from novelhog.repo.chapters import TocDiff, apply_toc
@@ -13,6 +15,7 @@ from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import chapter_contents, chapters, events, exports
 from tests.conftest import FakeClock
 from tests.integration.helpers import assert_no_events_after_delete, export_row
+from tests.integration.task_fakes import claim_task, start_task, tasks_of
 
 BASE = "https://example.com/novel"
 
@@ -43,6 +46,7 @@ def sync(
             static_base_url="/static",
             released=diff.new,
         )
+        repo.tasks._queue.stamp(conn)  # noqa: SLF001  (the caller's last step)
     return diff
 
 
@@ -80,25 +84,26 @@ class TestApplyToc__OnTheInitialImport:
     ) -> None:
         sync(repo, novel_id, [u(1)], initial=True, followed=True)
         row = rows(repo, novel_id)[u(1)]
-        assert (row.state, row.queued_at, row.priority) == ("not_requested", None, 0)
+        assert row.state == "not_requested"
+        assert tasks_of(repo, row.id) == []
 
 
 class TestApplyToc__OnLaterSyncWithNewUrls:
-    def test_apply_toc__followed_novel_queues_new_chapters_with_priority_1(
+    def test_apply_toc__followed_novel_queues_new_chapters_at_release_priority(
         self, repo: Repo, novel_id: str, clock: FakeClock
     ) -> None:
         sync(repo, novel_id, [u(1)], initial=True)
         clock.advance(hours=6)
         diff = sync(repo, novel_id, [u(1), u(2), u(3)])
         found = rows(repo, novel_id)
-        for url in (u(2), u(3)):
+        for position, url in ((2, u(2)), (3, u(3))):
             r = found[url]
-            assert (r.state, r.queued_at, r.priority, r.released_at) == (
-                "pending",
-                clock.current,
-                1,
-                clock.current,
-            )
+            assert (r.state, r.released_at) == ("pending", clock.current)
+            [task] = tasks_of(repo, r.id)
+            assert (task.state, task.priority, task.ordinal, task.run_after) == (
+                TaskState.QUEUED, PRIORITY_RELEASE, position, clock.current,
+            )  # fmt: skip
+            assert repo.chapters.get(r.id).queued_at == clock.current
         assert diff.new == [2, 3]
 
     def test_apply_toc__unfollowed_novel_adds_not_requested_released_chapters(
@@ -108,7 +113,8 @@ class TestApplyToc__OnLaterSyncWithNewUrls:
         clock.advance(hours=6)
         diff = sync(repo, novel_id, [u(1), u(2)], followed=False)
         r = rows(repo, novel_id)[u(2)]
-        assert (r.state, r.queued_at, r.released_at) == ("not_requested", None, clock.current)
+        assert (r.state, r.released_at) == ("not_requested", clock.current)
+        assert tasks_of(repo, r.id) == []
         assert diff.new == [2]
 
     def test_apply_toc__nv_event_carries_the_released_positions(
@@ -180,31 +186,18 @@ class TestApplyToc__WithAUrlRemoved:  # RF-4
         assert diff.removed == [before[u(2)].id]
         assert diff.moved == [before[u(3)].id]
 
-    def test_apply_toc__removed_pending_chapter_is_dequeued_and_its_claim_released(
+    def test_apply_toc__removed_pending_chapter_is_dequeued_and_its_claimed_task_cancelled(
         self, repo: Repo, novel_id: str, clock: FakeClock
     ) -> None:
         sync(repo, novel_id, [u(1), u(2)], initial=True)
         before = rows(repo, novel_id)
-        with db.write(repo.engine) as conn:
-            conn.execute(
-                update(chapters)
-                .where(chapters.c.id == before[u(2)].id)
-                .values(
-                    state="pending",
-                    queued_at=clock.current,
-                    claimed_by="w1",
-                    claimed_until=clock.current.replace(year=2030),
-                )
-            )
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [2])
+        claim_task(repo, before[u(2)].id, "w1")
         diff = sync(repo, novel_id, [u(1)])
         r = rows(repo, novel_id)[u(2)]
-        assert (r.state, r.queued_at, r.claimed_by, r.claimed_until, r.position) == (
-            "not_requested",
-            None,
-            None,
-            None,
-            None,
-        )
+        assert (r.state, r.position) == ("not_requested", None)
+        [task] = tasks_of(repo, r.id)
+        assert (task.state, task.claimed_by) == (TaskState.CANCELLED, None)
         assert diff.dequeued == [before[u(2)].id]
         payload = chapter_events(repo)[-1].payload
         assert payload["state"] == "not_requested"
@@ -215,12 +208,8 @@ class TestApplyToc__WithAUrlRemoved:  # RF-4
     ) -> None:
         sync(repo, novel_id, [u(1), u(2)], initial=True)
         before = rows(repo, novel_id)
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [2])
         with db.write(repo.engine) as conn:
-            conn.execute(
-                update(chapters)
-                .where(chapters.c.id == before[u(2)].id)
-                .values(state="pending", queued_at=clock.current)
-            )
             conn.execute(
                 insert(exports).values(
                     **export_row(
@@ -234,25 +223,18 @@ class TestApplyToc__WithAUrlRemoved:  # RF-4
         with db.read(repo.engine) as conn:
             assert conn.execute(select(exports.c.state)).scalar_one() == "waiting"
 
-    def test_apply_toc__removed_downloading_chapter_keeps_state_and_claim(
+    def test_apply_toc__removed_downloading_chapter_keeps_state_and_its_running_task(
         self, repo: Repo, novel_id: str, clock: FakeClock
     ) -> None:
         sync(repo, novel_id, [u(1), u(2)], initial=True)
         before = rows(repo, novel_id)
-        with db.write(repo.engine) as conn:
-            conn.execute(
-                update(chapters)
-                .where(chapters.c.id == before[u(2)].id)
-                .values(
-                    state="downloading",
-                    queued_at=clock.current,
-                    claimed_by="w1",
-                    claimed_until=clock.current.replace(year=2030),
-                )
-            )
+        repo.chapters.patch(novel_id, ChapterState.PENDING, [2])
+        start_task(repo, before[u(2)].id, "w1")
         diff = sync(repo, novel_id, [u(1)])
         r = rows(repo, novel_id)[u(2)]
-        assert (r.state, r.claimed_by, r.position) == ("downloading", "w1", None)
+        assert (r.state, r.position) == ("downloading", None)
+        [task] = tasks_of(repo, r.id)
+        assert (task.state, task.claimed_by) == (TaskState.RUNNING, "w1")
         assert diff.dequeued == []
 
 
@@ -435,6 +417,7 @@ class TestApplyToc__RacingADelete:
                         static_base_url="/static",
                         released=diff.new,
                     )
+                    repo.tasks._queue.stamp(conn)  # noqa: SLF001  (the caller's last step)
                 outcomes.append("sync:ok")
             except BaseException as error:  # noqa: BLE001  (reported through the outcomes)
                 outcomes.append(f"sync:{error!r}")

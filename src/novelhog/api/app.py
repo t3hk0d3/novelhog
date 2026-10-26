@@ -20,6 +20,7 @@ from novelhog.api import (
     routes_novels,
     routes_settings,
     routes_subscriptions,
+    routes_tasks,
 )
 from novelhog.api.checks import OriginChecks
 from novelhog.config import Settings
@@ -144,6 +145,7 @@ def create_app(
             settings.database_url,
             static_base_url=settings.static_base_url,
             refresh_min_interval=settings.refresh_min_interval,
+            refresh_max_interval=settings.refresh_max_interval,
         )
 
     @asynccontextmanager
@@ -184,4 +186,5 @@ def create_app(
     app.include_router(routes_exports.router, prefix=API_PREFIX)
     app.include_router(routes_subscriptions.router, prefix=API_PREFIX)
     app.include_router(routes_events.router, prefix=API_PREFIX)
+    app.include_router(routes_tasks.router, prefix=API_PREFIX)
     return app

@@ -3,7 +3,7 @@
  * OpenAPI document does not describe the stream. Entity events are state snapshots; a delete
  * is the short `deleted` form.
  */
-import type { Chapter, Export, Novel } from './client';
+import type { Chapter, Export, Novel, Task } from './client';
 
 /** `novel` event: a snapshot, plus the positions a sync released. */
 export type NovelEvent = Novel & { released?: number[] };
@@ -18,6 +18,13 @@ export type ChapterEvent = Omit<Chapter, 'position'> & {
 /** `export` event. */
 export type ExportEvent = Export;
 export type ExportDeletedEvent = { id: string; novel_id: string; deleted: true };
+
+/**
+ * `task` events (`TK` rows of the log) carry the Task object of the tasks API. The UI does not
+ * listen for them yet, so `task` is deliberately not an `EventName` and not in `EVENT_NAMES`;
+ * the stream still delivers them, and they advance `Last-Event-ID`.
+ */
+export type TaskEvent = Task;
 
 /** `ready` and `resync` carry no data. */
 export type EmptyEvent = Record<string, never>;

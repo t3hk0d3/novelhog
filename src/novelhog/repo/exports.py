@@ -1,17 +1,18 @@
-"""Exports: snapshots, the repository and the worker's claim, finish and fail (spec 4, 5.5, 6.5).
+"""Exports: snapshots, the repository and the build enqueueing (spec 4, 5.5, 6.5; tasks spec 5.1).
 
-`snapshot` and `affected_waiting` are internal helpers shared with the event writers. Every
-per-novel write transaction of `Exports` follows the lock order of spec section 4: `lock_novel`
-first, then the rows, then the events last. `claim_ready` selects across novels and is exempt;
-its per-export follow-up takes the novel lock.
+`snapshot`, `affected_waiting`, `fail_cancelled`, `buildable`, `enqueue_buildable`, `begin_build`
+and `read_claim` are internal helpers that take the caller's `Connection`. Builds run as
+`export_build` tasks (`repo/task_kinds/export_build.py`). Every per-novel write transaction
+follows the lock order of tasks spec section 4: `lock_novel` first, then the rows (task enqueues
+and cancels included), then the events, then `TaskQueue.stamp` last.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Connection, and_, delete, exists, func, insert, or_, select, update
+from sqlalchemy import Connection, and_, exists, func, insert, or_, select, update
 from sqlalchemy.orm import aliased
 
 from novelhog import ids
@@ -19,16 +20,20 @@ from novelhog.domain.chapters import ChapterRange, ChapterState, resolve_selecto
 from novelhog.domain.errors import Conflict, NotFound, ValidationFailed
 from novelhog.domain.exports import FORMATS, ExportState, Format, export_filename, format_for_mime
 from novelhog.domain.payloads import ExportBlocked, ExportProgress, ExportView, deleted_export
+from novelhog.domain.tasks import PRIORITY_BUILD, TaskKind
 from novelhog.domain.urls import static_url
 from novelhog.repo import chapters as chapters_repo
-from novelhog.repo import claims, db, events, trash
+from novelhog.repo import db, events, trash
+from novelhog.repo import tasks as task_queue
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapters, exports, novels, storage_trash
+from novelhog.repo.schema import chapters, exports, novels
+from novelhog.repo.tasks import TaskQueue
 
 _WAITING = ExportState.WAITING.value
 _BUILDING = ExportState.BUILDING.value
 _DOWNLOADED = ChapterState.DOWNLOADED.value
+_BUILD = TaskKind.EXPORT_BUILD
 
 
 def snapshot(conn: Connection, export_id: str, *, static_base_url: str) -> ExportView:
@@ -134,15 +139,16 @@ def affected_waiting(
 
 
 def fail_cancelled(
-    conn: Connection, novel_id: str, cancelled_chapter_ids: Sequence[str]
+    conn: Connection, novel_id: str, cancelled_chapter_ids: Sequence[str], now: datetime
 ) -> list[str]:
     """Fail the novel's waiting exports that need a chapter the user just dequeued.
 
     An export needs a cancelled chapter when it is waiting, not `skip_missing` and the chapter
     lies in its range. It moves to `failed` with "Chapter <N> was cancelled" ("Chapters <N>,
-    <M>, … were cancelled", positions ascending). Returns the failed export ids; writes rows
-    only: the caller holds `lock_novel` and appends the `EX` events last (`emit_novel_change`
-    takes them as `failed_export_ids`). Not for the TOC sync, which never fails exports.
+    <M>, … were cancelled", positions ascending), and its queued build is cancelled. Returns the
+    failed export ids; writes rows only: the caller holds `lock_novel`, appends the `EX` events
+    (`emit_novel_change` takes them as `failed_export_ids`) and calls `TaskQueue.stamp` last. Not
+    for the TOC sync, which never fails exports.
     """
     candidates = affected_waiting(conn, novel_id, cancelled_chapter_ids)
     if not candidates:
@@ -183,13 +189,14 @@ def fail_cancelled(
             .where(exports.c.id == row.id, exports.c.state == _WAITING)
             .values(state=ExportState.FAILED.value, error=message)
         )
+        task_queue.cancel(conn, _BUILD, row.id, now=now)
         failed.append(row.id)
     return failed
 
 
 @dataclass(frozen=True)
 class ExportClaim:
-    """A waiting export claimed by a worker, with what the build needs.
+    """An export whose build started, with what the build needs (`read_claim`).
 
     `chapter_ids` are the downloaded, positioned chapters of the range in order; it is `None`
     when an end chapter lost its position (the build fails with "Range changed upstream").
@@ -206,7 +213,17 @@ class ExportClaim:
 
 
 def _end_position(chapter_id: Any) -> Any:
-    return select(chapters.c.position).where(chapters.c.id == chapter_id).scalar_subquery()
+    """The position of an end chapter of the export in the enclosing query.
+
+    Correlated to `exports` explicitly: inside the `EXISTS` of `_range_ready` auto-correlation
+    would not reach the outer `exports` and the subquery would read any export's end chapter.
+    """
+    return (
+        select(chapters.c.position)
+        .where(chapters.c.id == chapter_id)
+        .correlate(exports)
+        .scalar_subquery()
+    )
 
 
 def _range_ready() -> Any:
@@ -228,18 +245,106 @@ def _range_ready() -> Any:
     return or_(exports.c.skip_missing, first.is_(None), last.is_(None), ~incomplete)
 
 
-def _buildable() -> Any:
-    """A waiting export whose range may be built."""
+def buildable() -> Any:
+    """A waiting export whose range may be built: the one definition of "buildable" (v1 6.5)."""
     return and_(exports.c.state == _WAITING, _range_ready())
 
 
+def enqueue_buildable(
+    conn: Connection, novel_id: str, export_ids: Sequence[str], now: datetime
+) -> list[str]:
+    """Queue a build for each of the novel's `export_ids` that is buildable now (tasks spec 5.1).
+
+    Called with the waiting exports a chapter change affects (`affected_waiting`) by every
+    transaction that calls `events.emit_novel_change`, and by `Exports.create` for the new export,
+    before the transaction's first event; the caller calls `TaskQueue.stamp` last. A build is due
+    at the export's `created_at` (oldest export first) with `emit_event` (tasks spec 4, 5.2); a
+    repeated enqueue merges into the queued build. Returns the ids of the buildable exports.
+    """
+    wanted = list(dict.fromkeys(export_ids))
+    if not wanted:
+        return []
+    rows = conn.execute(
+        select(exports.c.id, exports.c.created_at)
+        .where(exports.c.id.in_(wanted), exports.c.novel_id == novel_id, buildable())
+        .order_by(exports.c.created_at, exports.c.id)
+    ).all()
+    for row in rows:
+        task_queue.enqueue(
+            conn,
+            _BUILD,
+            row.id,
+            novel_id,
+            priority=PRIORITY_BUILD,
+            run_after=row.created_at,
+            emit_event=True,
+            now=now,
+        )
+    return [row.id for row in rows]
+
+
+def begin_build(conn: Connection, export_id: str) -> bool:
+    """Move the export from `waiting` to `building` if it is buildable; False otherwise.
+
+    Writes the row only; the build handler appends the `EX` event.
+    """
+    started = conn.execute(
+        update(exports).where(exports.c.id == export_id, buildable()).values(state=_BUILDING)
+    ).rowcount
+    return started == 1
+
+
+def read_claim(conn: Connection, export_id: str) -> ExportClaim:
+    """What the build needs, read when the build starts (v1 `ExportClaim`).
+
+    `chapter_ids` are the downloaded, positioned chapters of the range in position order, or
+    `None` when an end chapter has no position (the build fails with "Range changed upstream").
+    """
+    row = conn.execute(select(exports).where(exports.c.id == export_id)).one()
+    novel = conn.execute(select(novels).where(novels.c.id == row.novel_id)).one()
+    ends = {
+        r.id: r.position
+        for r in conn.execute(
+            select(chapters.c.id, chapters.c.position).where(
+                chapters.c.id.in_([row.first_chapter_id, row.last_chapter_id])
+            )
+        )
+    }
+    first, last = ends.get(row.first_chapter_id), ends.get(row.last_chapter_id)
+    chapter_ids: list[str] | None = None
+    if first is not None and last is not None:
+        chapter_ids = list(
+            conn.execute(
+                select(chapters.c.id)
+                .where(
+                    chapters.c.novel_id == row.novel_id,
+                    chapters.c.position >= min(first, last),
+                    chapters.c.position <= max(first, last),
+                    chapters.c.state == _DOWNLOADED,
+                )
+                .order_by(chapters.c.position)
+            ).scalars()
+        )
+    return ExportClaim(
+        export_id=export_id,
+        novel_id=row.novel_id,
+        fmt=format_for_mime(row.mime),
+        filename=row.filename,
+        novel_title=novel.title,
+        language=novel.language,
+        cover_key=novel.cover_key,
+        chapter_ids=chapter_ids,
+    )
+
+
 class Exports:
-    """Creates, lists, shows and deletes exports and runs the worker's build claims."""
+    """Creates, lists, shows and deletes exports; creating one may queue its build."""
 
     def __init__(self, context: RepoContext) -> None:
         self._engine = context.engine
         self._clock = context.clock
         self._static_base_url = context.static_base_url
+        self._queue = TaskQueue(context)
 
     def _view(self, conn: Connection, export_id: str) -> ExportView:
         return snapshot(conn, export_id, static_base_url=self._static_base_url)
@@ -257,7 +362,9 @@ class Exports:
 
         Without `skip_missing`, chapters that are `not_requested` or `error` are queued (same
         rules and events as `chapters.patch`) and `waited` is set if any chapter was not yet
-        downloaded. An identical export still `waiting` or `building` is returned instead.
+        downloaded. An identical export still `waiting` or `building` is returned instead. An
+        export that is buildable at once (`skip_missing`, or its range already downloaded) gets
+        its build task in the same transaction (tasks spec 5.1).
         """
         now = self._clock()
         info = FORMATS[fmt]
@@ -322,6 +429,8 @@ class Exports:
                 ]
             )
             changed = chapters_repo.queue(conn, novel_id, queued, now=now).changed_ids
+            affected = affected_waiting(conn, novel_id, changed)
+            enqueue_buildable(conn, novel_id, [export_id, *affected], now)
             if changed:
                 # The new export is waiting and its range holds the changed chapters, so this
                 # appends its EX event (and no other event for it).
@@ -330,6 +439,7 @@ class Exports:
                 )
             else:
                 self._append(conn, novel_id, export_id, now)
+            self._queue.stamp(conn)
             return self._view(conn, export_id), True
 
     def get(self, novel_id: str, export_id: str) -> ExportView:
@@ -345,7 +455,10 @@ class Exports:
             return self._view(conn, export_id)
 
     def delete(self, novel_id: str, export_id: str) -> None:
-        """Delete a waiting, ready or failed export; a ready one's file goes to the trash."""
+        """Delete a waiting, ready or failed export; a ready one's file goes to the trash.
+
+        A queued build of the export is cancelled in the same transaction.
+        """
         now = self._clock()
         with db.write(self._engine) as conn:
             if (
@@ -376,181 +489,9 @@ class Exports:
                 raise NotFound("export", export_id)
             if row.state == ExportState.READY.value and row.storage_key is not None:
                 trash.add(conn, [row.storage_key], now)
+            task_queue.cancel(conn, _BUILD, export_id, now=now)
             events.append(conn, novel_id, export_id, deleted_export(export_id, novel_id), now=now)
-
-    def claim_ready(self, worker_id: str, ttl: int) -> ExportClaim | None:
-        """Claim the oldest buildable waiting export for `ttl` seconds and mark it `building`.
-
-        Buildable: `skip_missing`, an end chapter without position, or every chapter between
-        the ends downloaded. Returns `None` when nothing is buildable.
-
-        The claim commits first (it selects across novels and takes no novel lock); the `EX`
-        event and the chapter list follow in a second transaction under the novel lock, which
-        re-checks the range and hands the export back to `waiting` if it is no longer complete.
-        """
-        while True:
-            now = self._clock()
-            with db.write(self._engine) as conn:
-                rows = claims.claim(
-                    conn,
-                    exports,
-                    eligible=_buildable(),
-                    priority=[exports.c.created_at],
-                    owner=worker_id,
-                    now=now,
-                    ttl=timedelta(seconds=ttl),
-                    extra_set={"state": _BUILDING},
-                    returning=[exports.c.id, exports.c.novel_id],
-                )
-            if not rows:
-                return None
-            claim = self._started(rows[0].id, rows[0].novel_id, worker_id, now)
-            if claim is not None:
-                return claim
-
-    def _started(
-        self, export_id: str, novel_id: str, worker_id: str, now: datetime
-    ) -> ExportClaim | None:
-        """Follow-up of a claim under the novel lock: build the claim and append its EX event."""
-        with db.write(self._engine) as conn:
-            if not lock_novel(conn, novel_id):
-                return None
-            row = conn.execute(
-                select(exports).where(
-                    exports.c.id == export_id,
-                    exports.c.state == _BUILDING,
-                    claims.owned(exports, worker_id, now),
-                )
-            ).first()
-            if row is None:
-                return None
-            # Authoritative re-check: chapter writers hold the novel lock too, so the range
-            # cannot change between this check and the chapter list below.
-            if (
-                conn.execute(
-                    select(exports.c.id).where(exports.c.id == export_id, _range_ready())
-                ).first()
-                is None
-            ):
-                claims.release(
-                    conn,
-                    exports,
-                    [export_id],
-                    owner=worker_id,
-                    now=now,
-                    extra_set={"state": _WAITING},
-                    where=exports.c.state == _BUILDING,
-                )
-                return None
-            novel = conn.execute(select(novels).where(novels.c.id == novel_id)).one()
-            ends = {
-                r.id: r.position
-                for r in conn.execute(
-                    select(chapters.c.id, chapters.c.position).where(
-                        chapters.c.id.in_([row.first_chapter_id, row.last_chapter_id])
-                    )
-                )
-            }
-            first, last = ends.get(row.first_chapter_id), ends.get(row.last_chapter_id)
-            chapter_ids: list[str] | None = None
-            if first is not None and last is not None:
-                chapter_ids = list(
-                    conn.execute(
-                        select(chapters.c.id)
-                        .where(
-                            chapters.c.novel_id == novel_id,
-                            chapters.c.position >= min(first, last),
-                            chapters.c.position <= max(first, last),
-                            chapters.c.state == _DOWNLOADED,
-                        )
-                        .order_by(chapters.c.position)
-                    ).scalars()
-                )
-            self._append(conn, novel_id, export_id, now)
-            return ExportClaim(
-                export_id=export_id,
-                novel_id=novel_id,
-                fmt=format_for_mime(row.mime),
-                filename=row.filename,
-                novel_title=novel.title,
-                language=novel.language,
-                cover_key=novel.cover_key,
-                chapter_ids=chapter_ids,
-            )
-
-    def renew(self, export_id: str, worker_id: str, ttl: int) -> bool:
-        """Push the claim forward; False if the worker no longer holds it."""
-        now = self._clock()
-        with db.write(self._engine) as conn:
-            return (
-                claims.renew(
-                    conn,
-                    exports,
-                    [export_id],
-                    owner=worker_id,
-                    now=now,
-                    ttl=timedelta(seconds=ttl),
-                )
-                == 1
-            )
-
-    def _end_build(
-        self,
-        export_id: str,
-        worker_id: str,
-        values: dict[str, object],
-        now: datetime,
-        *,
-        published_key: str | None = None,
-    ) -> bool:
-        """Fenced end of a build: apply `values`, clear the claim and append the EX event."""
-        with db.write(self._engine) as conn:
-            novel_id = conn.execute(
-                select(exports.c.novel_id).where(exports.c.id == export_id)
-            ).scalar_one_or_none()
-            if novel_id is None or not lock_novel(conn, novel_id):
-                return False
-            released = claims.release(
-                conn,
-                exports,
-                [export_id],
-                owner=worker_id,
-                now=now,
-                extra_set=values,
-                where=exports.c.state == _BUILDING,
-            )
-            if released != 1:
-                return False
-            if published_key is not None:
-                # An earlier owner that lost its claim may have trashed this (deterministic) key.
-                conn.execute(delete(storage_trash).where(storage_trash.c.key == published_key))
-            self._append(conn, novel_id, export_id, now)
-            return True
-
-    def finish(self, export_id: str, worker_id: str, *, storage_key: str, size_bytes: int) -> bool:
-        """Mark the build `ready`; False and no change when the claim was lost."""
-        now = self._clock()
-        return self._end_build(
-            export_id,
-            worker_id,
-            {
-                "state": ExportState.READY.value,
-                "storage_key": storage_key,
-                "size_bytes": size_bytes,
-                "ready_at": now,
-            },
-            now,
-            published_key=storage_key,
-        )
-
-    def fail(self, export_id: str, worker_id: str, message: str) -> bool:
-        """Mark the build `failed` with `message`; False and no change when the claim was lost."""
-        return self._end_build(
-            export_id,
-            worker_id,
-            {"state": ExportState.FAILED.value, "error": message},
-            self._clock(),
-        )
+            self._queue.stamp(conn)
 
     def list(self, novel_id: str) -> list[ExportView]:
         """Return the novel's exports, newest first; raise `NotFound` for an unknown novel."""

@@ -75,6 +75,10 @@ def dispatch(
             for event in events:
                 if beat.lost:
                     break
+                if (
+                    event.kind == "task"
+                ):  # task events carry no notification; the cursor passes them
+                    continue
                 message = rules.match(event, _novel(repo, event), public_url=public_url)
                 if message is None:
                     continue
