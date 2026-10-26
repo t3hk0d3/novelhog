@@ -199,6 +199,19 @@ class TestScraperAdapter__SyncToc:
         assert result.title == "Moss Lantern Atlas"
         assert result.cover_url == "https://fanmtl.com/files/covers/moss-lantern.jpg"
 
+    def test_sync_toc__returns_the_chapter_titles_of_every_toc_page(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        flaresolverr.pages.update(fanmtl_pages())
+        result = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+            "NV000000000001", FM_HOST, FM_TOC
+        )
+        assert result.chapter_titles == {
+            FM_CH.format(1): "Chapter 1: The Paper's Tide",
+            FM_CH.format(2): "Chapter 2: Copper Fog",
+            FM_CH.format(3): "Chapter 3: Glass Orchard",
+        }
+
     def test_sync_toc__title_without_cover_gives_no_cover_url(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
@@ -331,6 +344,18 @@ class TestScraperAdapter__FetchChapter:
             "<p>The wind dropped as Mira reached the ferry landing.</p>\n"
             "<p>She counted the lanterns twice and found one missing.</p>"
         )
+
+    def test_fetch_chapter__decodes_entities_the_site_escaped_twice(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        html = load_html("scribblehub_chapter.html").replace(
+            "The Lamp Goes Out", "The Lamp&amp;#039;s Out"
+        )
+        flaresolverr.pages[SH_CH.format(1)] = html
+        chapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).fetch_chapter(
+            "NV000000000001", SH_HOST, SH_TOC, SH_CH.format(1)
+        )
+        assert chapter.title == "Chapter 1: The Lamp's Out"
 
     def test_fetch_chapter__never_prepends_the_title_to_the_body(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr

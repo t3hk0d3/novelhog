@@ -9,7 +9,7 @@ enqueues it and every move from `pending` to `not_requested` cancels it, in the 
 before the events. `queued_at` is derived: the live download task's `created_at`.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -85,11 +85,15 @@ class TocDiff:
     returned: list[str]
     inserted: list[str] = field(default_factory=list)
     dequeued: list[str] = field(default_factory=list)
+    retitled: list[str] = field(default_factory=list)
 
     @property
     def changed_ids(self) -> list[str]:
-        """Every inserted, moved, removed or returned chapter, for `emit_novel_change`."""
-        return [*self.inserted, *self.moved, *self.removed, *self.returned]
+        """Every inserted, moved, removed, returned or retitled chapter, once each, for
+        `emit_novel_change`.
+        """
+        changed = [*self.inserted, *self.moved, *self.removed, *self.returned, *self.retitled]
+        return list(dict.fromkeys(changed))
 
 
 def _download_task(alias: FromClause, state: TaskState) -> ColumnElement[bool]:
@@ -276,6 +280,7 @@ def apply_toc(
     initial: bool,
     followed: bool,
     now: datetime,
+    titles: Mapping[str, str] | None = None,
 ) -> TocDiff:
     """Diff the TOC against the novel's chapter rows by normalised URL and write the changes.
 
@@ -283,10 +288,13 @@ def apply_toc(
     followed and this is not the initial import), known URLs take their new position (a removed
     one that came back gets its position again), and missing URLs lose their position; a missing
     chapter that is `pending` is also dequeued and its download task cancelled (spec section
-    6.2). Writes rows only; the caller holds `lock_novel`, appends the events for
-    `TocDiff.changed_ids` and calls `TaskQueue.stamp` last.
+    6.2). `titles` (by normalised URL) are the titles the TOC gives: a new chapter starts with
+    its title and a listed chapter whose title differs takes it (`retitled`). Writes rows only;
+    the caller holds `lock_novel`, appends the events for `TocDiff.changed_ids` and calls
+    `TaskQueue.stamp` last.
     """
     toc = list(dict.fromkeys(normalize_url(url) for url in urls))
+    titles = titles or {}
     position_of = {url: index for index, url in enumerate(toc, start=1)}
     existing = {
         row.url: row
@@ -303,6 +311,7 @@ def apply_toc(
                 "novel_id": novel_id,
                 "url": url,
                 "position": position_of[url],
+                "title": titles.get(url),
                 "state": ChapterState.PENDING.value if queued else ChapterState.NOT_REQUESTED.value,
                 "released_at": None if initial else now,
                 "updated_at": now,
@@ -350,6 +359,18 @@ def apply_toc(
             .values(state=ChapterState.NOT_REQUESTED.value)
         )
         _cancel_downloads(conn, dequeued, now=now)
+    renames = [
+        {"b_id": row.id, "b_title": titles[url]}
+        for url, row in existing.items()
+        if url in position_of and titles.get(url) and titles[url] != row.title
+    ]
+    if renames:
+        conn.execute(
+            update(chapters)
+            .where(chapters.c.id == bindparam("b_id"))
+            .values(title=bindparam("b_title"), updated_at=now),
+            renames,
+        )
     by_position = {row.id: position_of[url] for url, row in existing.items() if url in position_of}
     new_ids = [r["id"] for r in new_rows]
     return TocDiff(
@@ -359,6 +380,7 @@ def apply_toc(
         returned=sorted(returned, key=lambda i: by_position[i]),
         inserted=new_ids,
         dequeued=dequeued,
+        retitled=sorted((r["b_id"] for r in renames), key=lambda i: by_position[i]),
     )
 
 

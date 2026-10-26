@@ -21,7 +21,7 @@ from novelhog.domain.chapters import ChapterState
 from novelhog.domain.hosts import CHAPTER_MAX_RETRIES, FailureKind
 from novelhog.domain.tasks import TaskState
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import hosts, tasks
+from novelhog.repo.schema import chapters, hosts, tasks
 from novelhog.repo.tasks import TaskRow
 from novelhog.scraper_adapter.errors import (
     InfrastructureError,
@@ -169,6 +169,18 @@ class TestDownload__ForEachQueuedChapter:
         runner.step()
 
         assert chapter_of(repo, chapter_id).title == "Chapter 1"
+
+    def test_download__keeps_the_title_the_toc_gave(
+        self, repo: Repo, novel_id: str, adapter: FakeAdapter, runner: Runner
+    ) -> None:
+        [chapter_id] = queue(repo, novel_id, 1)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(chapters).values(title="Chapter 1: From the TOC"))
+        adapter.titles[f"{URL}/1"] = "Page 1"
+
+        runner.step()
+
+        assert chapter_of(repo, chapter_id).title == "Chapter 1: From the TOC"
 
     def test_download__runs_one_task_per_claim_in_position_order(
         self, repo: Repo, novel_id: str, adapter: FakeAdapter, runner: Runner

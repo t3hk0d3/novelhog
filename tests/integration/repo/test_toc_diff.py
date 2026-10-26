@@ -31,13 +31,21 @@ def novel_id(repo: Repo) -> str:
 
 
 def sync(
-    repo: Repo, novel_id: str, urls: list[str], *, initial: bool = False, followed: bool = True
+    repo: Repo,
+    novel_id: str,
+    urls: list[str],
+    *,
+    initial: bool = False,
+    followed: bool = True,
+    titles: dict[str, str] | None = None,
 ) -> TocDiff:
     """Run the row-writing half of a sync transaction, then its events."""
     now = repo.clock()
     with db.write(repo.engine) as conn:
         assert lock_novel(conn, novel_id)
-        diff = apply_toc(conn, novel_id, urls, initial=initial, followed=followed, now=now)
+        diff = apply_toc(
+            conn, novel_id, urls, initial=initial, followed=followed, now=now, titles=titles
+        )
         event_log.emit_novel_change(
             conn,
             novel_id,
@@ -295,6 +303,50 @@ class TestApplyToc__Normalisation:
         assert after[u(1)].id == before[u(1)].id
         assert (after[u(2)].position, after[u(1)].position) == (1, 2)
         assert diff.new == []
+
+
+class TestApplyToc__ChapterTitles:
+    def test_apply_toc__new_chapters_start_with_their_toc_title(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2)], initial=True, titles={u(1): "Chapter 1: Start"})
+        found = rows(repo, novel_id)
+        assert (found[u(1)].title, found[u(2)].title) == ("Chapter 1: Start", None)
+
+    def test_apply_toc__a_changed_toc_title_replaces_the_stored_one(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2)], initial=True)
+        with db.write(repo.engine) as conn:
+            conn.execute(update(chapters).values(title="Dog&#039;s life"))
+
+        diff = sync(repo, novel_id, [u(1), u(2)], titles={u(2): "Dog's life"})
+
+        found = rows(repo, novel_id)
+        assert (found[u(1)].title, found[u(2)].title) == ("Dog&#039;s life", "Dog's life")
+        assert diff.retitled == [found[u(2)].id]
+        assert diff.changed_ids == [found[u(2)].id]
+
+    def test_apply_toc__the_same_toc_title_changes_nothing(self, repo: Repo, novel_id: str) -> None:
+        sync(repo, novel_id, [u(1)], initial=True, titles={u(1): "One"})
+        before = len(chapter_events(repo))
+
+        diff = sync(repo, novel_id, [u(1)], titles={u(1): "One"})
+
+        assert (diff.retitled, diff.changed_ids) == ([], [])
+        assert len(chapter_events(repo)) == before
+
+    def test_apply_toc__a_retitled_chapter_gets_one_ch_event(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        sync(repo, novel_id, [u(1), u(2)], initial=True)
+        before = len(chapter_events(repo))
+
+        diff = sync(repo, novel_id, [u(2), u(1)], titles={u(1): "One"})
+
+        found = rows(repo, novel_id)
+        assert sorted(diff.changed_ids) == sorted([found[u(1)].id, found[u(2)].id])
+        assert len(chapter_events(repo)) == before + 2
 
 
 class TestApplyToc__Events:

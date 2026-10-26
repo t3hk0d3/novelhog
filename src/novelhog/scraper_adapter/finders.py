@@ -1,12 +1,16 @@
-"""Title and cover finders for a table-of-contents page (spec section 6.7)."""
+"""Title, chapter title and cover finders for table-of-contents pages (spec section 6.7)."""
 
+import html
 import json
 import re
+from collections.abc import Sequence
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from novelhog import log
+from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.text import strip_xml_invalid
+from novelhog.domain.urls import normalize_url
 
 _VOID_TAGS = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
@@ -96,11 +100,64 @@ class _Page(HTMLParser):
             self._text_target = None
 
 
+class _ChapterLinks(HTMLParser):
+    """Collects each link's href and title: the text of an element inside it whose class
+    mentions "title" (`<strong class="chapter-title">`), else the text of a link holding text only.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str | None, bool]] = []  # (href, title, from an element)
+        self._href: str | None = None
+        self._inside: list[tuple[str, bool]] = []  # open tags in the link: (tag, is a title)
+        self._nested = False
+        self._text = ""
+        self._title = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {k: (v or "") for k, v in attrs}
+        if tag == "a":
+            self._href = values.get("href", "").strip() or None
+            self._inside, self._nested, self._text, self._title = [], False, "", ""
+        elif self._href is not None and tag not in _VOID_TAGS:
+            self._nested = True
+            self._inside.append((tag, "title" in values.get("class", "").lower()))
+
+    def handle_data(self, data: str) -> None:
+        if self._href is None:
+            return
+        self._text += data
+        if any(is_title for _, is_title in self._inside):
+            self._title += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._href is None:
+            return
+        if tag == "a":
+            if self._title.strip():
+                self.links.append((self._href, self._title, True))
+            else:
+                self.links.append((self._href, None if self._nested else self._text, False))
+            self._href = None
+            return
+        for index in range(len(self._inside) - 1, -1, -1):
+            if self._inside[index][0] == tag:
+                del self._inside[index:]
+                break
+
+
 def _parse(html: str) -> _Page:
     page = _Page()
     page.feed(html)
     page.close()
     return page
+
+
+def clean_chapter_title(value: str | None) -> str | None:
+    """A chapter title as plain text: entities a site escaped twice (`&amp;#039;`) decoded,
+    whitespace collapsed, XML-invalid characters removed; None when nothing is left.
+    """
+    return _clean(" ".join(html.unescape(value or "").split()))
 
 
 def _clean(value: str | None) -> str | None:
@@ -199,6 +256,40 @@ def find_title(toc_html: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 - metadata is best effort
         log.get().warning("find_title_failed", error=f"{type(exc).__name__}: {exc}")
         return None
+
+
+def _find_chapter_titles(toc_pages: Sequence[str], toc_url: str) -> dict[str, str]:
+    titles: dict[str, tuple[str, bool]] = {}
+    for page in toc_pages:
+        parser = _ChapterLinks()
+        parser.feed(page)
+        parser.close()
+        for href, raw, from_element in parser.links:
+            title = clean_chapter_title(raw)
+            if title is None:
+                continue
+            try:
+                url = normalize_url(urljoin(toc_url, href))
+            except ValidationFailed:
+                continue
+            if url not in titles or (from_element and not titles[url][1]):
+                titles[url] = (title, from_element)
+    return {url: title for url, (title, _) in titles.items()}
+
+
+def find_chapter_titles(toc_pages: Sequence[str], toc_url: str) -> dict[str, str]:
+    """Each linked chapter's title by normalised URL.
+
+    A title element beats a link's plain text (fanmtl's "Latest Release: Chapter 136" links come
+    before its chapter list); otherwise the first link to a URL wins. Every link is collected;
+    the caller keeps the ones that are chapters. A failing heuristic is logged and gives no
+    titles, never an exception.
+    """
+    try:
+        return _find_chapter_titles(toc_pages, toc_url)
+    except Exception as exc:  # noqa: BLE001 - metadata is best effort
+        log.get().warning("find_chapter_titles_failed", error=f"{type(exc).__name__}: {exc}")
+        return {}
 
 
 def find_cover_url(toc_html: str, toc_url: str, title: str | None) -> str | None:
