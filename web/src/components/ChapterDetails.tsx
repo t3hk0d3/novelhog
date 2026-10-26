@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { Link } from 'react-router';
 import { api, type Chapter, type ChapterState } from '../api/client';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -7,6 +8,7 @@ import { errorMessage } from '../lib/errors';
 import { exportsNeeding } from '../lib/exportsNeeding';
 import { dateOnly, dateTime, relative } from '../lib/time';
 import { CancelFailsExportDialog } from './CancelFailsExportDialog';
+import { ChapterPreview } from './ChapterPreview';
 import { Dialog } from './Dialog';
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, ExternalLinkIcon } from './icons';
 import { StatusIcon, STATE_LABELS } from './StatusIcon';
@@ -147,6 +149,8 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
   const [skippedPosition, setSkippedPosition] = useState<number | null>(null);
   // The position Cancel was pressed on; the confirmation belongs to that chapter only.
   const [confirmFor, setConfirmFor] = useState<number | null>(null);
+  // The id of the chapter whose preview dialog is open; stepping away closes it with the chapter.
+  const [previewFor, setPreviewFor] = useState<string | null>(null);
   const exports = useQuery({
     queryKey: ['exports', novelId],
     queryFn: () => api.listExports(novelId),
@@ -253,6 +257,19 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
             field('Queued', <span className="text-gold-ink">{dateTime(chapter.queued_at)}</span>)}
           {field('Last change', dateTime(chapter.updated_at))}
           {field('Images', <span className="text-ink-muted">{imagesText(chapter)}</span>)}
+          {chapter.state === 'downloaded' &&
+            field(
+              'Content',
+              <button
+                type="button"
+                onClick={() => {
+                  setPreviewFor(chapter.id);
+                }}
+                className="-my-2 py-2 text-accent underline"
+              >
+                Preview
+              </button>,
+            )}
         </dl>
         {patch.isError && mine && (
           <p role="alert" className="mt-3 text-sm font-semibold text-danger">
@@ -289,8 +306,25 @@ export function ChapterDetails({ novelId, chapterId, chapters, rows, onStep, onC
               {action.label}
             </button>
           )}
+          {chapter.state === 'downloaded' && (
+            <Link
+              to={`/novels/${novelId}/chapters/${chapter.id}`}
+              className="flex min-h-11 items-center justify-center rounded-lg bg-accent px-4 text-sm font-semibold text-accent-ink"
+            >
+              Read
+            </Link>
+          )}
         </div>
       </Dialog>
+      {previewFor === chapter.id && chapter.state === 'downloaded' && (
+        <ChapterPreview
+          novelId={novelId}
+          chapter={chapter}
+          onClose={() => {
+            setPreviewFor(null);
+          }}
+        />
+      )}
       {confirmFor === chapter.position && needed.length > 0 && (
         <CancelFailsExportDialog
           title="Cancel queued chapter?"

@@ -8,7 +8,8 @@ export const STATE_LABELS: Record<ChapterState, string> = {
   error: 'Error',
 };
 
-const COLOR_VAR: Record<ChapterState, string> = {
+/** CSS variable holding the icon (foreground) colour of a state; it pairs with TAB_COLOR_VAR. */
+export const ICON_COLOR_VAR: Record<ChapterState, string> = {
   not_requested: 'var(--status-not-requested-icon)',
   pending: 'var(--status-pending-icon)',
   downloading: 'var(--status-downloading-icon)',
@@ -55,24 +56,31 @@ function Glyph({ state }: { state: ChapterState }) {
   }
 }
 
+/** The glyph of a state alone, any size, hidden from screen readers (the owner says the state). */
+export function StatusGlyph({ state, size = 22 }: { state: ChapterState; size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke={ICON_COLOR_VAR[state]}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      data-state={state}
+    >
+      <Glyph state={state} />
+    </svg>
+  );
+}
+
 /** Display-only status icon with a screen-reader label (spec section 10 status table). */
 export function StatusIcon({ state }: { state: ChapterState }) {
   return (
     <>
-      <svg
-        viewBox="0 0 24 24"
-        width="22"
-        height="22"
-        fill="none"
-        stroke={COLOR_VAR[state]}
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-        data-state={state}
-      >
-        <Glyph state={state} />
-      </svg>
+      <StatusGlyph state={state} />
       <span className="sr-only">{STATE_LABELS[state]}</span>
     </>
   );

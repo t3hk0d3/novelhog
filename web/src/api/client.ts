@@ -6,6 +6,7 @@ export type Novel = Schemas['Novel'];
 export type Chapter = Schemas['Chapter'];
 export type ChapterState = Schemas['ChapterState'];
 export type ChapterPage = Schemas['ChapterPage'];
+export type ChapterContent = Schemas['ChapterContent'];
 export type ChapterSelector = Schemas['ChapterSelector'];
 export type ChapterPatchResult = Schemas['ChapterPatchResult'];
 // Fields with a server default are required in the generated type; requests may omit them.
@@ -87,6 +88,8 @@ export const api = {
     const qs = params.size > 0 ? `?${params.toString()}` : '';
     return request<ChapterPage>('GET', `/novels/${id(novelId)}/chapters${qs}`);
   },
+  getChapterContent: (novelId: string, chapterId: string) =>
+    request<ChapterContent>('GET', `/novels/${id(novelId)}/chapters/${id(chapterId)}/content`),
   patchChapters: (novelId: string, state: ChapterState, chapters: ChapterSelector) =>
     request<ChapterPatchResult>('PATCH', `/novels/${id(novelId)}/chapters`, { state, chapters }),
   listExports: (novelId: string) => request<Export[]>('GET', `/novels/${id(novelId)}/exports`),

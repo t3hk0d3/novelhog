@@ -41,8 +41,8 @@ chapter ranges to EPUB for phones and e-readers.
 
 ### Out of scope (v1)
 
-- In-browser reader, full-text search, metadata editing other than renaming a
-  novel (`PATCH {title}`).
+- Full-text search, metadata editing other than renaming a novel
+  (`PATCH {title}`). (The in-browser reader was added after v1's first cut, §10.)
 - Authentication (no auth; the reverse proxy can add it). The API still defends
   against DNS rebinding and cross-site requests (§5.9).
 - TLS termination (done by the user's reverse proxy).
@@ -1662,6 +1662,117 @@ manifest makes the app installable.
        (`error`), Download again (`downloaded`, secondary style), none for
        `downloading`. Actions use the same `PATCH /chapters` call with a
        one-item list.
+     - **Preview** (downloaded chapters): an inline "Content: Preview" row
+       among the fields that opens the whole chapter, from
+       `GET /novels/{id}/chapters/{chapter_id}/content` rendered from
+       Markdown, in a dialog of its own over the details (a bottom sheet on
+       phones): a scrollable, keyboard-focusable region (up to 60 dvh;
+       "Loading content…" or the error message in its place) and a **Back**
+       button to the details. Nothing is requested until it is opened.
+     - **Read** (downloaded chapters) is the last, primary button of the action
+       row (after "Open on site" and the state-dependent action) and opens the
+       reader page.
+   - **Reader** (`/novels/:id/chapters/:chapterId`): the chapter's text for
+     reading, mobile first. The chapter's state, position and neighbours come
+     from the chapter list; the text from the content endpoint (cache key
+     includes the chapter's `updated_at`; downloaded neighbours are prefetched).
+     - Top bar: Back to novel and a settings button (a modal dialog on desktop, bottom
+       sheet on phones). Settings (kept in `localStorage`, key
+       `novelhog.reader`): text size (4 steps; default 18 px), from 720 px up
+       the line width (narrow / medium / wide), the colour theme and the font.
+       Themes and fonts are small tiles in a wrapping grid ("Aa" in the theme's
+       colours or the font's face, the name under it, a dashed + tile to add
+       one); deleting a custom theme or font is a button under the grid while it
+       is the selected one.
+       On desktop the dialog is wide (`max-w-3xl`) and laid out in two columns:
+       text size | line width, then themes | fonts; on a phone the sheet stacks
+       them.
+       Themes: Match app (the default: the app's own light/dark), Paper, Sepia,
+       Twilight, Night, Black, and the user's own (up to 20), made in a New theme
+       dialog of its own over the settings (a bottom sheet on phones): a name plus
+       a background and a text colour from colour pickers, with a sample line, the
+       contrast ratio and a warning under 4.5:1. A theme recolours the whole page by
+       setting the app's colour tokens (`--page`, `--ink`, ...; the rest is mixed
+       from those two with `color-mix`) and `color-scheme` on `<html>` while the
+       reader is open. Fonts are system stacks only (Sans, Humanist, Serif, Old
+       style, Mono; nothing is downloaded) and the user's own (up to 20): a
+       family name (letters, digits, spaces, `- . _`) with a generic fallback; it
+       must be installed on the reading device. Only the text uses the font.
+       Stored values are validated on load; a chosen theme or font that no
+       longer exists is the default again.
+     - The page (the top row with Back and the settings button, the position
+       "N of M", the title and the text) is one block that fills the zone from
+       the app header to the bottom bar, edge to edge (the app shell fills the
+       screen and the reader fills the shell, so the bar is on the bottom edge
+       even for a short page such as the not-downloaded card): it is what a swipe
+       moves, and a swipe may start anywhere on it. Markdown is rendered
+       without raw HTML; images only as inline
+       `data:image/{png,jpeg,gif,webp}` URIs.
+     - A bottom bar, sticky at the screen edge with safe-area padding: a wide
+       chevron button for the previous chapter (greyed out and disabled on the
+       first), a progress bar as tall as the buttons with "N of M" inside it, and
+       a wide chevron button for the next (greyed out on the last). The bar is
+       filled (a tint of the accent colour) up to the end of the open chapter
+       (the edge of the fill is the position; nothing is drawn over the
+       label). It is read-only and deliberately plain: no colours for the
+       download state, no marker. On desktop widths the buttons also say
+       Previous / Next. The bar is a progress bar for screen readers ("Chapter
+       N of M"). ←/→ do the same on a keyboard (not while typing or with a
+       modifier key).
+     - On a phone the bar slides off the bottom edge after about 24 px of
+       continuous scrolling down and comes back after about 12 px up; it is
+       always there at the very top and the very end of the text, while focus
+       is inside it, and for a new chapter. Jumps larger than 160 px (the page
+       restoring a position) and overscroll bounce do not count. On desktop
+       widths it never hides.
+     - A chapter that is not downloaded shows a centred status card: a large
+       round icon of its state (in the state's colours; it pulses while
+       downloading), "This chapter isn't downloaded yet.", its status as a bold
+       pill with the icon and the name, a line on what happens next ("Download
+       it to read it here." / it is queued / it is downloading, and it opens by
+       itself once the live events mark it downloaded), for an error the
+       message in a box, and a centred button with an icon: Download (not
+       requested) or Retry download (error), both queueing the chapter; none
+       while it is pending or downloading. A content error shows the message and
+       Try again. An unknown chapter says it no longer exists.
+     - Touch gestures (touch events, so mouse users are unaffected): a
+       horizontal swipe is deliberately heavy so chapters do not change by
+       accident. It counts only when the movement is clearly sideways (at least
+       1.7 times as far as it is vertical; an ambiguous diagonal is left to
+       scrolling), the column resists the finger (it slows exponentially and
+       never moves past 40% of the width; about 28% where a release commits),
+       and releasing commits only after the finger has travelled 60% of the
+       column width or after a hard flick (at least 100 px at 0.9 px/ms or
+       faster, measured at the moment of release); otherwise it
+       springs back. The strip the page moves away from is tinted with 16% of the
+       text colour mixed into the page colour, at a third of that strength in
+       the first pixels and at full strength where a release would turn the
+       chapter, and the page casts a faint shadow on it. In the strip sits a small vertical
+       bubble anchored to the screen edge (a chevron and the label "Previous
+       chapter" / "Next chapter" turned along the strip, so it fits however
+       little has been revealed); it fills with the accent colour and grows
+       slightly once a release would turn the chapter; it is fixed to the
+       screen (it stays in view however far down the text is scrolled) and
+       slides in from the screen edge as the page moves away. At the first or last
+       chapter the page rubber-bands and the bubble is a warning (gold) with a
+       raised-hand icon and "First chapter" / "Last chapter". A pull past the
+       end (or start) of the text shows "Pull for next chapter" and commits
+       past about 96 px of travel. Swipes starting within 24 px of the screen
+       edge are left to the system back gesture. While the reader is open
+       `html.reader-open` sets `overscroll-behavior-y: contain` (no
+       pull-to-refresh). With `prefers-reduced-motion` nothing slides. The
+       decision logic is the pure module `lib/swipeGesture.ts`; the listeners
+       attach whenever the reading area appears (it is absent while the chapter
+       list loads on a direct visit).
+     - Reading position: the scroll position of each chapter is remembered in
+       `localStorage` (`novelhog.reader.positions`, chapter id to ratio of the
+       scrollable distance and time; the 300 most recent chapters). A chapter
+       opens at the top, then once its text is in at the remembered spot, held
+       while images load and shift the text (3 s) until the reader scrolls. The
+       position is saved 400 ms after scrolling stops and when the page is
+       hidden or left; a chapter read to the end (97%) or left at the very top
+       is forgotten and opens at the top. Chapter images are not lazy (their
+       data is already in the page, and lazy images would keep unknown heights).
    - **Export dialog** (Export EPUB… in the action bar; dialog on desktop, bottom
      sheet on phones): one export, one file.
      - From/To inputs prefilled from the selection's first and last chapter,
@@ -1878,7 +1989,7 @@ desktop chapters, export dialog, phone normal and select mode).
   purge them).
 - **Wider content selectors** per host (whole content container instead of `p`
   fragments) so lists and images outside paragraphs survive.
-- In-browser reader, FTS5 search, manual cover upload, offline PWA caching,
+- FTS5 search, manual cover upload, offline PWA caching,
   splitting pages into real chapters.
 
 ## 13. Testing

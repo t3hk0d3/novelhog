@@ -36,8 +36,9 @@ One styleguide for the whole project. Later plans follow it and extend it here.
 - Strict mode; `eslint` + `prettier`.
 - Components are `PascalCase.tsx`, hooks are `useX.ts`, tests are colocated as `*.test.tsx`
   (`*.test.ts` for files without JSX).
-- Query keys: `['novels']`, `['novel', id]`, `['chapters', novelId]`, `['exports', novelId]`,
-  `['settings']`, `['live-probe']` (the unguarded settings probe while the stream is stalled).
+- Query keys: `['novels']`, `['novel', id]`, `['chapters', novelId]`,
+  `['chapter-content', novelId, chapterId, updatedAt]` (the chapter's `updated_at` is in the key, so a
+  re-download refetches), `['exports', novelId]`, `['settings']`, `['live-probe']` (the unguarded settings probe while the stream is stalled).
 
 ## Layout
 

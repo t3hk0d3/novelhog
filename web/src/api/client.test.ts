@@ -71,4 +71,24 @@ describe('api client', () => {
     await api.getNovel('a/b');
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/novels/a%2Fb');
   });
+
+  describe('getChapterContent', () => {
+    it('GETs the chapter content and returns the parsed body', async () => {
+      const body = { chapter: { id: 'CH1' }, markdown: 'Hi', fetched_at: 'x', previous_id: null };
+      const fetchMock = respond(200, body);
+      await expect(api.getChapterContent('NV1', 'CH1')).resolves.toEqual(body);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/novels/NV1/chapters/CH1/content');
+    });
+
+    it('throws not_found with the chapter_content entity when nothing is stored', async () => {
+      respond(404, {
+        error: { code: 'not_found', message: 'no content', details: { entity: 'chapter_content' } },
+      });
+      await expect(api.getChapterContent('NV1', 'CH1')).rejects.toMatchObject({
+        status: 404,
+        code: 'not_found',
+        details: { entity: 'chapter_content' },
+      });
+    });
+  });
 });

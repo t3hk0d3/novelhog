@@ -40,6 +40,19 @@ describe('App', () => {
   });
 });
 
+describe('App layout', () => {
+  it('fills the screen, so a short page (the reader) can put its bar on the bottom edge', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+    const main = screen.getByRole('main');
+    expect(main).toHaveClass('flex-1', 'flex', 'flex-col');
+    expect(main.parentElement).toHaveClass('min-h-dvh', 'flex', 'flex-col');
+  });
+});
+
 describe('App header', () => {
   it('Add novel opens the add-novel dialog', async () => {
     render(

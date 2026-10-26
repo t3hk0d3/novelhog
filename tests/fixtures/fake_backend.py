@@ -9,6 +9,7 @@ real `Worker` in a thread with a fake scraper adapter: a deterministic table of 
 """
 
 import argparse
+import math
 import struct
 import tempfile
 import threading
@@ -35,6 +36,7 @@ TITLE = "The Fake Chronicle"
 CHAPTER_COUNT = 5
 FAILING_CHAPTER = 2
 FAILURE_MESSAGE = "chapter 2 is unreadable"
+IMAGE_CHAPTER = 5  # carries two images and a long unbroken word (the reader image e2e)
 COVER_URL = f"https://{HOST}/cover.png"
 SSE_POLL_S = 0.2
 GRACEFUL_S = 3
@@ -48,18 +50,44 @@ def chapter_url(toc_url: str, number: int) -> str:
     return f"{toc_url.rstrip('/')}/chapter-{number}"
 
 
-def _png() -> bytes:
-    """A valid 1x1 PNG, built in place so no binary fixture is needed."""
+def _png_of_rows(width: int, height: int, rows: list[bytes]) -> bytes:
+    """A valid RGB PNG from `height` rows of `width` * 3 bytes, built in place (no fixture file)."""
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         body = kind + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
 
-    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    pixel = zlib.compress(b"\x00\x2b\x6c\xb0")
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + row for row in rows)
     return (
-        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixel) + chunk(b"IEND", b"")
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
     )
+
+
+def _png(width: int = 1, height: int = 1, rgb: tuple[int, int, int] = (0x2B, 0x6C, 0xB0)) -> bytes:
+    """A valid solid-colour PNG."""
+    return _png_of_rows(width, height, [bytes(rgb) * width] * height)
+
+
+def _map_png(width: int, height: int) -> bytes:
+    """A parchment "map": a faded gradient, a grid and a winding river (rows are built in bulk)."""
+    grid = 160
+    rows: list[bytes] = []
+    for y in range(height):
+        shade = 232 - 28 * y // height
+        row = bytearray(bytes((shade, shade - 12, shade - 44)) * width)
+        if y % grid < 3:
+            row[:] = bytes((150, 120, 84)) * width
+        else:
+            for x in range(0, width, grid):
+                row[x * 3 : (x + 3) * 3] = bytes((150, 120, 84)) * 3
+            bend = int(width * 0.3 + width * 0.12 * math.sin(y / height * 5))
+            row[bend * 3 : (bend + 46) * 3] = bytes((84, 134, 170)) * 46
+        rows.append(bytes(row))
+    return _png_of_rows(width, height, rows)
 
 
 class FakeAdapter:
@@ -81,6 +109,21 @@ class FakeAdapter:
         if number == FAILING_CHAPTER:
             raise ValueError(FAILURE_MESSAGE)
         body = f"<p>Text of chapter {number}.</p>"
+        if number == IMAGE_CHAPTER:
+            body = (
+                "<p>Before the map.</p>"
+                "<p>Mira unrolled the parchment across the cartographer's table and weighted the "
+                "corners with whatever was nearest: a candle stub, a cracked inkwell, two of her "
+                "own boots. The room smelled of lamp oil and old rain.</p>"
+                "<p>The river was wrong. She had walked its banks every autumn since she was nine, "
+                "and it had never once bent east at the old mill.</p>"
+                f'<p><img src="https://{HOST}/wide.png" alt="A wide map"></p>'
+                "<p>Someone had redrawn it, and not badly. Whoever it was had even copied the "
+                "small sigil in the corner, the one her teacher had always said was a joke.</p>"
+                f'<p><img src="https://{HOST}/sigil.png" alt="A tiny sigil"></p>'
+                "<p>After the images.</p>"
+                f"<p>A very long word: {'x' * 200}</p>"
+            )
         return FetchedChapter(title=f"Chapter {number}: Fake", body_html=body)
 
     def request_delay(self, host: str) -> float:
@@ -88,9 +131,13 @@ class FakeAdapter:
 
 
 class FakeImages:
-    """An image fetcher that returns the same tiny PNG for any URL."""
+    """An image fetcher: a 2400x800 PNG for "wide" URLs, a 64x64 one for "sigil" ones, else 1x1."""
 
     def fetch(self, url: str) -> FetchedImage | None:
+        if "wide" in url:
+            return FetchedImage(data=_map_png(2400, 800), mime="image/png")
+        if "sigil" in url:
+            return FetchedImage(data=_png(64, 64, (0xB0, 0x2B, 0x6C)), mime="image/png")
         return FetchedImage(data=_png(), mime="image/png")
 
 
