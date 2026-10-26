@@ -12,6 +12,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import requests
@@ -46,6 +48,40 @@ class _Budget:
 
 class CloudflareChallengeError(ScraperError):  # type: ignore[misc]
     """A direct request got a Cloudflare challenge page. Not retried directly (it would repeat)."""
+
+
+class ThrottledResponseError(ScraperError):  # type: ignore[misc]
+    """A direct request got 429 or 503. Not retried by the scraper: retrying is what it refuses.
+
+    `retry_after` is the site's `Retry-After` in seconds, None when absent or unreadable.
+    """
+
+    def __init__(self, message: str, retry_after: float | None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class ServerResponseError(CommonGetRequestError):  # type: ignore[misc]
+    """A direct request got another 5xx; the scraper retries it like its own request failures."""
+
+
+_THROTTLE_STATUSES = (429, 503)
+
+
+def _retry_after(value: str | None) -> float | None:
+    """Seconds from a `Retry-After` header: a number of seconds or an HTTP date."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except TypeError, ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - datetime.now(UTC)).total_seconds(), 0.0)
 
 
 @dataclass(frozen=True)
@@ -110,6 +146,10 @@ def _guarded_common_request(self: RequestHelper, url: str) -> str:
         msg = f'Request Failed for URL "{url}", Status Code is {response.status_code}.'
         if _is_challenge(response):
             raise CloudflareChallengeError(msg)
+        if response.status_code in _THROTTLE_STATUSES:
+            raise ThrottledResponseError(msg, _retry_after(response.headers.get("Retry-After")))
+        if response.status_code >= 500:
+            raise ServerResponseError(msg)
         raise CommonGetRequestError(msg)
     content = response.text
     if content == "":

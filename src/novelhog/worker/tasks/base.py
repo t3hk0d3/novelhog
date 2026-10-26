@@ -15,10 +15,11 @@ from typing import Any, ClassVar, Protocol
 
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
+from novelhog.domain.hosts import FailureKind
 from novelhog.domain.tasks import Outcome, TaskKind
+from novelhog.repo.hosts import HostState
 from novelhog.repo.tasks import TaskRow
 from novelhog.storage import StaticStorage
-from novelhog.worker.reachability import Reachability
 from novelhog.worker.refresh import TocAdapter
 from novelhog.worker.tasks.chapter_download import ChapterAdapter, ImageSource
 
@@ -37,6 +38,18 @@ type HeartbeatFactory = Callable[[Callable[[], bool], float], AbstractContextMan
 """Builds a heartbeat from a `renew` callback and an interval in seconds (`runtime.Heartbeat`)."""
 
 
+class HostGate(Protocol):
+    """Where a processor reports how its host answered (`repo.hosts`)."""
+
+    def succeeded(self, host: str) -> None:
+        """The host answered; its failure count starts again."""
+        ...
+
+    def failed(self, host: str, kind: FailureKind, *, retry_after: float | None) -> HostState:
+        """Count a failure that can pause the host; says whether it is now paused."""
+        ...
+
+
 @dataclass(frozen=True)
 class TaskContext:
     """The dependencies a processor's `run` may use: the same as v1's worker stages.
@@ -50,7 +63,7 @@ class TaskContext:
     chapter_store: ChapterStore
     settings: Settings
     stop: threading.Event
-    reachability: Reachability
+    hosts: HostGate
     rng: random.Random
     heartbeat: HeartbeatFactory
     clock: Callable[[], datetime]

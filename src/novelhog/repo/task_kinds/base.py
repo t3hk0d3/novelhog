@@ -45,6 +45,10 @@ class TaskHandler[W](Protocol):
         """Inside recovery's transaction, after the lapsed running task went back to the queue."""
         ...
 
+    def rescheduled(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+        """Inside `Tasks.reschedule`'s transaction, after the task moved to its host's next slot."""
+        ...
+
     def problems(self, conn: Connection) -> list[Problem]:
         """In a plain read: the kind's broken entity/task pairs (tasks spec section 8)."""
         ...

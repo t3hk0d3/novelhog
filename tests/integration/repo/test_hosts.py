@@ -1,11 +1,15 @@
 """The hosts repository (spec sections 4 and 5.3)."""
 
 import threading
+from collections.abc import Iterator
+from datetime import datetime, timedelta
 
-from sqlalchemy import insert, select
+import pytest
+from sqlalchemy import insert, select, update
 
+from novelhog.domain.hosts import FailureKind
 from novelhog.repo import Repo, db
-from novelhog.repo.hosts import Host, PublishReport
+from novelhog.repo.hosts import Host, HostState, PublishReport, Slot
 from novelhog.repo.schema import hosts, novels
 from tests.conftest import FakeClock
 from tests.integration.helpers import novel_row
@@ -82,3 +86,184 @@ class TestQueries:
         assert not repo.hosts.any_published()
         repo.hosts.publish(["a.com"])
         assert repo.hosts.any_published()
+
+
+HOST = "a.com"
+DELAY = 2.0
+
+
+def _row(repo: Repo) -> dict[str, object]:
+    with db.read(repo.engine) as conn:
+        row = conn.execute(select(hosts).where(hosts.c.host == HOST)).one()
+    return dict(row._mapping)
+
+
+def _set_reach_after(repo: Repo, when: datetime | None) -> None:
+    with db.write(repo.engine) as conn:
+        conn.execute(update(hosts).where(hosts.c.host == HOST).values(reach_after=when))
+
+
+@pytest.fixture
+def other_repo(migrated_database: str, clock: FakeClock) -> Iterator[Repo]:
+    """A second `Repo` on the same database, for races between two workers."""
+    other = Repo(migrated_database, clock=clock)
+    yield other
+    other.engine.dispose()
+
+
+@pytest.fixture
+def host(repo: Repo) -> str:
+    repo.hosts.publish([HOST])
+    return HOST
+
+
+WINDOW = timedelta(seconds=30)
+
+
+class TestReserve:
+    def test_reserve__books_a_free_host_from_now(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(clock.current, True)
+        assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=DELAY)
+
+    def test_reserve__books_a_host_whose_reach_after_passed_from_now(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        _set_reach_after(repo, clock.current - timedelta(seconds=1))
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(clock.current, True)
+        assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=DELAY)
+
+    def test_reserve__books_the_next_slot_when_it_starts_within_the_window(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        soon = clock.current + timedelta(seconds=10)
+        _set_reach_after(repo, soon)
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(soon, True)
+        assert _row(repo)["reach_after"] == soon + timedelta(seconds=DELAY)
+
+    def test_reserve__books_nothing_when_the_next_slot_is_beyond_the_window(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        later = clock.current + timedelta(minutes=5)
+        _set_reach_after(repo, later)
+        assert repo.hosts.reserve(host, DELAY, within=WINDOW) == Slot(later, False)
+        assert _row(repo)["reach_after"] == later
+
+    def test_reserve__gives_two_workers_at_once_consecutive_slots(
+        self, repo: Repo, other_repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        barrier = threading.Barrier(2)
+        slots: list[Slot] = []
+
+        def reserve(r: Repo) -> None:
+            barrier.wait(timeout=30)
+            slots.append(r.hosts.reserve(host, DELAY, within=WINDOW))
+
+        threads = [threading.Thread(target=reserve, args=(r,)) for r in (repo, other_repo)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert sorted(slot.at for slot in slots) == [
+            clock.current,
+            clock.current + timedelta(seconds=DELAY),
+        ]
+        assert all(slot.reserved for slot in slots)
+        assert _row(repo)["reach_after"] == clock.current + timedelta(seconds=2 * DELAY)
+
+
+class TestHold:
+    def test_hold__keeps_the_host_for_the_delay_after_a_fetch(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        repo.hosts.reserve(host, DELAY, within=WINDOW)
+        now = clock.advance(seconds=5)
+        repo.hosts.hold(host, DELAY)
+        assert _row(repo)["reach_after"] == now + timedelta(seconds=DELAY)
+
+    def test_hold__never_moves_reach_after_earlier(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        later = clock.current + timedelta(minutes=5)
+        _set_reach_after(repo, later)
+        repo.hosts.hold(host, DELAY)
+        assert _row(repo)["reach_after"] == later
+
+
+class TestFailed:
+    def test_failed__below_the_threshold_counts_without_pausing(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        state = repo.hosts.failed(host, FailureKind.UNREACHABLE, retry_after=None)
+        assert state == HostState(paused_until=None, failures=1)
+        row = _row(repo)
+        assert (row["failures"], row["failing_since"], row["last_failure"]) == (
+            1,
+            clock.current,
+            "unreachable",
+        )
+        assert row["reach_after"] is None
+
+    def test_failed__at_the_threshold_pauses_the_host(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        repo.hosts.failed(host, FailureKind.UNREACHABLE, retry_after=None)
+        state = repo.hosts.failed(host, FailureKind.UNREACHABLE, retry_after=None)
+        until = clock.current + timedelta(minutes=5)
+        assert state == HostState(paused_until=until, failures=2)
+        assert _row(repo)["reach_after"] == until
+
+    def test_failed__keeps_failing_since_from_the_first_failure(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        first = clock.current
+        repo.hosts.failed(host, FailureKind.UNREACHABLE, retry_after=None)
+        clock.advance(minutes=1)
+        repo.hosts.failed(host, FailureKind.UNREACHABLE, retry_after=None)
+        assert _row(repo)["failing_since"] == first
+
+    def test_failed__uses_retry_after_for_a_throttled_host(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        state = repo.hosts.failed(host, FailureKind.THROTTLED, retry_after=120)
+        assert state.paused_until == clock.current + timedelta(seconds=120)
+
+    def test_failed__never_moves_reach_after_earlier(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        later = clock.current + timedelta(minutes=30)
+        _set_reach_after(repo, later)
+        state = repo.hosts.failed(host, FailureKind.THROTTLED, retry_after=10)
+        assert state.paused_until == later
+        assert _row(repo)["reach_after"] == later
+
+    @pytest.mark.parametrize("kind", [FailureKind.TRANSIENT, FailureKind.PERMANENT])
+    def test_failed__rejects_kinds_that_never_pause(
+        self, repo: Repo, host: str, kind: FailureKind
+    ) -> None:
+        with pytest.raises(ValueError, match=kind.value):
+            repo.hosts.failed(host, kind, retry_after=None)
+
+
+class TestSucceeded:
+    def test_succeeded__resets_the_failure_state_and_keeps_reach_after(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        repo.hosts.failed(host, FailureKind.THROTTLED, retry_after=60)
+        repo.hosts.succeeded(host)
+        row = _row(repo)
+        assert (row["failures"], row["failing_since"], row["last_failure"]) == (0, None, None)
+        assert row["reach_after"] == clock.current + timedelta(seconds=60)
+
+
+class TestListSupported__WithReachState:
+    def test_list_supported__carries_reach_after_and_failing_since(
+        self, repo: Repo, clock: FakeClock, host: str
+    ) -> None:
+        repo.hosts.failed(host, FailureKind.THROTTLED, retry_after=60)
+        assert repo.hosts.list_supported() == [
+            Host(
+                host, reach_after=clock.current + timedelta(seconds=60), failing_since=clock.current
+            )
+        ]

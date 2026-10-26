@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * List Hosts
-         * @description Return the supported hosts.
+         * @description Return the supported hosts with when each may be contacted again.
          */
         get: operations["list_hosts"];
         put?: never;
@@ -500,10 +500,18 @@ export interface components {
         /**
          * Host
          * @description A supported host (`GET /api/v1/hosts`).
+         *
+         *     `reach_after` is when it may be contacted again (a pause after failures, or the request
+         *     delay after a fetch); `failing_since` is when its current run of failures began. Both are
+         *     RFC 3339 strings, null when unset.
          */
         Host: {
+            /** Failing Since */
+            failing_since: string | null;
             /** Host */
             host: string;
+            /** Reach After */
+            reach_after: string | null;
         };
         /**
          * NotificationChannelsOut

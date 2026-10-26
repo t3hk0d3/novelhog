@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Response
 
 from novelhog.api.deps import get_repo, path_id
 from novelhog.api.schemas import ErrorBody, Host, Novel, NovelCreate, NovelPatch
-from novelhog.domain.payloads import NovelView
+from novelhog.domain.payloads import NovelView, format_time
 from novelhog.repo import Repo
 
 router = APIRouter()
@@ -23,8 +23,15 @@ def _novel(view: NovelView) -> Novel:
 
 @router.get("/hosts", operation_id="list_hosts", response_model=list[Host])
 def list_hosts(repo: RepoDep) -> list[Host]:
-    """Return the supported hosts."""
-    return [Host(host=h.host) for h in repo.hosts.list_supported()]
+    """Return the supported hosts with when each may be contacted again."""
+    return [
+        Host(
+            host=h.host,
+            reach_after=None if h.reach_after is None else format_time(h.reach_after),
+            failing_since=None if h.failing_since is None else format_time(h.failing_since),
+        )
+        for h in repo.hosts.list_supported()
+    ]
 
 
 @router.get("/novels", operation_id="list_novels", response_model=list[Novel])

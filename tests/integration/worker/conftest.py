@@ -15,6 +15,7 @@ from novelhog.repo import Repo, db
 from novelhog.repo.novels import lock_novel
 from novelhog.repo.schema import chapters, tasks
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
+from tests.conftest import FakeClock
 from tests.integration.helpers import chapter_row
 
 HOST = "example.com"
@@ -27,16 +28,20 @@ IDLE = 30
 class RecordingStop(threading.Event):
     """A stop event whose waits never sleep: they record the timeout and return immediately.
 
-    `stop_after_waits` sets the event on that many waits so a loop under test ends.
+    `stop_after_waits` sets the event on that many waits so a loop under test ends. With `clock`,
+    each wait moves the fake clock forward by its timeout, as a real wait would.
     """
 
-    def __init__(self, stop_after_waits: int | None = None) -> None:
+    def __init__(self, stop_after_waits: int | None = None, clock: FakeClock | None = None) -> None:
         super().__init__()
         self.waits: list[float | None] = []
         self._stop_after = stop_after_waits
+        self._clock = clock
 
     def wait(self, timeout: float | None = None) -> bool:
         self.waits.append(timeout)
+        if self._clock is not None and timeout is not None and not self.is_set():
+            self._clock.advance(seconds=timeout)  # the wait took that long
         if self._stop_after is not None and len(self.waits) >= self._stop_after:
             self.set()
         return self.is_set()

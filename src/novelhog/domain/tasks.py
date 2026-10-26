@@ -89,12 +89,21 @@ class Failed[R]:
     result: R | None = None
 
 
+class RetryCause(StrEnum):
+    """Why work is tried again; decides the loop's backoff and whether a retry is used up."""
+
+    INFRASTRUCTURE = "infrastructure"  # FlareSolverr down: the loop backs off
+    HOST_PAUSED = "host_paused"  # the host is paused: waiting costs nothing
+    TRANSIENT = "transient"  # the request failed: one of the chapter's retries is used
+
+
 @dataclass(frozen=True)
 class Retry:
     """The work failed and is tried again at `run_after`."""
 
     run_after: datetime
     error: str
+    cause: RetryCause = RetryCause.INFRASTRUCTURE
 
 
 type Outcome[R] = Done[R] | Failed[R] | Retry

@@ -54,6 +54,7 @@ from novelhog.domain.tasks import (
     Failed,
     Outcome,
     Retry,
+    RetryCause,
     Skip,
     StartResult,
     TaskKind,
@@ -105,6 +106,7 @@ class TaskRow:
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
+    retries: int = 0  # transient retries used; not part of the Task object
 
     @classmethod
     def from_row(cls, row: Row[Any]) -> TaskRow:
@@ -625,14 +627,21 @@ class TaskQueue:
         _touch(conn, task.id)
         return True
 
-    def retry(
-        self, conn: Connection, task: TaskRow, worker_id: str, *, run_after: datetime, error: str
+    def retry(  # noqa: PLR0913  (the retry's parameters)
+        self,
+        conn: Connection,
+        task: TaskRow,
+        worker_id: str,
+        *,
+        run_after: datetime,
+        error: str,
+        counts: bool = False,
     ) -> bool:
         """Fenced: put the running task back in the queue at `run_after`; False if not owned.
 
-        The same row returns to `queued` with `error` and the run's `duration_ms`. If another task
-        was queued for the entity meanwhile, the row merges into it (enqueue rules, and the
-        successor takes `error`) and becomes `cancelled` instead.
+        The same row returns to `queued` with `error` and the run's `duration_ms`; `counts` uses
+        one of its `retries`. If another task was queued for the entity meanwhile, the row merges
+        into it (enqueue rules, and the successor takes `error`) and becomes `cancelled` instead.
         """
         now = self._clock()
         current = self._owned_running(conn, task.id, worker_id, now)
@@ -646,6 +655,8 @@ class TaskQueue:
         successor = _find(conn, current.kind, current.entity_id, TaskState.QUEUED)
         if successor is None:
             ended |= {"state": TaskState.QUEUED.value, "run_after": run_after}
+            if counts:
+                ended["retries"] = tasks.c.retries + 1
         else:
             ended |= {"state": TaskState.CANCELLED.value, "finished_at": now}
         if not _fenced_running_update(conn, task.id, worker_id, now, ended):
@@ -661,6 +672,28 @@ class TaskQueue:
                 now=now,
                 error=error,
             )
+        return True
+
+    def reschedule(
+        self, conn: Connection, task: TaskRow, worker_id: str, run_after: datetime
+    ) -> bool:
+        """Fenced: move this worker's claimed, unstarted task to `run_after` and clear the claim.
+
+        No attempt is used. False, with nothing changed, when the claim was lost.
+        """
+        now = self._clock()
+        moved = claims.release(
+            conn,
+            tasks,
+            [task.id],
+            owner=worker_id,
+            now=now,
+            extra_set={"run_after": run_after, "updated_at": now},
+            where=tasks.c.state == TaskState.QUEUED.value,
+        )
+        if moved != 1:
+            return False
+        _touch(conn, task.id)
         return True
 
     def release(self, task: TaskRow, worker_id: str) -> bool:
@@ -948,6 +981,23 @@ class Tasks:
             ).scalar_one_or_none()
         return None if host is None else str(host)
 
+    def reschedule(self, task: TaskRow, worker_id: str, run_after: datetime) -> bool:
+        """Move the claimed, unstarted task to `run_after` (its host is paused until then).
+
+        Runs under `lock_novel` with the handler's `rescheduled` hook, so a field derived from the
+        task's `run_after` gets its event. False when the claim was lost or the novel is gone.
+        """
+        handler = self._handler(task.kind)
+        with db.write(self._engine) as conn:
+            if not novels.lock_novel(conn, task.novel_id):
+                return False
+            now = self._clock()
+            if not self._queue.reschedule(conn, task, worker_id, run_after):
+                return False
+            handler.rescheduled(conn, _require(conn, task.id), now)
+            self._queue.stamp(conn)
+            return True
+
     def start(self, task: TaskRow, worker_id: str) -> StartOutcome[Any]:
         """Start the claimed task and its handler in one transaction (tasks spec section 5).
 
@@ -989,7 +1039,12 @@ class Tasks:
             now = self._clock()
             if isinstance(outcome, Retry):
                 fenced = self._queue.retry(
-                    conn, task, worker_id, run_after=outcome.run_after, error=outcome.error
+                    conn,
+                    task,
+                    worker_id,
+                    run_after=outcome.run_after,
+                    error=outcome.error,
+                    counts=outcome.cause is RetryCause.TRANSIENT,
                 )
             elif isinstance(outcome, Failed):
                 fenced = self._queue.finish(conn, task, worker_id, TaskState.FAILED, outcome.error)

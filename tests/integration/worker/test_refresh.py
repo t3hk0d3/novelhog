@@ -18,16 +18,21 @@ from sqlalchemy import select, update
 from novelhog import config
 from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
+from novelhog.domain.hosts import FailureKind
 from novelhog.domain.tasks import PRIORITY_RELEASE, TaskKind, TaskState
 from novelhog.images import FetchedImage
 from novelhog.repo import Repo, db
-from novelhog.repo.schema import chapters, novels, tasks
+from novelhog.repo.schema import chapters, hosts, novels, tasks
 from novelhog.repo.tasks import TaskRow
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
+from novelhog.scraper_adapter.errors import (
+    InfrastructureError,
+    SiteError,
+    SiteThrottled,
+    SiteUnreachable,
+)
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
-from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.refresh import publish_hosts
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks.base import TaskContext
@@ -136,7 +141,6 @@ class Harness:
     ) -> None:
         self.repo, self.adapter, self.fetcher = repo, adapter, fetcher
         self.files, self.settings = files, settings
-        self.reachability = Reachability()
         self.runner = Runner(
             repo,
             {TaskKind.NOVEL_REFRESH: NovelRefreshProcessor()},
@@ -147,7 +151,7 @@ class Harness:
                 chapter_store=ChapterStore(repo),
                 settings=settings,
                 stop=threading.Event(),
-                reachability=self.reachability,
+                hosts=repo.hosts,
                 rng=random.Random(7),  # noqa: S311
                 heartbeat=runtime.Heartbeat,
                 clock=repo.clock,
@@ -474,90 +478,102 @@ class TestRefresh__OnInfrastructureError:
         assert run.novel(novel_id).refresh_interval == MIN
 
 
+def host_row(repo: Repo) -> Any:
+    with db.read(repo.engine) as conn:
+        return conn.execute(select(hosts).where(hosts.c.host == HOST)).one()
+
+
 class TestRefresh__OnSiteUnreachable:
-    def fail_below_threshold(self, run: Harness, clock: FakeClock) -> None:
-        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
-            with pytest.raises(RunnerBackoff):
-                run.run()
-            clock.advance(days=1)
-
-    def test_refresh__below_the_threshold_keeps_the_interval_and_schedules_min(
+    def test_refresh__a_first_failure_backs_off_like_a_site_error_without_pausing_the_host(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
     ) -> None:
         do_initial(run, novel_id, clock)
         run.adapter.error = SiteUnreachable("refused")
         before = run.novel(novel_id).refresh_interval
-
-        self.fail_below_threshold(run, clock)
-
-        row = run.novel(novel_id)
-        assert row.refresh_interval == before
-        expected = clock() - timedelta(days=1) + timedelta(seconds=MIN)
-        assert run.next_refresh_at(novel_id) == expected
-        assert row.import_error is None
-
-    def test_refresh__at_the_threshold_an_initial_import_sets_import_error(
-        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
-    ) -> None:
-        run.adapter.error = SiteUnreachable("refused")
-        self.fail_below_threshold(run, clock)
-
-        run.run()
-
-        error = run.novel(novel_id).import_error
-        assert error == "Site unreachable: refused"
-
-    def test_refresh__at_the_threshold_a_later_sync_backs_off_like_a_site_error(
-        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
-    ) -> None:
-        do_initial(run, novel_id, clock)
-        run.adapter.error = SiteUnreachable("refused")
-        before = run.novel(novel_id).refresh_interval
-        self.fail_below_threshold(run, clock)
 
         run.run()
 
         row = run.novel(novel_id)
         assert row.refresh_interval == min(before * 2, MAX)
         assert row.import_error is None
+        assert host_row(repo).failures == 1
+        assert host_row(repo).reach_after < clock() + timedelta(minutes=1)  # only the throttle
+
+    def test_refresh__an_initial_import_that_fails_sets_import_error(
+        self, repo: Repo, novel_id: str, run: Harness
+    ) -> None:
+        run.adapter.error = SiteUnreachable("refused")
+
+        run.run()
+
+        assert run.novel(novel_id).import_error == "Site unreachable: refused"
+
+    def test_refresh__a_second_failure_in_a_row_pauses_the_host_and_waits_for_it(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteUnreachable("refused")
+        run.run()
+        clock.advance(days=40)
+        before = run.novel(novel_id).refresh_interval
+
+        with structlog.testing.capture_logs() as logs:
+            run.run()
+
+        paused = clock() + timedelta(minutes=5)
+        assert host_row(repo).reach_after == paused
+        assert run.next_refresh_at(novel_id) == paused
+        assert run.novel(novel_id).refresh_interval == before
+        assert [e["reach_after"] for e in logs if e["event"] == "host_paused"] == [paused]
 
     def test_refresh__a_success_resets_the_count(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
     ) -> None:
         do_initial(run, novel_id, clock)
         run.adapter.error = SiteUnreachable("refused")
-        self.fail_below_threshold(run, clock)
-        run.adapter.error = None
         run.run()
         clock.advance(days=40)
-        run.adapter.error = SiteUnreachable("refused")
+        run.adapter.error = None
+        run.run()
 
-        with pytest.raises(RunnerBackoff):
-            run.run()
+        assert host_row(repo).failures == 0
 
     def test_refresh__a_site_error_means_the_host_answered_and_resets_the_count(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
     ) -> None:
         do_initial(run, novel_id, clock)
         run.adapter.error = SiteUnreachable("refused")
-        self.fail_below_threshold(run, clock)
-        run.adapter.error = SiteError("no chapters")
         run.run()
         clock.advance(days=40)
-        run.adapter.error = SiteUnreachable("refused")
+        run.adapter.error = SiteError("no chapters")
+        run.run()
 
-        with pytest.raises(RunnerBackoff):
-            run.run()
+        assert host_row(repo).failures == 0
 
     def test_refresh__counts_hosts_independently(
         self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
     ) -> None:
-        for _ in range(SITE_UNREACHABLE_RETRIES):
-            run.reachability.failed("other.com")
+        repo.hosts.publish([HOST, "other.com"])
+        repo.hosts.failed("other.com", FailureKind.UNREACHABLE, retry_after=None)
         run.adapter.error = SiteUnreachable("refused")
 
-        with pytest.raises(RunnerBackoff):
-            run.run()
+        run.run()
+
+        assert host_row(repo).failures == 1
+
+
+class TestRefresh__OnThrottling:
+    def test_refresh__a_throttled_host_is_paused_for_retry_after_and_the_refresh_waits(
+        self, repo: Repo, novel_id: str, run: Harness, clock: FakeClock
+    ) -> None:
+        do_initial(run, novel_id, clock)
+        run.adapter.error = SiteThrottled("429", retry_after=120)
+
+        run.run()
+
+        paused = clock() + timedelta(seconds=120)
+        assert host_row(repo).reach_after == paused
+        assert run.next_refresh_at(novel_id) == paused
 
 
 class TestRefresh__OnCoverFailure:

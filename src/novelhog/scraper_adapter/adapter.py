@@ -14,9 +14,23 @@ from novelhog import log, net
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import UrlTooLong, normalize_url
-from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
+from novelhog.scraper_adapter.errors import (
+    InfrastructureError,
+    SiteChallenged,
+    SiteError,
+    SiteThrottled,
+    SiteTransient,
+    SiteUnreachable,
+)
 from novelhog.scraper_adapter.finders import find_cover_url, find_title
-from novelhog.scraper_adapter.guard import flaresolverr_fallback, outbound_guard, page_budget
+from novelhog.scraper_adapter.guard import (
+    CloudflareChallengeError,
+    ServerResponseError,
+    ThrottledResponseError,
+    flaresolverr_fallback,
+    outbound_guard,
+    page_budget,
+)
 from novelhog.scraper_adapter.overrides import FORCE_FLARESOLVERR_HOSTS
 from novelhog.scraper_adapter.scraper import (
     Chapter,
@@ -78,42 +92,66 @@ def _unreachable_reason(exc: requests.exceptions.RequestException) -> str | None
     return None
 
 
-def _connection_failure(exc: BaseException) -> tuple[type[Exception], str] | None:
-    """Classify a scraper failure caused by a connection problem, looking through its causes.
+def _is_transient(exc: requests.exceptions.RequestException) -> bool:
+    """A read timeout or a connection dropped mid-way, as opposed to TLS or proxy problems."""
+    if isinstance(exc, requests.exceptions.ReadTimeout | requests.exceptions.ChunkedEncodingError):
+        return True
+    return (
+        isinstance(exc, requests.exceptions.ConnectionError)
+        and not isinstance(exc, requests.exceptions.SSLError | requests.exceptions.ProxyError)
+        and _unreachable_reason(exc) is None
+    )
 
-    Returns `InfrastructureError` for FlareSolverr's own failure (which wins over the plain
-    `requests` one it was raised from) and `SiteUnreachable` with a reason for a direct request
-    that was refused, failed name resolution or timed out connecting. Other failures (TLS, proxy,
-    reset, read timeout) give None.
-    """
+
+def _chain(exc: BaseException) -> Iterator[BaseException]:
+    """`exc` and every exception it was raised from or during, outermost first."""
     seen: set[int] = set()
     current: BaseException | None = exc
-    unreachable: str | None = None
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, FlaresolverrConnectionError):
-            return InfrastructureError, ""
-        if unreachable is None and isinstance(current, net.Unresolvable):
-            unreachable = "name resolution failed"
-        if unreachable is None and isinstance(current, requests.exceptions.RequestException):
-            unreachable = _unreachable_reason(current)
+        yield current
         current = current.__cause__ or current.__context__
-    return (SiteUnreachable, unreachable) if unreachable else None
+
+
+def _classify(exc: BaseException, host: str) -> Exception:
+    """The adapter error for a scraper failure, judged by every exception in its chain.
+
+    FlareSolverr's own failure wins (`InfrastructureError`), then an unsolved Cloudflare challenge,
+    a throttling answer, an unreachable site (refused, name resolution, connect timeout) and a
+    transient one (another 5xx, read timeout, dropped connection). Anything else is a `SiteError`.
+    """
+    chain = list(_chain(exc))
+    if any(isinstance(e, FlaresolverrConnectionError) for e in chain):
+        return InfrastructureError(str(exc))
+    if any(isinstance(e, CloudflareChallengeError) for e in chain):
+        return SiteChallenged(str(exc))
+    throttled = next((e for e in chain if isinstance(e, ThrottledResponseError)), None)
+    if throttled is not None:
+        return SiteThrottled(str(exc), retry_after=throttled.retry_after)
+    for e in chain:
+        reason = None
+        if isinstance(e, net.Unresolvable):
+            reason = "name resolution failed"
+        elif isinstance(e, requests.exceptions.RequestException):
+            reason = _unreachable_reason(e)
+        if reason is not None:
+            return SiteUnreachable(f"Cannot reach {host}: {reason}")
+    if any(
+        isinstance(e, ServerResponseError)
+        or (isinstance(e, requests.exceptions.RequestException) and _is_transient(e))
+        for e in chain
+    ):
+        return SiteTransient(str(exc))
+    return SiteError(str(exc))
 
 
 @contextmanager
 def _translated_errors(host: str) -> Iterator[None]:
-    """Turn scraper failures into `InfrastructureError`, `SiteUnreachable` or `SiteError`."""
+    """Turn scraper failures into `InfrastructureError`, a `HostFailure` or `SiteError`."""
     try:
         yield
     except ScraperError as exc:
-        failure = _connection_failure(exc)
-        if failure is not None and failure[0] is SiteUnreachable:
-            msg = f"Cannot reach {host}: {failure[1]}"
-            raise SiteUnreachable(msg) from exc
-        if failure is not None:
-            raise InfrastructureError(str(exc)) from exc
-        raise SiteError(str(exc)) from exc
+        raise _classify(exc, host) from exc
     except requests.exceptions.RequestException as exc:
         # The scraper lets only its FlareSolverr session calls escape unwrapped.
         raise InfrastructureError(str(exc)) from exc

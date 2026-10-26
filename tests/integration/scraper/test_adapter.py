@@ -5,6 +5,8 @@ import json
 import shutil
 import socket
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 
 import pytest
@@ -13,10 +15,15 @@ from structlog.testing import capture_logs
 
 from novelhog import config, net
 from novelhog.config import Settings
+from novelhog.domain.hosts import FailureKind
 from novelhog.scraper_adapter import ScraperAdapter, guard
 from novelhog.scraper_adapter.errors import (
+    HostFailureError,
     InfrastructureError,
+    SiteChallenged,
     SiteError,
+    SiteThrottled,
+    SiteTransient,
     SiteUnreachable,
     TocLoopError,
 )
@@ -446,8 +453,9 @@ class TestScraperAdapter__DirectHost:
 
 
 class TestScraperErrors__SiteUnreachable:
-    def test_site_unreachable__is_an_infrastructure_error(self) -> None:
-        assert issubclass(SiteUnreachable, InfrastructureError)
+    def test_site_unreachable__is_a_host_failure_not_an_infrastructure_error(self) -> None:
+        assert issubclass(SiteUnreachable, HostFailureError)
+        assert not issubclass(SiteUnreachable, InfrastructureError)
 
 
 class TestScraperAdapter__OnUnreachableFlaresolverr__ForAForcedHost:
@@ -581,19 +589,111 @@ class TestScraperAdapter__OnConnectionProblems:
         "error",
         [
             requests.exceptions.ReadTimeout("slow"),
-            requests.exceptions.SSLError("bad certificate"),
-            requests.exceptions.ProxyError("proxy"),
             requests.exceptions.ConnectionError("Connection aborted"),
+            requests.exceptions.ChunkedEncodingError("cut off"),
         ],
-        ids=["read timeout", "tls", "proxy", "reset"],
+        ids=["read timeout", "reset", "truncated body"],
     )
-    def test_sync_toc__other_connection_problems_are_site_errors(
+    def test_sync_toc__a_dropped_connection_raises_site_transient(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr, monkeypatch: pytest.MonkeyPatch,
         error: Exception,
     ) -> None:  # fmt: skip
         self.patch_get(monkeypatch, error)
-        with pytest.raises(SiteError):
+        with pytest.raises(SiteTransient):
             self.sync(tmp_path, flaresolverr)
+
+    @pytest.mark.parametrize(
+        "error",
+        [requests.exceptions.SSLError("bad certificate"), requests.exceptions.ProxyError("proxy")],
+        ids=["tls", "proxy"],
+    )
+    def test_sync_toc__tls_and_proxy_problems_are_plain_site_errors(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:  # fmt: skip
+        self.patch_get(monkeypatch, error)
+        with pytest.raises(SiteError) as raised:
+            self.sync(tmp_path, flaresolverr)
+        assert not isinstance(raised.value, HostFailureError)
+
+
+def _sync_with_reply(
+    tmp_path: Path, flaresolverr: FakeFlareSolverr, reply: tuple[int, dict[str, str], str]
+) -> tuple[BaseException, list[str]]:
+    with FakeSite({}, reply=reply) as site:
+        with pytest.raises(SiteError) as raised:
+            ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+            )
+        return raised.value, site.requests
+
+
+class TestScraperAdapter__OnThrottlingResponses:
+    def test_sync_toc__429_with_retry_after_seconds_raises_site_throttled_without_retrying(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        error, requests_made = _sync_with_reply(
+            tmp_path, flaresolverr, (429, {"Retry-After": "120"}, "slow down")
+        )
+        assert isinstance(error, SiteThrottled)
+        assert (error.kind, error.retry_after) == (FailureKind.THROTTLED, 120)
+        assert requests_made == ["/toc"]
+
+    def test_sync_toc__503_with_an_http_date_retry_after_gives_the_seconds_until_it(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        when = format_datetime(datetime.now(UTC) + timedelta(seconds=300), usegmt=True)
+        error, _ = _sync_with_reply(tmp_path, flaresolverr, (503, {"Retry-After": when}, "busy"))
+        assert isinstance(error, SiteThrottled)
+        assert error.retry_after is not None
+        assert 290 <= error.retry_after <= 300
+
+    def test_sync_toc__429_without_retry_after_has_no_retry_after(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        error, _ = _sync_with_reply(tmp_path, flaresolverr, (429, {}, "slow down"))
+        assert isinstance(error, SiteThrottled)
+        assert error.retry_after is None
+
+    def test_sync_toc__an_unparseable_retry_after_is_ignored(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        error, _ = _sync_with_reply(tmp_path, flaresolverr, (429, {"Retry-After": "soon"}, "x"))
+        assert isinstance(error, SiteThrottled)
+        assert error.retry_after is None
+
+
+class TestScraperAdapter__OnServerErrors:
+    @pytest.mark.parametrize("status", [500, 502])
+    def test_sync_toc__a_5xx_raises_site_transient(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, status: int
+    ) -> None:
+        error, _ = _sync_with_reply(tmp_path, flaresolverr, (status, {}, "oops"))
+        assert isinstance(error, SiteTransient)
+        assert error.kind is FailureKind.TRANSIENT
+
+    def test_sync_toc__a_404_is_a_site_error_that_is_no_host_failure(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        error, _ = _sync_with_reply(tmp_path, flaresolverr, (404, {}, "gone"))
+        assert not isinstance(error, HostFailureError)
+
+
+class TestScraperAdapter__OnAnUnsolvedChallenge:
+    def test_sync_toc__a_challenge_flaresolverr_could_not_solve_raises_site_challenged(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}, challenge="header") as site:
+            with pytest.raises(SiteChallenged) as raised:
+                ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
+                    "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
+                )
+        assert raised.value.kind is FailureKind.CHALLENGED
+
+
+class TestScraperErrors__Kinds:
+    def test_site_unreachable__is_an_unreachable_host_failure(self) -> None:
+        assert SiteUnreachable("x").kind is FailureKind.UNREACHABLE
 
 
 class TestScraperAdapter__SyncToc__OnExactlyBudgetPages:

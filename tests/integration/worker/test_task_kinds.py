@@ -21,6 +21,7 @@ from novelhog.config import Settings
 from novelhog.domain.chapters import ChapterState
 from novelhog.domain.errors import NotFound
 from novelhog.domain.exports import Format
+from novelhog.domain.hosts import CHAPTER_MAX_RETRIES
 from novelhog.domain.tasks import Done, Skip, Started, StartResult, TaskKind, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import contents as contents_repo
@@ -39,7 +40,6 @@ from novelhog.scraper_adapter.adapter import TocResult
 from novelhog.scraper_adapter.errors import InfrastructureError, SiteError, SiteUnreachable
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker import runtime
-from novelhog.worker.reachability import SITE_UNREACHABLE_RETRIES, Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks import default_processors
 from novelhog.worker.tasks.base import HeartbeatFactory, TaskContext
@@ -83,18 +83,12 @@ def files(tmp_path: Path) -> LocalStaticStorage:
     return LocalStaticStorage(tmp_path / "static", "/static")
 
 
-@pytest.fixture
-def reachability() -> Reachability:
-    return Reachability()
-
-
 def make_runner(  # noqa: PLR0913
     repo: Repo,
     adapter: TocAdapter,
     fetcher: FakeFetcher,
     files: LocalStaticStorage,
     settings: Settings,
-    reachability: Reachability,
     heartbeat: HeartbeatFactory = runtime.Heartbeat,
 ) -> Runner:
     """The runner with the default processors, as the worker builds it; waits never sleep."""
@@ -108,7 +102,7 @@ def make_runner(  # noqa: PLR0913
             chapter_store=ChapterStore(repo),
             settings=settings,
             stop=RecordingStop(),
-            reachability=reachability,
+            hosts=repo.hosts,
             rng=random.Random(3),  # noqa: S311 - refresh jitter, not security
             heartbeat=heartbeat,
             clock=repo.clock,
@@ -123,10 +117,9 @@ def runner(
     fetcher: FakeFetcher,
     files: LocalStaticStorage,
     settings: Settings,
-    reachability: Reachability,
 ) -> Runner:
     """The runner with the default processors, as the worker builds it."""
-    return make_runner(repo, adapter, fetcher, files, settings, reachability)
+    return make_runner(repo, adapter, fetcher, files, settings)
 
 
 def refresh_tasks(repo: Repo, novel_id: str) -> list[TaskRow]:
@@ -354,11 +347,8 @@ class TestNovelRefresh__WhenTheHeartbeatLostTheClaimBeforeTheCover:
         fetcher: _CountingFetcher,
         files: LocalStaticStorage,
         settings: Settings,
-        reachability: Reachability,
     ) -> Runner:
-        return make_runner(
-            repo, adapter, fetcher, files, settings, reachability, lambda renew, s: _LostBeat()
-        )
+        return make_runner(repo, adapter, fetcher, files, settings, lambda renew, s: _LostBeat())
 
     def test_run__does_not_fetch_the_cover(
         self, novel_id: str, lost_runner: Runner, fetcher: _CountingFetcher
@@ -1156,24 +1146,27 @@ class TestChapterDownload__OnRetry__WhenTheChapterLostItsPositionMeanwhile:
 
 
 class TestChapterDownload__WhenTheSiteIsUnreachable:
-    def test_run__below_the_threshold_retries(
+    def test_run__retries_without_backing_the_loop_off(
         self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str]
     ) -> None:
         adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
 
-        with pytest.raises(RunnerBackoff):
-            runner.step()
+        assert runner.step() is True
 
         assert chapter_record(repo, queued2[0]).state == "pending"
-        assert [t.state for t in downloads_of(repo, queued2[0])] == [TaskState.QUEUED]
+        [task] = downloads_of(repo, queued2[0])
+        assert (task.state, task.retries) == (TaskState.QUEUED, 1)
 
-    def test_run__at_the_threshold_fails_with_site_unreachable(
-        self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str],
-        reachability: Reachability,
-    ) -> None:  # fmt: skip
+    def test_run__once_its_retries_are_used_fails_with_site_unreachable(
+        self, repo: Repo, runner: Runner, adapter: TocAdapter, queued2: list[str]
+    ) -> None:
         adapter.errors[f"{URL}/1"] = SiteUnreachable("refused")
-        for _ in range(SITE_UNREACHABLE_RETRIES - 1):
-            reachability.failed(HOST)
+        with db.write(repo.engine) as conn:
+            conn.execute(
+                update(tasks)
+                .where(tasks.c.entity_id == queued2[0])
+                .values(retries=CHAPTER_MAX_RETRIES)
+            )
 
         assert runner.step() is True
 
@@ -1193,7 +1186,7 @@ class TestChapterDownload__WhenTheWorkerIsKilledMidDownload:
         start_task(repo, queued2[0], "worker-killed", settings.claim_ttl)
         clock.advance(seconds=settings.claim_ttl + 1)
         other = replace(settings, worker_id="worker-b")
-        return make_runner(repo, adapter, fetcher, files, other, Reachability())
+        return make_runner(repo, adapter, fetcher, files, other)
 
     def test_recover__puts_the_chapter_back_pending_with_queued_at_unchanged(
         self, repo: Repo, restarted: Runner, queued2: list[str]

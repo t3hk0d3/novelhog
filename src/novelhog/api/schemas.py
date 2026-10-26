@@ -58,9 +58,16 @@ class SettingsOut(BaseModel):
 
 
 class Host(BaseModel):
-    """A supported host (`GET /api/v1/hosts`)."""
+    """A supported host (`GET /api/v1/hosts`).
+
+    `reach_after` is when it may be contacted again (a pause after failures, or the request
+    delay after a fetch); `failing_since` is when its current run of failures began. Both are
+    RFC 3339 strings, null when unset.
+    """
 
     host: str
+    reach_after: str | None
+    failing_since: str | None
 
 
 class Novel(BaseModel):

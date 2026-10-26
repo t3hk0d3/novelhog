@@ -31,7 +31,6 @@ from novelhog.notifications import dispatcher
 from novelhog.repo import Repo, utcnow
 from novelhog.storage import StaticStorage
 from novelhog.worker import maintenance, refresh, runtime
-from novelhog.worker.reachability import Reachability
 from novelhog.worker.runner import Runner, RunnerBackoff
 from novelhog.worker.tasks import default_processors
 from novelhog.worker.tasks.base import ProcessorRegistry, TaskContext, WorkerAdapter
@@ -73,7 +72,6 @@ class Worker:
         self._last_repair: datetime | None = None
         self._rng = random.Random()  # noqa: S311 - refresh jitter, not security
         self._backoff = runtime.Backoff(settings.idle_sleep)
-        self._reachability = Reachability()
         self._runner = Runner(
             repo,
             default_processors() if processors is None else processors,
@@ -84,7 +82,7 @@ class Worker:
                 chapter_store=ChapterStore(repo),
                 settings=settings,
                 stop=self._stop,
-                reachability=self._reachability,
+                hosts=repo.hosts,
                 rng=self._rng,
                 heartbeat=runtime.Heartbeat,
                 clock=repo.clock,

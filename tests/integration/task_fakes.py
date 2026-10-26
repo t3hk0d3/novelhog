@@ -69,6 +69,9 @@ class RecordingHandler:
     def recover(self, conn: Connection, task: TaskRow, now: datetime) -> None:
         self._seen("recover", conn, task)
 
+    def rescheduled(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+        self._seen("rescheduled", conn, task)
+
     def problems(self, conn: Connection) -> list[Problem]:
         return []
 

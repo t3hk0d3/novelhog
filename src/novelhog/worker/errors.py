@@ -1,6 +1,24 @@
-"""Error summaries shared by the worker stages."""
+"""Error summaries and host-failure logging shared by the worker's processors."""
+
+from structlog.typing import FilteringBoundLogger
+
+from novelhog.domain.hosts import FailureKind
+from novelhog.repo.hosts import HostState
 
 _SUMMARY_LIMIT = 300
+
+
+def log_host_paused(
+    logger: FilteringBoundLogger, host: str, kind: FailureKind, state: HostState
+) -> None:
+    """Log `host_paused`: the host is not contacted again before `reach_after`."""
+    logger.warning(
+        "host_paused",
+        host=host,
+        kind=kind.value,
+        failures=state.failures,
+        reach_after=state.paused_until,
+    )
 
 
 def unreachable_message(error: Exception) -> str:

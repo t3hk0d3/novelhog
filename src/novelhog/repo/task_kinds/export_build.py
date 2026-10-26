@@ -134,6 +134,9 @@ class ExportBuildHandler:
         if self._unbuild(conn, task.entity_id):
             self._emit(conn, task.novel_id, task.entity_id, now)
 
+    def rescheduled(self, conn: Connection, task: TaskRow, now: datetime) -> None:
+        """Builds contact no host, so they are never rescheduled; nothing to do."""
+
     @staticmethod
     def _unbuild(conn: Connection, export_id: str) -> bool:
         """`building` → `waiting`; rows only. False when the export was not building."""

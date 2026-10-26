@@ -50,7 +50,8 @@ This spec moves all background work onto one `tasks` table:
 | v1 | Here | Why |
 |---|---|---|
 | `POST /sync` on an idle novel syncs twice: the claim does not clear `sync_requested`, so `finish_sync` schedules another sync at once | it syncs once: the request merges into the queued refresh task | the second sync was a side effect, not intended (v1 §5.3) |
-| `REQUEST_DELAY` is waited between chapters of one batch, whatever their hosts | it is waited before a download whose host was fetched less than the delay ago (§6) | politeness is per host; a refresh or another host's chapter no longer waits |
+| `REQUEST_DELAY` is waited between chapters of one batch, whatever their hosts | every refresh and download books its host's next slot in `hosts.reach_after` (§6.1) | politeness is per host and shared by every worker; another host's work never waits |
+| a chapter fails "Site unreachable" after 3 consecutive unreachable failures counted per worker in memory | a failing host is paused in `hosts.reach_after`; its tasks wait for it without using a retry; chapters retry transient failures with a backoff (§6.1) | an outage no longer turns a backlog red, and every worker knows the host is paused |
 | `NOVELHOG_BATCH_SIZE` chapters per claim | one task per claim (§6) | a refresh never waits behind a batch |
 
 ### Decisions (user, 2026-10-24)
@@ -336,7 +337,7 @@ processor's `run` gets the work item. Below, "processor" means both halves.
   conditional on the entity state, because the record can change while `run` is
   working. For example, the user can delete a novel mid-download.
 - `ctx` holds the adapter, fetcher, storage, settings, stop event, heartbeat and
-  `Reachability`, the same dependencies as v1's stages.
+  `hosts` (where a processor reports how its host answered, §6.1).
 
 | Processor | `begin`: still needed when … / entity change on start | `complete` |
 |---|---|---|
@@ -391,9 +392,11 @@ loop until stop requested:
 
 run_task(task):
     processor = processors[task.kind]
-    if task.kind == chapter_download:
-        host = the task's novel host                              # read with the claim
-        stop.wait(until last_fetch[host] + request_delay(host))   # politeness per host (§1.1)
+    if task.kind in (novel_refresh, chapter_download):           # the host gate (§6.1)
+        host = the task's novel host                              # read after the claim
+        slot = hosts.reserve(host, request_delay(host), within=HOST_WAIT_WINDOW)
+        if not slot.reserved: tasks.reschedule(task, slot.at); log task_rescheduled; return
+        stop.wait(until slot.at)
         if stop requested: queue.release(task); return
     in one transaction (lock_novel → rows → events → cursor):
         result = queue.start(task)
@@ -404,29 +407,64 @@ run_task(task):
         if begin is Skip: queue.finish(task, skipped); log task_skipped; return
     with heartbeat(task):
         outcome = processor.run(task, ctx)       # exceptions → Failed('<Type>: <summary>')
-    if task.kind == chapter_download: last_fetch[host] = now
+    if host: hosts.hold(host, request_delay(host))           # the delay counts from the fetch's end
     in one transaction:
         fenced = queue.retry(...) if outcome is Retry else queue.finish(...)
         if fenced: processor.complete(task, outcome); log task_finished
         else: log task_lost (and trash what run stored)
-    if outcome is Retry: raise to the loop's backoff (v1 §6.1, unchanged)
+    if outcome is Retry(cause=infrastructure): raise to the loop's backoff (v1 §6.1)
 ```
 
 - The runner claims one task at a time, so an urgent refresh never waits behind
   a batch of downloads. Downloads therefore cost one claim statement each. That
   is accepted; batching is future work.
-- `last_fetch` is per worker and in memory, like `Reachability`.
-  `request_delay(host)` is v1's `max(REQUEST_DELAY, adapter.request_delay(host))`,
+- `request_delay(host)` is v1's `max(REQUEST_DELAY, adapter.request_delay(host))`,
   seconds against a `CLAIM_TTL` of minutes, so the wait needs no heartbeat.
 - On stop: a task that was claimed but not started is released. A running task
   finishes first (v1 §6.1, unchanged).
-- Site-unreachable counting (v1 §6.1) is unchanged. `Reachability` stays per
-  worker and in memory, and the processors decide between `Retry` and `Failed`
-  exactly as v1's stages do.
+- v1's in-memory `Reachability` is gone; failures are counted on the host (§6.1).
 - **A start or finish transaction that itself fails** (`repo.Busy`, an
   unexpected error) is logged as `task_error` and raised to the loop's backoff. The task
   keeps its claim (claimed or running) until `CLAIM_TTL` lapses; recovery then
   puts it back (§8), and the result of `run` is lost, as in v1.
+
+### 6.1 Host pause and throttling
+
+`hosts` has `reach_after` (not contacted before it), `failures` (consecutive),
+`failing_since` and `last_failure`. `reach_after` serves both politeness and
+pauses, so every worker sees both.
+
+- **Slots.** Before a refresh or download starts, `hosts.reserve` books the
+  host's next slot: it starts at `reach_after`, or now if that passed, and
+  lasts the request delay; a compare-and-set gives two workers consecutive
+  slots. A slot within `HOST_WAIT_WINDOW` (30 s) is waited for in-process; a
+  later one (the host is paused) reschedules the task to it: back to `queued`
+  at `run_after = reach_after`, claim cleared, no attempt and no retry used.
+  Each task reschedules itself when claimed; no bulk update. A rescheduled
+  refresh appends an `NV` event (`next_refresh_at` moved). After a fetch,
+  `hosts.hold` keeps the host for the delay. Builds contact no host.
+- **Failure kinds** (`domain.hosts`, from the scraper's errors):
+
+  | Kind | Raised for | Host | Task |
+  |---|---|---|---|
+  | `throttled` | a direct 429 or 503 | paused at once: `Retry-After`, else from 1 min | waits for the pause |
+  | `challenged` | a Cloudflare challenge FlareSolverr could not solve | paused at once, from 15 min | waits for the pause |
+  | `unreachable` | refused, DNS failure, connect timeout | the 2nd in a row pauses, from 5 min | retry with backoff until the host pauses |
+  | `transient` | another 5xx, read timeout, dropped connection | none | retry with backoff |
+  | `permanent` | any other site error | answered: failures cleared | `Failed` at once |
+
+  A pause doubles from its base with each further failure, up to 1 h, and
+  never moves `reach_after` earlier. A success clears the failures. FlareSolverr
+  being down is no host failure: `Retry` with the loop's backoff, as before.
+- **Chapter retries.** An `unreachable` or `transient` failure that does not
+  pause the host retries the chapter after 1, 2, 4, 8, 16 min (`tasks.retries`
+  counts them), then `Failed` (`Site unreachable: <message>` for unreachable).
+  `Retry` carries a cause: `infrastructure` (loop backs off), `host_paused`
+  (no retry used) or `transient` (one retry used).
+- **Refreshes** have no chapter retries: a failure that pauses the host
+  reschedules the refresh to the pause's end; any other failure is `Failed`
+  with v1's interval backoff.
+- `GET /api/v1/hosts` shows each host's `reach_after` and `failing_since`.
 
 ### Logging
 
@@ -787,9 +825,9 @@ Runner.run_task
         - task_error logged, loop backs off, task recovered after CLAIM_TTL
     On stop
         - a claimed, unstarted task is released; a running task finishes
-    Politeness
-        - a download waits until the host's previous fetch + request delay
-        - a refresh or another host's download does not wait
+    Host gate (§6.1)
+        - a refresh or download books the host's next slot; within 30 s it waits, beyond it reschedules
+        - another host's work and builds do not wait
 NovelRefreshProcessor
     - "still needed" = the novel exists
     On Done or Failed
@@ -818,8 +856,9 @@ ChapterDownloadProcessor
         - chapter back to pending, run_after kept (keeps its place in line)
         When the chapter lost its position meanwhile
             - chapter not_requested, task cancelled
-    Site unreachable
-        - below SITE_UNREACHABLE_RETRIES → Retry; at the threshold → Failed "Site unreachable: <message>"
+    Host failures (§6.1)
+        - a failure that pauses the host → Retry at the pause's end, no retry used
+        - unreachable or transient → Retry after 1, 2, 4, 8, 16 min; then Failed
 ExportBuildProcessor
     - "still needed" = the export is waiting and buildable; start turns it building
     On Done / Failed
@@ -868,9 +907,6 @@ Migration (SQLite and Postgres)
 
 ## 12. Out of scope (later)
 
-- **Pausing an unreachable host** (the open v1 question "M2"). With tasks this
-  becomes "push `run_after` forward for that host's queued download tasks", so
-  the chapters stay queued.
 - **Tasks in the UI** (its own spec, after this ships): an activity section on
   the novel page, a worker status indicator, a retry hint on chapter rows. It
   will revisit retention (last N per entity instead of 7 days) and whether
