@@ -56,14 +56,6 @@ export function ReaderNav({ chapters, index, hidden, wide, onPrevious, onNext }:
           style={{ width: `${percent}%` }}
           className="absolute inset-y-0 left-0 bg-[color-mix(in_srgb,var(--accent)_28%,transparent)]"
         />
-        <div
-          data-testid="position-marker"
-          style={{ left: `${percent}%` }}
-          className="absolute inset-y-0 flex w-1.5 -translate-x-1/2 flex-col justify-between"
-        >
-          <span className="h-2 rounded-full bg-ink" />
-          <span className="h-2 rounded-full bg-ink" />
-        </div>
         <span aria-hidden="true" className="relative text-sm font-semibold">
           {`${String(index + 1)} of ${String(n)}`}
         </span>

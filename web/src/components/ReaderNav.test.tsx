@@ -58,15 +58,9 @@ describe('ReaderNav', () => {
       expect(screen.getAllByTestId('progress-fill')[1]?.style.width).toBe('100%');
     });
 
-    it('has a distinct marker at the end of the fill, which stays visible even when nearly empty', () => {
-      show({ chapters: makeChapters(500), index: 0 });
-      const marker = screen.getByTestId('position-marker');
-      expect(marker.style.left).toBe('0.2%');
-      expect(marker).toHaveClass('w-1.5');
-      // Two short ticks at the top and bottom edges: nothing crosses the text in the middle.
-      const ticks = marker.querySelectorAll('.bg-ink');
-      expect(ticks).toHaveLength(2);
-      for (const tick of ticks) expect(tick).toHaveClass('h-2');
+    it('shows the position by the fill alone: no marker on top of the label', () => {
+      show({ chapters: makeChapters(500), index: 249 });
+      expect(screen.queryByTestId('position-marker')).toBeNull();
     });
 
     it('does not colour chapters by their download state', () => {

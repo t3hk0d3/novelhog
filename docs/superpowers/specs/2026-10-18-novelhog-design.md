@@ -1713,9 +1713,9 @@ manifest makes the app installable.
        first), a progress bar as tall as the buttons with "N of M" inside it, and
        a wide chevron button for the next (greyed out on the last). The bar is
        filled (a tint of the accent colour) up to the end of the open chapter
-       and has a marker there: two short dark ticks at its top and bottom
-       edges, so the label stays clear. It is read-only and deliberately plain:
-       no colours for the download state. On desktop widths the buttons also say
+       (the edge of the fill is the position; nothing is drawn over the
+       label). It is read-only and deliberately plain: no colours for the
+       download state, no marker. On desktop widths the buttons also say
        Previous / Next. The bar is a progress bar for screen readers ("Chapter
        N of M"). ←/→ do the same on a keyboard (not while typing or with a
        modifier key).

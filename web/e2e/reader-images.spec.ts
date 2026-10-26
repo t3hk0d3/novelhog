@@ -87,7 +87,7 @@ test('the reader draws chapter images inside the column and does not scroll side
   expect(sigil.drawn).toBe(sigil.natural); // a small image is not blown up
 
   expect(await overflow(page)).toBeLessThanOrEqual(0);
-  const longWord = article.getByText(/^Between the images/);
+  const longWord = article.getByText(/^A very long word/);
   expect(await longWord.evaluate((p) => p.scrollWidth - p.clientWidth)).toBeLessThanOrEqual(0); // the long unbroken word wrapped
 });
 

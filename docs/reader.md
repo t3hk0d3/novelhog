@@ -20,6 +20,8 @@ From top to bottom: **Back to novel** and the settings button (**Aa**), the posi
 title, the text, and the [bottom bar](#the-bottom-bar). The top row and the text are one page: they move together
 when you swipe, and a swipe may start anywhere on it.
 
+![The reading page: the top row, the chapter title and text, a map image that fits the column, and the bottom bar](images/reader-image.png)
+
 The text shows what the scraper kept: paragraphs, bold and italic, lists and images. Images are stored inside the
 chapter, so they appear without any further download. An image that could not be fetched shows
 `[image unavailable]`. Long words wrap instead of widening the page, and images shrink to fit but are never
@@ -30,7 +32,7 @@ enlarged.
 | Part | What it does |
 |---|---|
 | **‹** (wide button) | Previous chapter. Greyed out and disabled on the first chapter. |
-| Progress bar with `3 of 500` | Where you are in the novel: filled up to the open chapter, with a marker (two short ticks at its top and bottom) at its end. Read-only. |
+| Progress bar with `3 of 500` | Where you are in the novel: the bar is filled (in a tint of the accent colour) up to the end of the open chapter. Read-only. |
 | **›** (wide button) | Next chapter. Greyed out and disabled on the last chapter. |
 
 On a desktop-width window the buttons also say *Previous* and *Next*.
@@ -120,6 +122,8 @@ The reader remembers how far you got in each chapter and reopens it there.
 
 For a chapter without text the reader shows a status card: a large icon of its state, *This chapter isn't
 downloaded yet.*, its status as a pill, and what happens next.
+
+![The status card of a chapter that has not been downloaded: an icon, "Not requested", and a Download button](images/reader-download.png)
 
 | Status | What the card says | Button |
 |---|---|---|
