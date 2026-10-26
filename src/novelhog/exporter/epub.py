@@ -54,10 +54,17 @@ class EpubExporter:
         epub_book.set_identifier(strip_xml_invalid(book.identifier))
         epub_book.set_title(title)
         epub_book.set_language(strip_xml_invalid(book.language))
+        front: list[str] = []
         if book.cover is not None:
             cover = _prepare_image(book.cover[0])
             if cover is not None:
+                # Also writes the cover page, `cover.xhtml` with id "cover". Readers that open a
+                # book at its first spine item show it only when it leads the spine and is linear
+                # (ebooklib marks it non-linear).
                 epub_book.set_cover(f"cover.{_EXTENSIONS[cover[1]]}", cover[0])
+                epub_book.get_item_with_id("cover").is_linear = True
+                epub_book.guide.append({"type": "cover", "href": "cover.xhtml", "title": "Cover"})
+                front.append("cover")
 
         images = 0
         documents: list[epub.EpubHtml] = []
@@ -83,7 +90,7 @@ class EpubExporter:
         epub_book.toc = tuple(documents)
         epub_book.add_item(epub.EpubNcx())
         epub_book.add_item(epub.EpubNav())
-        epub_book.spine = ["nav", *documents]
+        epub_book.spine = [*front, "nav", *documents]
         epub.write_epub(str(out), epub_book)
 
     def _place_image(self, epub_book: epub.EpubBook, image: Token, count: int) -> int:
