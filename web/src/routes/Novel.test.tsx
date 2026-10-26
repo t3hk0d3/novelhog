@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router';
@@ -85,11 +85,24 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
     expect(JSON.parse((patches[0]?.[1] as RequestInit).body as string)).toEqual({ seen: true });
   });
 
-  it('shows the chapters of the range holding the highest position by default', async () => {
+  it('shows the first chapters by default, not the latest', async () => {
+    mount(makeNovel({ total_pages: 120 }), makeChapters(120));
+    expect(await screen.findByRole('button', { name: '1–50', pressed: true })).toBeVisible();
+    expect(screen.getByText('Page 1')).toBeInTheDocument();
+    expect(screen.getByText('Page 50')).toBeInTheDocument();
+    expect(screen.queryByText('Page 120')).toBeNull();
+  });
+
+  it('reopens on the range that was chosen last, and only for that novel', async () => {
+    mount(makeNovel({ total_pages: 120 }), makeChapters(120));
+    await userEvent.click(await screen.findByRole('button', { name: '101–120' }));
+    expect(screen.getByText('Page 120')).toBeInTheDocument();
+    cleanup(); // leave the page
+    FakeEventSource.instances = [];
+
     mount(makeNovel({ total_pages: 120 }), makeChapters(120));
     expect(await screen.findByRole('button', { name: '101–120', pressed: true })).toBeVisible();
     expect(screen.getByText('Page 120')).toBeInTheDocument();
-    expect(screen.queryByText('Page 50')).toBeNull();
   });
 
   it('shows results from all ranges under range headings while a filter is active', async () => {

@@ -1,9 +1,14 @@
 import { act, renderHook } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { RANGES_KEY } from '../lib/rangeMemory';
 import { makeChapter, makeChapters } from '../test/fixtures';
 import { useChapterView } from './useChapterView';
 
 describe('useChapterView', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   describe('ranges', () => {
     it('splits positions into ranges of 50, the last one ending at the highest position', () => {
       const { result } = renderHook(() => useChapterView(makeChapters(130), 0));
@@ -21,11 +26,11 @@ describe('useChapterView', () => {
       expect(result.current.ranges[1]?.counts).toMatchObject({ pending: 1, downloaded: 9 });
     });
 
-    it('selects the range holding the highest position by default', () => {
+    it('selects the first range by default, not the latest', () => {
       const { result } = renderHook(() => useChapterView(makeChapters(130), 0));
-      expect(result.current.range).toBe(2);
+      expect(result.current.range).toBe(0);
       expect(result.current.rangeChapters.map((c) => c.position)).toEqual(
-        Array.from({ length: 30 }, (_, i) => 101 + i),
+        Array.from({ length: 50 }, (_, i) => 1 + i),
       );
     });
 
@@ -35,6 +40,64 @@ describe('useChapterView', () => {
         result.current.setRange(0);
       });
       expect(result.current.range).toBe(0);
+    });
+
+    describe('remembering the range per novel', () => {
+      const open = (novelId: string, chapters = makeChapters(130)) =>
+        renderHook(() => useChapterView(chapters, 0, novelId));
+
+      it('starts the next visit on the range that was chosen last', () => {
+        const first = open('NV1');
+        act(() => {
+          first.result.current.setRange(2);
+        });
+        first.unmount();
+        const second = open('NV1');
+        expect(second.result.current.range).toBe(2);
+        expect(second.result.current.rangeChapters[0]?.position).toBe(101);
+      });
+
+      it('keeps the latest choice', () => {
+        const first = open('NV1');
+        act(() => {
+          first.result.current.setRange(2);
+        });
+        act(() => {
+          first.result.current.setRange(1);
+        });
+        first.unmount();
+        expect(open('NV1').result.current.range).toBe(1);
+      });
+
+      it('is per novel: another novel still starts on its first range', () => {
+        const first = open('NV1');
+        act(() => {
+          first.result.current.setRange(2);
+        });
+        expect(open('NV2').result.current.range).toBe(0);
+      });
+
+      it('falls back to the first range when the remembered one no longer exists', () => {
+        const long = open('NV1');
+        act(() => {
+          long.result.current.setRange(2);
+        });
+        long.unmount();
+        expect(open('NV1', makeChapters(60)).result.current.range).toBe(0);
+      });
+
+      it('remembers nothing for a view without a novel', () => {
+        const { result } = renderHook(() => useChapterView(makeChapters(130), 0));
+        act(() => {
+          result.current.setRange(2);
+        });
+        expect(localStorage.getItem(RANGES_KEY)).toBeNull();
+      });
+
+      it('does not remember a range that was never chosen', () => {
+        open('NV1');
+        expect(localStorage.getItem(RANGES_KEY)).toBeNull();
+      });
     });
 
     it('has no ranges and no selected range without chapters', () => {
