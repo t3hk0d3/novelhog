@@ -17,28 +17,29 @@ Builds on `docs/superpowers/specs/2026-10-26-readme-docs-publishing-design.md`: 
 
 ## Decisions
 
-- **Separate image and Dockerfile** (decided with the user): `homeassistant/novelhog/Dockerfile`, a thin image `FROM ghcr.io/t3hk0d3/novelhog:${BASE_TAG}` that only switches to `USER root` (a Supervisor-managed `/data` is not owned by uid 10001, and the add-on container is already isolated), sets the OCI labels Home Assistant expects, and sets `CMD ["addon"]`. The app is not rebuilt. It is published as `ghcr.io/t3hk0d3/novelhog-addon`, multi-arch.
+- **Separate image and Dockerfile** (decided with the user): `homeassistant/novelhog/Dockerfile`, a thin image `FROM ghcr.io/t3hk0d3/novelhog:${BASE_TAG}`. It installs `jq` (to read the options file), copies in `run.sh`, switches to `USER root` (a Supervisor-managed `/data` is not owned by uid 10001, and the add-on container is already isolated), sets the OCI labels Home Assistant expects, and sets `ENTRYPOINT ["tini", "--", "/run.sh"]`. The app is not rebuilt. It is published as `ghcr.io/t3hk0d3/novelhog-addon`, multi-arch.
 - **FlareSolverr is external** (decided with the user): an option `flaresolverr_url`, empty by default. Users run a FlareSolverr add-on, or one elsewhere, and paste its address.
 - **Ingress is out of scope** here (separate spec). Access is the published port plus an "Open Web UI" button.
-- **No second copy of the app**: the add-on's behaviour lives in the main image as a `novelhog addon` command, so the same code path is tested and shipped once.
+- **Startup is a bash script, not an app command** (decided with the user): everything specific to Home Assistant lives in `homeassistant/novelhog/run.sh`, so the `novelhog` application and its CLI know nothing about Home Assistant and no application code changes.
 
-## 1. `novelhog addon` command
+## 1. The startup script
 
-In `src/novelhog/cli.py` (alongside `db`, `api`, `web`, `worker`), with the parsing of the options file in its own small module so it is testable without processes.
+`homeassistant/novelhog/run.sh` (bash, `set -euo pipefail`; passes `shellcheck`), the image's entrypoint behind `tini`.
 
-- Reads `/data/options.json` (path overridable for tests) and maps its options onto the same settings the environment variables set today: `public_url` -> `NOVELHOG_PUBLIC_URL`, `vapid_subject` -> `NOVELHOG_VAPID_SUBJECT`, `allowed_hosts` (a list) -> `NOVELHOG_ALLOWED_HOSTS` (comma-joined), `flaresolverr_url` -> `NOVELHOG_FLARESOLVERR_URL` (only when non-empty; otherwise the default stays and the worker reports an infrastructure error only for Cloudflare-protected sites, as today).
-- Sets `NOVELHOG_DATA_DIR=/data` (the image already uses `/data/db` and `/data/static`) and keeps SQLite as the database.
-- Runs the migration, then starts the web role and the worker role as child processes, reusing the supervision pattern `novelhog web` already has for Caddy and the API (`_web`, `_terminate`).
-- On SIGTERM/SIGINT forwards the signal to both children and waits (the worker finishes its chapter; the Supervisor's stop timeout applies).
-- If either child exits, terminates the other and exits non-zero, so the Supervisor restarts the add-on.
-- A missing options file is treated as "all defaults" (so `docker run ... addon` works outside Home Assistant); a malformed one exits non-zero with a message that names the file.
+- Reads the options file, `/data/options.json` (path overridable with `OPTIONS_FILE`, for tests), with `jq`, and exports the same environment variables the application reads today: `public_url` -> `NOVELHOG_PUBLIC_URL`, `vapid_subject` -> `NOVELHOG_VAPID_SUBJECT`, `allowed_hosts` (a list) -> `NOVELHOG_ALLOWED_HOSTS` (comma-joined), `flaresolverr_url` -> `NOVELHOG_FLARESOLVERR_URL`. An empty or absent option is not exported, so the application default applies (with no FlareSolverr URL, the worker reports an infrastructure error only for Cloudflare-protected sites, as today).
+- Exports `NOVELHOG_DATA_DIR=/data` (the image already uses `/data/db` and `/data/static`); the database stays SQLite.
+- Runs `novelhog db migrate` and stops with its exit code if that fails.
+- Starts `novelhog web` and `novelhog worker` in the background, and waits for the first to exit.
+- On SIGTERM or SIGINT forwards TERM to both and waits for them (the worker finishes its chapter; the Supervisor's stop timeout applies), then exits 0.
+- If either child exits on its own, terminates the other and exits non-zero, so the Supervisor restarts the add-on.
+- A missing options file means "all defaults" (so `docker run` outside Home Assistant works); a malformed one exits non-zero, naming the file, before anything starts.
 
 ## 2. The add-on definition
 
 `homeassistant/novelhog/`:
 
 - `config.yaml`: `name`, `slug: novelhog`, `description`, `version` (equals the project version), `arch: [amd64, aarch64]`, `image: ghcr.io/t3hk0d3/novelhog-addon`, `init: false`, `startup: application`, `boot: auto`, `ports: {"8080/tcp": 8080}` with a description, `webui: "http://[HOST]:[PORT:8080]"`, `options` (defaults) and `schema` (`public_url: url?`, `vapid_subject: str?`, `allowed_hosts: [str]?`, `flaresolverr_url: url?`), `map: [data]` if the build-time check shows it is needed.
-- `Dockerfile` (above), `icon.png` and `logo.png` (from `docs/assets`), `DOCS.md` (what Home Assistant shows on the add-on's Documentation tab: options, the no-login warning, push needs HTTPS, FlareSolverr), `CHANGELOG.md`.
+- `Dockerfile` and `run.sh` (above), `icon.png` and `logo.png` (from `docs/assets`), `DOCS.md` (what Home Assistant shows on the add-on's Documentation tab: options, the no-login warning, push needs HTTPS, FlareSolverr), `CHANGELOG.md`.
 - `repository.yaml` at the repository root: `name`, `url`, `maintainer`, so users add `https://github.com/t3hk0d3/novelhog` as an add-on repository.
 
 ## 3. Publishing and versioning
@@ -49,56 +50,55 @@ In `src/novelhog/cli.py` (alongside `db`, `api`, `web`, `worker`), with the pars
 
 ## 4. Tests and checks
 
-BDD skeleton (the contract; tests come one per effect):
+The script is tested as it ships: a pytest module runs `run.sh` in a subprocess with `OPTIONS_FILE` pointing at a temporary file and a directory of stub executables first on `PATH` (a stub `novelhog` records its arguments and environment, then sleeps or exits as the test directs). No Docker and no application code are involved; the tests skip when `jq` is missing. BDD skeleton (one test per effect), in `tests/addon/test_run_script.py` (with an `__init__.py`, like the other test directories):
 
 ```
-novelhog.addon_options (module)
-    load
-        With every option set
-            - returns the public URL, VAPID subject, allowed hosts and FlareSolverr URL
-        With an empty or absent file
-            - returns defaults (nothing set)
-        With a malformed file
-            - raises an error that names the file
-    to_environment
-        With allowed hosts ["a", "b"]
-            - NOVELHOG_ALLOWED_HOSTS is "a,b"
-        With an empty FlareSolverr URL
-            - NOVELHOG_FLARESOLVERR_URL is not set
-        Always
-            - NOVELHOG_DATA_DIR is /data
-
-novelhog addon (cli)
-    starting
-        - the migration runs before any child starts
-        - the web role and the worker role are started as children
-    On SIGTERM
-        - both children receive it and the command waits for them
-    When a child exits
-        - the other child is terminated
-        - the command exits non-zero
+homeassistant/novelhog/run.sh
+    With every option set
+        - novelhog web and novelhog worker see NOVELHOG_PUBLIC_URL, NOVELHOG_VAPID_SUBJECT,
+          NOVELHOG_ALLOWED_HOSTS (comma-joined) and NOVELHOG_FLARESOLVERR_URL
+        - they see NOVELHOG_DATA_DIR=/data
+    With empty options
+        - NOVELHOG_FLARESOLVERR_URL, NOVELHOG_PUBLIC_URL and NOVELHOG_VAPID_SUBJECT are not set
+    With no options file
+        - starts with defaults
     With a malformed options file
-        - exits non-zero without starting any child
+        - exits non-zero with a message naming the file
+        - starts no novelhog process
+    Starting
+        - runs `novelhog db migrate` before web and worker start
+        - starts `novelhog web` and `novelhog worker`
+    When the migration fails
+        - exits with the migration's exit code
+        - starts neither web nor worker
+    On SIGTERM
+        - both children receive SIGTERM
+        - the script waits for them and exits 0
+    When a child exits on its own
+        - the other child receives SIGTERM
+        - the script exits non-zero
 
-homeassistant/novelhog/config.yaml (contract)
+homeassistant/novelhog/config.yaml (contract, tests/addon/test_config.py)
     - version equals the pyproject.toml version
     - image is ghcr.io/t3hk0d3/novelhog-addon
     - arch is amd64 and aarch64
     - port 8080/tcp is exposed and the webui points at it
     - every option in `options` has a `schema` entry and vice versa
+    - repository.yaml names the repository URL
 
-addon image (container smoke, gated like the others)
-    - built FROM the main image, `addon` starts and serves GET /api/v1/settings on 8080
-    - the data directory under /data is written (root-owned /data mounted)
+addon image (container smoke, gated like the others: NOVELHOG_CONTAINER_TESTS=1)
+    - built FROM the main image, it starts and serves GET /api/v1/settings on 8080
+    - with an options file mounted at /data/options.json, the options reach the app
+    - with a root-owned /data mounted, the database is written under /data/db
 ```
 
-Parsing and environment mapping are unit tests; the supervision cases follow the existing `novelhog web` tests' approach to child processes. `config.yaml` is parsed in the test (PyYAML in the `dev` group). CI also runs the official add-on linter (`frenck/action-addon-linter`) on `homeassistant/novelhog`. Code style follows `STYLEGUIDE.md` (module docstrings, full typing, `test_<unit>__<behaviour>`, scenario classes).
+`config.yaml` is parsed in the test (PyYAML in the `dev` group). CI also runs `shellcheck` on `run.sh` and the official add-on linter (`frenck/action-addon-linter`) on `homeassistant/novelhog`. Style follows `STYLEGUIDE.md` (module docstrings, full typing, `test_<unit>__<behaviour>`, scenario classes).
 
 ## 5. Docs
 
 - `docs/home-assistant.md` (nav: after Install): add the repository, install, options table, first start, the no-login warning, HTTPS/push notes (a reverse proxy or Home Assistant's own Nabu Casa URL is the user's choice), FlareSolverr via an external add-on, backups (the add-on's `/data` is included in Home Assistant backups).
 - A short Home Assistant mention and badge-style link in the README ("Add to Home Assistant" button URL `https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Ft3hk0d3%2Fnovelhog`).
-- `STYLEGUIDE.md` layout line gains `homeassistant/`.
+- `STYLEGUIDE.md` layout line gains `homeassistant/` and `tests/addon/`.
 
 ## Out of scope / future work
 
