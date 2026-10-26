@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from novelhog.domain.exports import Format
 from novelhog.repo import Repo, db
 from novelhog.repo.chapters import apply_toc
+from novelhog.repo.contents import put
 from novelhog.repo.novels import lock_novel
 
 BASE = "https://example.org/novel"
@@ -258,3 +259,70 @@ class TestPatchChapters__QueueingAndDequeueingManyChapters:
         assert isinstance(items, list)
         positions = [repo.chapters.get(item["entity_id"]).position for item in items]
         assert positions == list(range(1, 1000, 2))
+
+
+def _content_url(novel_id: str, chapter_id: str) -> str:
+    return f"/api/v1/novels/{novel_id}/chapters/{chapter_id}/content"
+
+
+def _ids(client: TestClient, novel_id: str) -> list[str]:
+    return [c["id"] for c in client.get(_url(novel_id)).json()["items"]]
+
+
+def _store(repo: Repo, chapter_id: str, markdown: str) -> None:
+    with db.write(repo.engine) as conn:
+        put(conn, chapter_id, markdown, repo.clock())
+
+
+class TestGetChapterContent:
+    def test_get_chapter_content__returns_chapter_markdown_and_neighbours(
+        self, client: TestClient, repo: Repo
+    ) -> None:
+        novel_id = _seed(repo, count=3)
+        ids = _ids(client, novel_id)
+        _store(repo, ids[1], "# Two\n\nSome *text*.")
+        response = client.get(_content_url(novel_id, ids[1]))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["chapter"]["id"] == ids[1]
+        assert body["chapter"]["position"] == 2
+        assert body["markdown"] == "# Two\n\nSome *text*."
+        assert body["fetched_at"].endswith("Z")
+        assert (body["previous_id"], body["next_id"]) == (ids[0], ids[2])
+
+    def test_get_chapter_content__ends_have_null_neighbours(
+        self, client: TestClient, repo: Repo
+    ) -> None:
+        novel_id = _seed(repo, count=1)
+        (only,) = _ids(client, novel_id)
+        _store(repo, only, "one")
+        body = client.get(_content_url(novel_id, only)).json()
+        assert (body["previous_id"], body["next_id"]) == (None, None)
+
+    def test_get_chapter_content__without_content_returns_404(
+        self, client: TestClient, repo: Repo
+    ) -> None:
+        novel_id = _seed(repo, count=1)
+        (only,) = _ids(client, novel_id)
+        error = _assert_error(client.get(_content_url(novel_id, only)), 404, "not_found")
+        assert error["details"] == {"entity": "chapter_content", "id": only}
+
+    def test_get_chapter_content__chapter_of_another_novel_returns_404(
+        self, client: TestClient, repo: Repo
+    ) -> None:
+        novel_id = _seed(repo, count=1)
+        (only,) = _ids(client, novel_id)
+        _store(repo, only, "one")
+        other = repo.novels.create(f"{BASE}-other", followed=False).id
+        _assert_error(client.get(_content_url(other, only)), 404, "not_found")
+
+    @pytest.mark.parametrize(
+        ("novel", "chapter"),
+        [(UNKNOWN, "CH000000000001"), ("bogus", "CH000000000001"), (None, "bogus")],
+    )
+    def test_get_chapter_content__unknown_or_malformed_ids_return_404(
+        self, client: TestClient, repo: Repo, novel: str | None, chapter: str
+    ) -> None:
+        novel_id = _seed(repo, count=1)
+        response = client.get(_content_url(novel or novel_id, chapter))
+        _assert_error(response, 404, "not_found")

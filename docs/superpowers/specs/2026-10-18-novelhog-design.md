@@ -701,6 +701,16 @@ Codes are `snake_case`.
 `{items: Chapter[], total: int}` ordered by `position`; `limit` is at most 5000.
 The UI loads every page of a novel (§10).
 
+`GET /novels/{id}/chapters/{chapter_id}/content` →
+`{chapter: Chapter, markdown: str, fetched_at, previous_id: str | null, next_id:
+str | null}` for reading a chapter in the UI. `markdown` is the stored content
+(images inlined as data URIs); a chapter being downloaded again still returns its
+earlier content. `previous_id` and `next_id` are the chapters at the positions
+before and after it, in any state, `null` at either end. `404 not_found` for an
+unknown novel, a chapter that is not the novel's or was removed from its table of
+contents, or one with no stored content (`details.entity` is `novel`, `chapter`
+or `chapter_content`).
+
 `PATCH /novels/{id}/chapters`
 
 ```
