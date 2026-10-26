@@ -13,7 +13,8 @@ export NOVELHOG_VAPID_SUBJECT=mailto:you@example.com      # needed for Web Push
 docker compose up -d --build
 ```
 
-`compose.yaml` runs one image in three roles plus a FlareSolverr:
+`compose.yaml` builds one Dockerfile (cached, so once) into an image per service and runs it in three roles plus a
+FlareSolverr:
 
 | Service | Command | Notes |
 |---|---|---|
