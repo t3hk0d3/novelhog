@@ -33,6 +33,27 @@ services:
     volumes:
       - novelhog-db:/data/db
       - novelhog-static:/data/static:ro
+    # `docker compose up --watch`: the SPA, Caddy and the API live here, so this rebuilds only for them.
+    develop:
+      watch:
+        - path: web
+          action: rebuild
+          ignore: [node_modules/, dist/, test-results/, playwright-report/, e2e/]
+        - path: docker/Caddyfile
+          action: rebuild
+        - &watch-python
+          path: src
+          action: rebuild
+          ignore: [__pycache__/]
+        - &watch-lock
+          path: uv.lock
+          action: rebuild
+        - &watch-pyproject
+          path: pyproject.toml
+          action: rebuild
+        - &watch-dockerfile
+          path: docker/Dockerfile
+          action: rebuild
 
   novelhog-worker:
     <<: *novelhog
@@ -51,6 +72,9 @@ services:
     networks:
       - default
       - worker-pair
+    # Python changes only; a web or Caddyfile change leaves the worker (and its downloads) running.
+    develop:
+      watch: [*watch-python, *watch-lock, *watch-pyproject, *watch-dockerfile]
 
   # No depends_on from the worker: while this is down the worker reports an infrastructure error.
   flaresolverr:
