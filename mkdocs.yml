@@ -46,6 +46,7 @@ nav:
   - Home: index.md
   - Reader: reader.md
   - Install: install.md
+  - Home Assistant: home-assistant.md
   - Configuration: configuration.md
   - Reverse proxy: reverse-proxy.md
   - Storage and upgrades: storage.md

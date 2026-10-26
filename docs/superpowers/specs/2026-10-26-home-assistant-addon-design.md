@@ -13,7 +13,7 @@ Builds on `docs/superpowers/specs/2026-10-26-readme-docs-publishing-design.md`: 
 - An add-on config has no key for the entrypoint or command: a container always starts its image's own default. The add-on therefore needs an image whose default command runs novelhog the add-on way.
 - With `image:` set in `config.yaml`, the add-on `version` is also the tag the Supervisor pulls.
 - `init: false` is for images that have their own init (this one has `tini`). Architectures are `amd64` and `aarch64`.
-- Options live in `/data/options.json`; persistent data in `/data`. (To verify while building: whether `/data` needs an explicit `map` entry; the docs are silent.)
+- Options live in `/data/options.json`; persistent data in `/data`. `/data` is always mounted, so `config.yaml` has no `map` entry (the docs say `map: data` only changes its path; confirmed against the Supervisor's validation code).
 
 ## Decisions
 
@@ -38,7 +38,7 @@ Builds on `docs/superpowers/specs/2026-10-26-readme-docs-publishing-design.md`: 
 
 `homeassistant/novelhog/`:
 
-- `config.yaml`: `name`, `slug: novelhog`, `description`, `version` (equals the project version), `arch: [amd64, aarch64]`, `image: ghcr.io/t3hk0d3/novelhog-addon`, `init: false`, `startup: application`, `boot: auto`, `ports: {"8080/tcp": 8080}` with a description, `webui: "http://[HOST]:[PORT:8080]"`, `options` (defaults) and `schema` (`public_url: url?`, `vapid_subject: str?`, `allowed_hosts: [str]?`, `flaresolverr_url: url?`, `database_url: password?`; the `password` type keeps the connection string, which holds a credential, masked in the Home Assistant UI), `map: [data]` if the build-time check shows it is needed.
+- `config.yaml`: `name`, `slug: novelhog`, `description`, `version` (equals the project version), `arch: [amd64, aarch64]`, `image: ghcr.io/t3hk0d3/novelhog-addon`, `init: false`, `ports: {"8080/tcp": 8080}` with a description, `webui: "http://[HOST]:[PORT:8080]"`, no `options` block and a `schema` (`public_url: url?`, `vapid_subject: str?`, `allowed_hosts: ["str?"]`, `flaresolverr_url: url?`, `database_url: password?`; the `password` type keeps the connection string, which holds a credential, masked in the Home Assistant UI). Every option is optional (`?`; for a list, on its element type), so none needs a default, and the Supervisor rejects `""` for a `url` type, which rules out empty defaults. `startup`, `boot` and an empty `options` are omitted too: the Home Assistant add-on linter rejects values equal to the defaults.
 - `Dockerfile` and `run.sh` (above), `icon.png` and `logo.png` (from `docs/assets`), `DOCS.md` (what Home Assistant shows on the add-on's Documentation tab: options, the no-login warning, push needs HTTPS, FlareSolverr), `CHANGELOG.md`.
 - `repository.yaml` at the repository root: `name`, `url`, `maintainer`, so users add `https://github.com/t3hk0d3/novelhog` as an add-on repository.
 
@@ -85,12 +85,13 @@ homeassistant/novelhog/config.yaml (contract, tests/addon/test_config.py)
     - image is ghcr.io/t3hk0d3/novelhog-addon
     - arch is amd64 and aarch64
     - port 8080/tcp is exposed and the webui points at it
-    - every option in `options` has a `schema` entry and vice versa
+    - every option in `options` (if any) has a `schema` entry
+    - every `schema` entry is optional (`?`) or has a default in `options`
     - repository.yaml names the repository URL
 
 addon image (container smoke, gated like the others: NOVELHOG_CONTAINER_TESTS=1)
     - built FROM the main image, it starts and serves GET /api/v1/settings on 8080
-    - with an options file mounted at /data/options.json, the options reach the app
+    - with an options file at /data/options.json, the options reach the app (observed through the host check: a host name listed in `allowed_hosts` is accepted, an unlisted one is not)
     - with a root-owned /data mounted and no database_url, the database is written under /data/db
 ```
 
