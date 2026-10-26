@@ -1221,8 +1221,7 @@ dispatch_notifications():
   failure, empty TOC, missing content) → `SiteError` with a short message.
 - **Accepted limitations (v1):**
   - The scraper's request helper discards FlareSolverr's cookies and user
-    agent, so images are fetched without them; an image host behind Cloudflare
-    gives `[image unavailable]`.
+    agent; images get their own clearance instead (§8.2).
   - The scraper names FlareSolverr sessions with one random letter and opens a
     browser session per chapter. Because every worker has its own FlareSolverr
     (§2), session names never collide.
@@ -1330,8 +1329,16 @@ Package `novelhog`, under `src/novelhog/`.
 
 ### 8.2 Images (chapter images and covers)
 
-- Fetched through the outbound guard (§6.8) with a browser user agent; no
-  FlareSolverr cookies (§6.7).
+- Fetched through the outbound guard (§6.8) with a browser user agent.
+- **Cloudflare:** a direct request answered by a challenge (`403`/`503` with
+  `cf-mitigated: challenge`) has FlareSolverr open the challenged URL
+  (`request.get`) and is sent once more with the `cf_clearance` cookie (and the
+  other cookies of its domain) and the user agent of that solution. The
+  clearance is cached in memory per worker process, per cookie domain (a
+  subdomain uses its parent's), until its cookie expires or the site challenges
+  it again; then the next image solves anew. A failed solve, or a challenge
+  despite a fresh clearance, gives no image. The cookies are domain-bound, so a
+  redirect to another site never carries them.
 - Type detected from magic bytes; allowed: PNG, JPEG, GIF, WebP. SVG and anything
   else are rejected.
 - Size cap `NOVELHOG_MAX_IMAGE_BYTES` (default 2 MiB), checked while streaming
@@ -1827,8 +1834,6 @@ desktop chapters, export dialog, phone normal and select mode).
   design already supports it, and every worker brings its own FlareSolverr;
   still needed: shared static storage (S3), and per-site download limits across
   workers (e.g. claimable host slots).
-- **FlareSolverr cookies for images** (own FlareSolverr client or an upstream
-  scraper change), so images behind Cloudflare can be fetched.
 - **S3 static backend** (`S3StaticStorage`), setting `Content-Type` and
   `Content-Disposition` per object.
 - **Image table**: move inline images of chapters with `has_images` into a

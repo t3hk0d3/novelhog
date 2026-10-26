@@ -1,12 +1,20 @@
-"""Image fetcher for the HTML to Markdown converter (spec section 8.2)."""
+"""Image fetcher for covers and the HTML to Markdown converter (spec section 8.2).
+
+A direct request that meets a Cloudflare challenge has FlareSolverr solve the challenged URL and
+is sent once more with the cookies and user agent of that clearance. The clearance is cached
+(`ClearanceCache`), so the site's next images go straight through with it; one the site challenges
+anyway is forgotten.
+"""
 
 import io
 import time
+from dataclasses import dataclass
 
 import requests
 from urllib3.exceptions import HTTPError
 
-from novelhog import images
+from novelhog import images, log
+from novelhog.clearance import Clearance, ClearanceCache
 from novelhog.images import FetchedImage
 from novelhog.net import Refused
 
@@ -16,6 +24,23 @@ USER_AGENT = (
 )
 _CHUNK = 16 * 1024
 DOWNLOAD_DEADLINE = 60.0  # seconds for one whole download
+
+
+_CHALLENGE_STATUSES = (403, 503)
+
+
+@dataclass(frozen=True)
+class _Challenged:
+    """A Cloudflare challenge answered the request; `url` is the challenged URL after redirects."""
+
+    url: str
+
+
+def _is_challenge(response: requests.Response) -> bool:
+    return (
+        response.status_code in _CHALLENGE_STATUSES
+        and response.headers.get("cf-mitigated", "").lower() == "challenge"
+    )
 
 
 class ImageFetcher:
@@ -29,12 +54,14 @@ class ImageFetcher:
         max_pixels: int,
         max_dimension: int,
         deadline: float = DOWNLOAD_DEADLINE,
+        clearances: ClearanceCache | None = None,
     ) -> None:
         self._session = session
         self._max_bytes = max_bytes
         self._max_pixels = max_pixels
         self._max_dimension = max_dimension
         self._deadline = deadline
+        self._clearances = clearances
 
     def fetch(self, url: str) -> FetchedImage | None:
         """Return the image, or None when it is unavailable, refused, oversized or not allowed."""
@@ -54,11 +81,37 @@ class ImageFetcher:
             return None
 
     def _download(self, url: str) -> bytes | None:
+        """Download directly; on a Cloudflare challenge solve it and try once more."""
+        cache = self._clearances
+        clearance = None if cache is None else cache.for_url(url)
+        result = self._attempt(url, clearance)
+        if not isinstance(result, _Challenged):
+            return result
+        if cache is None:
+            return None
+        if clearance is not None:
+            cache.forget(clearance)
+        clearance = cache.solve(result.url)
+        if clearance is None:
+            return None
+        result = self._attempt(url, clearance)
+        if isinstance(result, _Challenged):
+            cache.forget(clearance)
+            log.get().warning("image_clearance_refused", domain=clearance.domain, url=url)
+            return None
+        return result
+
+    def _attempt(self, url: str, clearance: Clearance | None) -> bytes | _Challenged | None:
+        """One direct download, sending `clearance` when given; the deadline is per attempt."""
         limit = self._max_bytes + 1
         expires = time.monotonic() + self._deadline
-        with self._session.get(url, stream=True, headers={"User-Agent": USER_AGENT}) as response:
+        user_agent = USER_AGENT if clearance is None else clearance.user_agent
+        cookies = None if clearance is None else clearance.jar()
+        with self._session.get(
+            url, stream=True, headers={"User-Agent": user_agent}, cookies=cookies
+        ) as response:
             if not response.ok:
-                return None
+                return _Challenged(response.url) if _is_challenge(response) else None
             buffer = io.BytesIO()
             while True:
                 if time.monotonic() > expires:

@@ -20,11 +20,13 @@ class FakeFlareSolverr:
 
     `pages` maps a requested URL to the HTML FlareSolverr would return for it. A URL missing from
     the map gets an error response, like a failed navigation. Every command received is kept in
-    `commands` (the decoded JSON bodies) so tests can inspect what the scraper sent.
+    `commands` (the decoded JSON bodies) so tests can inspect what the scraper sent. `solution`
+    holds extra solution fields sent with every page (`cookies`, `userAgent`).
     """
 
     def __init__(self, pages: dict[str, str]) -> None:
         self.pages = pages
+        self.solution: dict[str, Any] = {}
         self.commands: list[dict[str, Any]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
@@ -99,7 +101,7 @@ class FakeFlareSolverr:
                 url = command["url"]
                 if url not in self.pages:
                     return 500, {"status": "error", "message": f"Error solving {url}"}
-                solution = {"url": url, "status": 200, "response": self.pages[url]}
+                solution = {"url": url, "status": 200, "response": self.pages[url], **self.solution}
                 return 200, {"status": "ok", "message": "", "solution": solution}
             case other:
                 return 400, {"status": "error", "message": f"Unknown command {other}"}

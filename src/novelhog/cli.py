@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from novelhog import log, net
 from novelhog.api import serve
 from novelhog.api.app import create_app
+from novelhog.clearance import ClearanceCache
 from novelhog.config import Settings, load
 from novelhog.image_fetcher import ImageFetcher
 from novelhog.notifications.channels import RegistryHolder
@@ -112,6 +113,7 @@ def _worker(settings: Settings) -> int:
             max_bytes=settings.max_image_bytes,
             max_pixels=settings.max_image_pixels,
             max_dimension=settings.image_max_dimension,
+            clearances=ClearanceCache(settings.flaresolverr_url),  # this worker's only
         ),
         LocalStaticStorage(settings.static_dir, settings.static_base_url),
         RegistryHolder(settings, repo, session).get,
