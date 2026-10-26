@@ -12,6 +12,7 @@ from novelhog.domain.errors import NotFound, ValidationFailed
 from novelhog.domain.tasks import PRIORITY_USER, TaskState
 from novelhog.repo import Repo, db
 from novelhog.repo import chapters as chapters_repo
+from novelhog.repo import contents as contents_repo
 from novelhog.repo import events as event_log
 from novelhog.repo.chapters import error_of
 from novelhog.repo.schema import chapter_contents, chapters, events, exports
@@ -179,6 +180,97 @@ class TestGet:
     def test_get__malformed_id_raises_not_found(self, repo: Repo) -> None:
         with pytest.raises(NotFound):
             repo.chapters.get("nope")
+
+
+def store_content(repo: Repo, position: int, markdown: str, clock: FakeClock) -> None:
+    with db.write(repo.engine) as conn:
+        contents_repo.put(conn, chapter_id(position), markdown, clock.current)
+
+
+class TestText:
+    def test_text__returns_the_chapter_markdown_and_fetched_at(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "downloaded", "title": "One"}])
+        store_content(repo, 1, "# One\n\nText.", clock)
+        text = repo.chapters.text(novel_id, chapter_id(1))
+        assert (text.chapter.id, text.chapter.title) == (chapter_id(1), "One")
+        assert text.chapter.state is ChapterState.DOWNLOADED
+        assert (text.markdown, text.fetched_at) == ("# One\n\nText.", clock.current)
+
+    def test_text__gives_the_neighbours_in_any_state(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{}, {"state": "downloaded"}, {"state": "error"}])
+        store_content(repo, 2, "two", clock)
+        text = repo.chapters.text(novel_id, chapter_id(2))
+        assert (text.previous_id, text.next_id) == (chapter_id(1), chapter_id(3))
+
+    def test_text__first_and_last_chapters_have_no_neighbour_beyond(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "downloaded"}, {"state": "downloaded"}])
+        store_content(repo, 1, "one", clock)
+        store_content(repo, 2, "two", clock)
+        assert repo.chapters.text(novel_id, chapter_id(1)).previous_id is None
+        assert repo.chapters.text(novel_id, chapter_id(2)).next_id is None
+
+    def test_text__skips_removed_neighbours(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{}, {}, {"state": "downloaded"}])
+        set_state(repo, 2, position=None, removed_at=clock.current)
+        store_content(repo, 3, "three", clock)
+        assert repo.chapters.text(novel_id, chapter_id(3)).previous_id == chapter_id(1)
+
+    def test_text__chapter_downloading_again_keeps_its_content(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "pending"}])
+        store_content(repo, 1, "old", clock)
+        assert repo.chapters.text(novel_id, chapter_id(1)).markdown == "old"
+
+
+class TestText__NotFound:
+    def test_text__chapter_without_content_raises_not_found(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        add_chapters(repo, novel_id, [{}])
+        with pytest.raises(NotFound) as raised:
+            repo.chapters.text(novel_id, chapter_id(1))
+        assert raised.value.entity == "chapter_content"
+
+    def test_text__chapter_of_another_novel_raises_not_found(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "downloaded"}])
+        store_content(repo, 1, "one", clock)
+        other = repo.novels.create("https://example.com/other", followed=False).id
+        with pytest.raises(NotFound) as raised:
+            repo.chapters.text(other, chapter_id(1))
+        assert raised.value.entity == "chapter"
+
+    def test_text__removed_chapter_raises_not_found(
+        self, repo: Repo, novel_id: str, clock: FakeClock
+    ) -> None:
+        add_chapters(repo, novel_id, [{"state": "downloaded"}])
+        store_content(repo, 1, "one", clock)
+        set_state(repo, 1, position=None, removed_at=clock.current)
+        with pytest.raises(NotFound) as raised:
+            repo.chapters.text(novel_id, chapter_id(1))
+        assert raised.value.entity == "chapter"
+
+    def test_text__unknown_novel_raises_not_found(self, repo: Repo) -> None:
+        with pytest.raises(NotFound) as raised:
+            repo.chapters.text("NV000000000099", chapter_id(1))
+        assert raised.value.entity == "novel"
+
+    @pytest.mark.parametrize(("novel", "chapter"), [("nope", "CH000000000001"), (None, "nope")])
+    def test_text__malformed_ids_raise_not_found(
+        self, repo: Repo, novel_id: str, novel: str | None, chapter: str
+    ) -> None:
+        with pytest.raises(NotFound):
+            repo.chapters.text(novel or novel_id, chapter)
 
 
 class TestPatch__ToPending:
