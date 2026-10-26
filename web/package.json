@@ -45,6 +45,7 @@
     "gen:api": "uv run --project .. python -m novelhog.api.export_openapi | openapi-typescript -o src/api/schema.d.ts",
     "check:api": "scripts/check-api.sh",
     "check": "npm run lint && npm run typecheck && npm run check:api && npm run test",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "screenshots": "playwright test -c playwright.screenshots.config.ts"
   }
 }

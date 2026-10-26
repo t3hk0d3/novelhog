@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-FILES = ["-f", "compose.yaml", "-f", "compose.test.yaml"]
+FILES = ["-f", "compose.dev.yaml", "-f", "compose.test.yaml"]
 CMD_TIMEOUT_S = 300  # the first build downloads base images
 UP_TIMEOUT_S = 120.0
 HTTP_TIMEOUT_S = 10.0

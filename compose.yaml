@@ -1,12 +1,10 @@
-# novelhog: one Dockerfile, three roles, plus a FlareSolverr paired 1:1 with the worker (spec section 2).
+# novelhog: one image, three roles, plus a FlareSolverr paired 1:1 with the worker.
+# Download this file and run `docker compose up -d`. Pin a release with NOVELHOG_VERSION=1.2.3.
 # Scale by adding worker/FlareSolverr pairs in an override file, never with `--scale`.
+# Developing novelhog itself? See compose.dev.yaml, which builds the image from source.
 
-# No shared `image:` tag: each service gets its own image (`<project>-<service>`), so a watch rebuild
-# of one service never changes another's image, which made Compose recreate and leave it stopped.
 x-novelhog: &novelhog
-  build:
-    context: .
-    dockerfile: docker/Dockerfile
+  image: ghcr.io/t3hk0d3/novelhog:${NOVELHOG_VERSION:-latest}
   environment: &novelhog-env
     NOVELHOG_DATABASE_URL: ${NOVELHOG_DATABASE_URL:-sqlite:////data/db/app.db}
     NOVELHOG_PUBLIC_URL: ${NOVELHOG_PUBLIC_URL:-}
@@ -34,27 +32,6 @@ services:
     volumes:
       - novelhog-db:/data/db
       - novelhog-static:/data/static:ro
-    # `docker compose up --watch`: the SPA, Caddy and the API live here, so this rebuilds only for them.
-    develop:
-      watch:
-        - path: web
-          action: rebuild
-          ignore: [node_modules/, dist/, test-results/, playwright-report/, e2e/]
-        - path: docker/Caddyfile
-          action: rebuild
-        - &watch-python
-          path: src
-          action: rebuild
-          ignore: [__pycache__/]
-        - &watch-lock
-          path: uv.lock
-          action: rebuild
-        - &watch-pyproject
-          path: pyproject.toml
-          action: rebuild
-        - &watch-dockerfile
-          path: docker/Dockerfile
-          action: rebuild
 
   novelhog-worker:
     <<: *novelhog
@@ -73,9 +50,6 @@ services:
     networks:
       - default
       - worker-pair
-    # Python changes only; a web or Caddyfile change leaves the worker (and its downloads) running.
-    develop:
-      watch: [*watch-python, *watch-lock, *watch-pyproject, *watch-dockerfile]
 
   # No depends_on from the worker: while this is down the worker reports an infrastructure error.
   flaresolverr:

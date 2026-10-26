@@ -2,7 +2,7 @@
 
 novelhog has a reading page for downloaded chapters, built for a phone first and fine on a desktop. This page
 describes every feature of it. (The design reasoning is in section 10 of
-[the design spec](superpowers/specs/2026-10-18-novelhog-design.md).)
+[the design spec](https://github.com/t3hk0d3/novelhog/blob/main/docs/superpowers/specs/2026-10-18-novelhog-design.md).)
 
 ## Opening a chapter
 
@@ -79,11 +79,11 @@ Mouse drags and trackpad swipes do not turn chapters; the gestures are for touch
 The settings open in a dialog (a bottom sheet on a phone). Every choice applies at once and is remembered in this
 browser.
 
-![The reading settings on a desktop-width window: text size and line width above, themes and fonts side by side below](images/reader-settings.png)
+![The reading settings on a desktop-width window: text size and line width above, themes and fonts side by side below](assets/screenshots/reader-settings-desktop.png)
 
 On a phone the same settings open as a bottom sheet, stacked, without the line width:
 
-![The reading settings as a bottom sheet on a phone](images/reader-settings-phone.png)
+![The reading settings as a bottom sheet on a phone](assets/screenshots/reader-settings-mobile.png)
 
 | Setting | Choices |
 |---|---|
@@ -94,6 +94,10 @@ On a phone the same settings open as a bottom sheet, stacked, without the line w
 
 A theme recolours the **whole page** while you read: the page, the header, the bars and the buttons, not only the
 text. It goes back to normal when you leave the reader.
+
+| Sepia with *Old style* | Night with *Serif* |
+|---|---|
+| ![Sepia theme with the Old style font on a phone](assets/screenshots/reader-sepia-mobile.png) | ![Night theme with the Serif font on a phone](assets/screenshots/reader-night-mobile.png) |
 
 ### Your own themes
 
@@ -129,7 +133,7 @@ The reader remembers how far you got in each chapter and reopens it there.
 For a chapter without text the reader shows a status card: a large icon of its state, *This chapter isn't
 downloaded yet.*, its status as a pill, and what happens next.
 
-![The status card of a chapter that has not been downloaded: an icon, "Not requested", and a Download button](images/reader-download.png)
+![The status card of a chapter that has not been downloaded: an icon, "Not requested", and a Download button](assets/screenshots/reader-not-downloaded-mobile.png)
 
 | Status | What the card says | Button |
 |---|---|---|

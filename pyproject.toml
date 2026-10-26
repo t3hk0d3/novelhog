@@ -35,6 +35,9 @@ dev = [
     "asgi-lifespan",
     "types-requests",
 ]
+docs = [
+    "mkdocs-material>=9.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
