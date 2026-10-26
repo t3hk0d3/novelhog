@@ -71,7 +71,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
   const chapters = useChapters(novel.id);
   // What was new before this visit marked the novel seen; frozen for the visit.
   const [newBeforeVisit] = useState(novel.new_pages);
-  const view = useChapterView(chapters.data, newBeforeVisit);
+  const view = useChapterView(chapters.data, newBeforeVisit, novel.id);
   const seenSent = useRef(false);
   // The chapter whose details are open lives in the URL (`?chapter=<id>`): rows link to it, a
   // deep link or new tab opens it, and the back gesture closes it.

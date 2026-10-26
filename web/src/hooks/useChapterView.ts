@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { Chapter, ChapterState } from '../api/client';
+import { rememberRange, rememberedRange } from '../lib/rangeMemory';
 
 export const RANGE_SIZE = 50;
 
@@ -77,15 +78,27 @@ function matchesQuery(chapter: Chapter, query: string): boolean {
  * before the page marked it seen. When the list first loads it fixes a release-time cutoff from
  * it (the stand-in for the old `seen_at`); chapters released later, live, are new too.
  * `chapters` is undefined until the list has loaded.
+ *
+ * The range shown is the first one until another is chosen. With a `novelId` the choice is
+ * remembered per novel, so the next visit starts on the range that was open last.
  */
-export function useChapterView(loaded: Chapter[] | undefined, newCount: number) {
+export function useChapterView(loaded: Chapter[] | undefined, newCount: number, novelId?: string) {
   const chapters = useMemo(() => loaded ?? [], [loaded]);
   const [cutoff, setCutoff] = useState<string | null | undefined>(undefined);
   if (cutoff === undefined && loaded) setCutoff(newCutoff(loaded, newCount));
   const [query, setQuery] = useState('');
   const [states, setStates] = useState<ReadonlySet<ChapterState>>(new Set());
   const [newOnly, setNewOnly] = useState(false);
-  const [chosenRange, setRange] = useState<number | null>(null);
+  const [chosenRange, setChosenRange] = useState<number | null>(() =>
+    novelId === undefined ? null : rememberedRange(novelId),
+  );
+  const setRange = useCallback(
+    (index: number) => {
+      setChosenRange(index);
+      if (novelId !== undefined) rememberRange(novelId, index);
+    },
+    [novelId],
+  );
 
   const ranges = useMemo(() => buildRanges(chapters), [chapters]);
   const stateCounts = useMemo(() => {
@@ -117,11 +130,11 @@ export function useChapterView(loaded: Chapter[] | undefined, newCount: number) 
     [chapters, filterActive, trimmed, states, newOnly, isNew],
   );
 
-  const lastRange = ranges[ranges.length - 1];
+  const firstRange = ranges[0];
   const range =
     chosenRange !== null && ranges.some((r) => r.index === chosenRange)
       ? chosenRange
-      : (lastRange?.index ?? null);
+      : (firstRange?.index ?? null);
   const rangeChapters = useMemo(
     () => (range === null ? [] : chapters.filter((c) => rangeIndexOf(c.position) === range)),
     [chapters, range],

@@ -1591,8 +1591,11 @@ manifest makes the app installable.
      count) plus "New". While search or a filter is active, results from all
      ranges are shown, grouped under range headings.
    - **Range chips** (both layouts): ranges of 50 chapters ("1–50" … "601–630"),
-     each with a mini bar of downloaded / pending / error. Default: the range
-     holding the highest position. Hidden while search or a filter is active. On
+     each with a mini bar of downloaded / pending / error. Default: the first
+     range; the range chosen last is remembered per novel in `localStorage`
+     (`novelhog.novel-ranges`, the 200 most recently used novels) and reopened
+     on the next visit, falling back to the first range if it no longer exists.
+     Hidden while search or a filter is active. On
      desktop they wrap onto several rows; on phones (< 720 px) they scroll
      sideways.
    - **Chapter table** of the chosen range (both layouts). Error messages are
