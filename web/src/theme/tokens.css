@@ -1,0 +1,48 @@
+/* Design tokens for both themes (spec section 10), one light-dark() pair per token.
+   System follows the OS unless data-theme="light" | "dark" is set on <html>. */
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root {
+  --page: light-dark(#f6f7f9, #0f141a);
+  --surface: light-dark(#ffffff, #161d26);
+  --ink: light-dark(#18202a, #e3e8ef);
+  --ink-muted: light-dark(#556070, #9aa7b8);
+  --line: light-dark(#dde2e9, #26303c);
+  --accent: light-dark(#1f5fae, #7fb0f0);
+  --accent-ink: light-dark(#ffffff, #0f141a);
+  --gold: light-dark(#b7791f, #e7b04a);
+  --gold-ink: light-dark(#6b4505, #e7b04a);
+  --danger: light-dark(#b42323, #ff8a85);
+
+  --status-not-requested-tab: light-dark(#e8ebef, #232c37);
+  --status-not-requested-icon: light-dark(#6b7685, #98a4b3);
+  --status-pending-tab: light-dark(#dce9f8, #1c2f47);
+  --status-pending-icon: light-dark(#1f5fae, #7fb0f0);
+  --status-downloading-tab: light-dark(#f2b13c, #d99a2b);
+  --status-downloading-icon: light-dark(#3a2600, #1f1400);
+  --status-downloaded-tab: light-dark(#dce9f8, #1c2f47);
+  --status-downloaded-icon: light-dark(#1f5fae, #7fb0f0);
+  --status-error-tab: light-dark(#c62f2f, #d9534f);
+  --status-error-icon: #ffffff;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-gold: var(--gold);
+  --color-gold-ink: var(--gold-ink);
+  --color-danger: var(--danger);
+}

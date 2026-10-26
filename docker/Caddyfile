@@ -1,0 +1,79 @@
+{
+	admin off
+	auto_https off
+}
+
+:{$NOVELHOG_HTTP_PORT:8080} {
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+
+	# SSE: no compression, no buffering. Must stay ahead of the general /api/* handler.
+	handle /api/v1/events {
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Unknown /api paths reach the API and get its JSON 404, never index.html.
+	handle /api/* {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Files written by the worker under /data/static; a missing file is a plain 404. The root is
+	# /data/static itself (the prefix is stripped), so no path can reach /data/db.
+	handle_path /static/* {
+		root * /data/static
+		@covers {
+			path /covers/*
+			file
+		}
+		header @covers Cache-Control "public, max-age=31536000, immutable"
+		@exports {
+			path /exports/*
+			file
+		}
+		header @exports Content-Disposition attachment
+		# Suffix match: export keys are nested (exports/<novel>/<export>/<name>.epub).
+		@epub path *.epub
+		header @epub Content-Type application/epub+zip
+		file_server
+	}
+
+	handle /sw.js {
+		root * /srv/web
+		header Cache-Control no-cache
+		file_server
+	}
+
+	handle /manifest.webmanifest {
+		root * /srv/web
+		header Content-Type application/manifest+json
+		file_server
+	}
+
+	handle /icons/* {
+		root * /srv/web
+		file_server
+	}
+
+	# Vite output is content-hashed; a missing asset is a 404, not the SPA.
+	handle /assets/* {
+		root * /srv/web
+		@present file
+		header @present Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	handle {
+		root * /srv/web
+		encode zstd gzip
+		header Cache-Control no-cache
+		try_files {path} /index.html
+		file_server
+	}
+}

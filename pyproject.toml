@@ -1,0 +1,123 @@
+[project]
+name = "novelhog"
+version = "0.1.0"
+description = "Self-hosted web UI and worker around web-novel-scraper"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy>=2,<3",
+    "alembic",
+    "psycopg[binary]",
+    "web-novel-scraper==2.13.1",
+    "pillow",
+    "markdown-it-py",
+    "ebooklib",
+    "pywebpush",
+    "py-vapid",
+    "structlog",
+    "requests",
+    "urllib3>=2.6,<3",
+    "cryptography>=50.0.2",
+]
+
+[project.scripts]
+novelhog = "novelhog.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "mypy",
+    "ruff",
+    "import-linter",
+    "asgi-lifespan",
+    "types-requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/novelhog"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "BLE", "TRY"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "N801", "S314"]
+
+[tool.mypy]
+strict = true
+mypy_path = "src:."
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["web_novel_scraper.*", "ebooklib.*", "pywebpush.*", "py_vapid.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["container: builds and runs the Docker image (needs NOVELHOG_CONTAINER_TESTS=1)"]
+filterwarnings = [
+    # fastapi.testclient still builds on httpx; httpx2 is not packaged for it yet.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[tool.importlinter]
+root_package = "novelhog"
+include_external_packages = true
+contract_types = ["allowed_imports: tools.importlinter_contracts.AllowedImportsContract"]
+
+[[tool.importlinter.contracts]]
+name = "api-is-pure"
+type = "forbidden"
+source_modules = ["novelhog.api"]
+forbidden_modules = [
+    "novelhog.scraper_adapter",
+    "novelhog.exporter",
+    "novelhog.images",
+    "novelhog.image_fetcher",
+    "novelhog.html_to_markdown",
+    "novelhog.notifications.channels",
+    "novelhog.notifications.dispatcher",
+    "novelhog.net",
+    "novelhog.worker",
+    "PIL",
+    "pywebpush",
+    "web_novel_scraper",
+]
+
+[[tool.importlinter.contracts]]
+name = "repo-is-standalone"
+type = "allowed_imports"
+source_module = "novelhog.repo"
+allowed_modules = ["sqlalchemy", "alembic", "novelhog.ids", "novelhog.domain"]
+allow_stdlib = true
+
+[[tool.importlinter.contracts]]
+name = "domain-is-pure"
+type = "allowed_imports"
+source_module = "novelhog.domain"
+allowed_modules = ["novelhog.ids"]
+allow_stdlib = true
+
+[[tool.importlinter.contracts]]
+name = "scraper-is-isolated"
+type = "forbidden"
+source_modules = ["novelhog"]
+forbidden_modules = ["web_novel_scraper"]
+allow_indirect_imports = true
+unmatched_ignore_imports_alerting = "none"
+ignore_imports = [
+    "novelhog.scraper_adapter -> web_novel_scraper",
+    "novelhog.scraper_adapter.** -> web_novel_scraper",
+]
