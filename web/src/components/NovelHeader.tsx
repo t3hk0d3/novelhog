@@ -90,15 +90,7 @@ function Title({ novel, name }: { novel: Novel; name: string }) {
   );
 }
 
-function MoreMenu({
-  onExport,
-  exportDisabled,
-  onDelete,
-}: {
-  onExport: (() => void) | undefined;
-  exportDisabled: boolean;
-  onDelete: () => void;
-}) {
+function MoreMenu({ onDelete }: { onDelete: () => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div
@@ -119,19 +111,6 @@ function MoreMenu({
       </button>
       {open && (
         <div className="absolute right-0 z-10 mt-1 min-w-40 rounded-lg border border-line bg-surface p-1 shadow-lg">
-          {onExport && (
-            <button
-              type="button"
-              disabled={exportDisabled}
-              onClick={() => {
-                setOpen(false);
-                onExport();
-              }}
-              className="block w-full rounded px-3 py-1.5 text-left text-sm disabled:opacity-40"
-            >
-              Export EPUB…
-            </button>
-          )}
           <button
             type="button"
             onClick={() => {
@@ -148,7 +127,7 @@ function MoreMenu({
   );
 }
 
-/** Cover, editable title, host, TOC link, follow, Sync, schedule, counters, More (screen 3). */
+/** Cover, editable title, host, TOC link, follow, Sync, Export, schedule, counters, More (screen 3). */
 export function NovelHeader({
   novel,
   onExport,
@@ -222,9 +201,17 @@ export function NovelHeader({
           >
             {novel.syncing ? 'Syncing…' : 'Sync'}
           </button>
+          {onExport && (
+            <button
+              type="button"
+              disabled={novel.total_pages === 0}
+              onClick={onExport}
+              className="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold disabled:opacity-60"
+            >
+              Export…
+            </button>
+          )}
           <MoreMenu
-            onExport={onExport}
-            exportDisabled={novel.total_pages === 0}
             onDelete={() => {
               setDeleting(true);
             }}

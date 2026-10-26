@@ -4,6 +4,7 @@ import { isDeletedNovel } from '../api/events';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { errorMessage } from '../lib/errors';
 import { dateTime } from '../lib/time';
+import { ChevronRightIcon } from './icons';
 import { useToast } from './Toast';
 
 function size(bytes: number): string {
@@ -190,12 +191,38 @@ function ExportRow({ item }: { item: Export }) {
   );
 }
 
+/** By first chapter, so lower ranges come first; same start keeps the newest-first API order. */
+function byChapters(items: Export[]): Export[] {
+  const start = (item: Export) => item.chapter_from ?? Infinity;
+  return [...items].sort((a, b) => start(a) - start(b));
+}
+
+function summary(items: Export[]): { inProgress: number; ready: number; failed: number } {
+  const count = (...states: Export['state'][]) =>
+    items.filter((item) => states.includes(item.state)).length;
+  return {
+    inProgress: count('waiting', 'building'),
+    ready: count('ready'),
+    failed: count('failed'),
+  };
+}
+
 /**
- * The novel's exports, newest first (spec section 10). The cache is kept current by the export
- * events, so actions only call the API. The section is the `#exports` anchor that notification
- * links point to, so it renders even while empty.
+ * The novel's exports, lowest chapters first, under a fold whose summary line keeps their state visible
+ * (spec section 10). The owner controls `open`: it opens after an export is created and when the
+ * page is reached through `#exports`. The cache is kept current by the export events, so actions
+ * only call the API. The section is the `#exports` anchor that notification links point to, so
+ * it renders even while empty.
  */
-export function ExportsPanel({ novelId }: { novelId: string }) {
+export function ExportsPanel({
+  novelId,
+  open,
+  onToggle,
+}: {
+  novelId: string;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+}) {
   const live = useLiveReady();
   // Subscribes to the novel entry without fetching it: a deleted marker stops the export query.
   const novel = useQuery({
@@ -209,6 +236,7 @@ export function ExportsPanel({ novelId }: { novelId: string }) {
     enabled: live && !isDeletedNovel(novel.data),
   });
   const items = exports.data ?? [];
+  const { inProgress, ready, failed } = summary(items);
 
   return (
     <section id="exports" aria-label="Exports" className="scroll-mt-4">
@@ -218,14 +246,38 @@ export function ExportsPanel({ novelId }: { novelId: string }) {
         </p>
       )}
       {items.length > 0 && (
-        <>
-          <h2 className="mb-2 text-lg font-bold">Exports</h2>
-          <ul className="flex flex-col gap-2">
-            {items.map((item) => (
+        <details
+          open={open}
+          className="group"
+          onToggle={(event) => {
+            onToggle(event.currentTarget.open);
+          }}
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center gap-x-2 text-lg font-bold">
+            <span className="text-ink-muted transition-transform motion-reduce:transition-none group-open:rotate-90">
+              <ChevronRightIcon />
+            </span>
+            <h2 className="inline">Exports</h2>
+            <span className="text-sm font-semibold text-ink-muted">
+              {[
+                inProgress > 0 ? `${String(inProgress)} in progress` : null,
+                ready > 0 ? `${String(ready)} ready` : null,
+              ]
+                .filter((part) => part !== null)
+                .map((part) => `· ${part}`)
+                .join(' ')}
+            </span>
+            {failed > 0 && (
+              <span className="text-sm font-semibold text-danger">{`· ${String(failed)} failed`}</span>
+            )}
+            <span className="ml-auto text-sm text-ink-muted group-open:hidden">Click to open</span>
+          </summary>
+          <ul className="mt-2 flex flex-col gap-2">
+            {byChapters(items).map((item) => (
               <ExportRow key={item.id} item={item} />
             ))}
           </ul>
-        </>
+        </details>
       )}
     </section>
   );

@@ -33,14 +33,17 @@ const makeExport = (overrides: Partial<Export> = {}): Export => ({
   ...overrides,
 });
 
-function mount(exports: Export[], response?: Response) {
+function mount(exports: Export[], response?: Response, open = true) {
   const fetchMock = vi.fn(() => Promise.resolve(response ?? new Response(null, { status: 204 })));
   vi.stubGlobal('fetch', fetchMock);
+  const onToggle = vi.fn();
   const client: QueryClient = testClient();
   client.setQueryData(['exports', NOVEL], exports);
   // Not a live-ready test client: the panel must render cached data regardless of the gate.
-  renderWithProviders(<ExportsPanel novelId={NOVEL} />, { client });
-  return { fetchMock, client };
+  renderWithProviders(<ExportsPanel novelId={NOVEL} open={open} onToggle={onToggle} />, {
+    client,
+  });
+  return { fetchMock, client, onToggle };
 }
 
 const call = (fetchMock: ReturnType<typeof vi.fn>, index = 0) => {
@@ -59,16 +62,78 @@ describe('ExportsPanel', () => {
       expect(document.getElementById('exports')).not.toBeNull();
     });
 
-    it('shows one row per export in the given (newest first) order with filename and range', () => {
-      mount([
-        makeExport({ id: 'EX2', filename: 'b.epub', chapter_from: 5, chapter_to: 9 }),
-        makeExport({ id: 'EX1', filename: 'a.epub' }),
-      ]);
+    it('shows one row per export with filename and range', () => {
+      mount([makeExport({ id: 'EX2', filename: 'b.epub', chapter_from: 5, chapter_to: 9 })]);
       const rows = screen.getAllByRole('listitem');
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(1);
       expect(within(rows[0] as HTMLElement).getByText('b.epub')).toBeInTheDocument();
       expect(within(rows[0] as HTMLElement).getByText('Chapters 5–9')).toBeInTheDocument();
-      expect(within(rows[1] as HTMLElement).getByText('a.epub')).toBeInTheDocument();
+    });
+
+    it('lists lower chapters first, newest first on the same start, a gone range last', () => {
+      mount([
+        makeExport({ id: 'EX4', filename: 'gone.epub', chapter_from: null, chapter_to: null }),
+        makeExport({ id: 'EX3', filename: 'c.epub', chapter_from: 201, chapter_to: 230 }),
+        makeExport({ id: 'EX2', filename: 'a-new.epub', chapter_from: 1, chapter_to: 100 }),
+        makeExport({ id: 'EX1', filename: 'b.epub', chapter_from: 101, chapter_to: 200 }),
+        makeExport({ id: 'EX0', filename: 'a-old.epub', chapter_from: 1, chapter_to: 100 }),
+      ]);
+      const names = screen
+        .getAllByRole('listitem')
+        .map((row) => within(row).getByText(/\.epub$/).textContent);
+      expect(names).toEqual(['a-new.epub', 'a-old.epub', 'b.epub', 'c.epub', 'gone.epub']);
+    });
+  });
+
+  describe('fold', () => {
+    const exportsIn = (state: Export['state'], id: string) => makeExport({ id, state });
+
+    it('summarises the states in the header, failures separately', () => {
+      mount(
+        [
+          exportsIn('waiting', 'EX1'),
+          exportsIn('building', 'EX2'),
+          exportsIn('ready', 'EX3'),
+          exportsIn('failed', 'EX4'),
+        ],
+        undefined,
+        false,
+      );
+      expect(screen.getByText('· 2 in progress · 1 ready')).toBeInTheDocument();
+      expect(screen.getByText('· 1 failed')).toBeInTheDocument();
+    });
+
+    it('is closed or open as the owner says', () => {
+      const { client } = mount([makeExport()], undefined, false);
+      expect(document.querySelector('details')).not.toHaveAttribute('open');
+      client.clear();
+    });
+
+    it('shows a chevron in the header so the fold is visible', () => {
+      mount([makeExport()], undefined, false);
+      expect(
+        screen
+          .getByText('Exports')
+          .closest('summary')
+          ?.querySelector('[data-icon="chevron-right"]'),
+      ).not.toBeNull();
+    });
+
+    it('hints "Click to open" in the header, hidden by CSS once open', () => {
+      mount([makeExport()], undefined, false);
+      expect(screen.getByText('Click to open').closest('summary')).not.toBeNull();
+    });
+
+    it('reports a click on the header to the owner', async () => {
+      const { onToggle } = mount([makeExport()], undefined, false);
+      await userEvent.click(screen.getByText('Exports'));
+      expect(onToggle).toHaveBeenCalledWith(true);
+    });
+
+    it('renders nothing but the anchor when there are no exports', () => {
+      mount([], undefined, false);
+      expect(document.querySelector('details')).toBeNull();
+      expect(document.getElementById('exports')).not.toBeNull();
     });
   });
 

@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChapterState } from '../api/client';
@@ -53,8 +53,8 @@ function mount(
   return { fetchMock, onClose, onSubmitted };
 }
 
-const body = (fetchMock: ReturnType<typeof vi.fn>) =>
-  JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as unknown;
+const body = (fetchMock: ReturnType<typeof vi.fn>, call = 0) =>
+  JSON.parse((fetchMock.mock.calls[call] as [string, RequestInit])[1].body as string) as unknown;
 
 /** Chapters from..to in `state`. */
 const run = (from: number, to: number, state: ChapterState) =>
@@ -175,6 +175,76 @@ describe('ExportDialog', () => {
     it('is disabled when nothing in the range is downloaded', () => {
       mount(10, run(1, 10, 'not_requested'));
       expect(screen.getByLabelText('Skip missing chapters')).toBeDisabled();
+    });
+  });
+
+  describe('Maximum chapters per book', () => {
+    it('defaults to 100 and shows one file for a shorter range', () => {
+      mount(100, {});
+      expect(screen.getByLabelText('Maximum chapters per book')).toHaveValue(100);
+      expect(screen.queryByRole('table')).toBeNull();
+    });
+
+    it('lists the resulting files in a table when the range needs several', () => {
+      mount(230, {});
+      const rows = within(screen.getByRole('table')).getAllByRole('row').slice(1);
+      expect(rows.map((r) => r.textContent)).toEqual([
+        'Ashen Lantern Chronicles Chapters 1-100.epub100',
+        'Ashen Lantern Chronicles Chapters 101-200.epub100',
+        'Ashen Lantern Chronicles Chapters 201-230.epub30',
+      ]);
+    });
+
+    it('re-splits when the maximum changes', async () => {
+      mount(30, {});
+      await userEvent.clear(screen.getByLabelText('Maximum chapters per book'));
+      await userEvent.type(screen.getByLabelText('Maximum chapters per book'), '10');
+      expect(within(screen.getByRole('table')).getAllByRole('row')).toHaveLength(4);
+    });
+
+    it('sends one export per file and toasts the count', async () => {
+      const { fetchMock, onSubmitted } = mount(30, {}, {});
+      await userEvent.clear(screen.getByLabelText('Maximum chapters per book'));
+      await userEvent.type(screen.getByLabelText('Maximum chapters per book'), '15');
+      await userEvent.click(screen.getByRole('button', { name: 'Export' }));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(body(fetchMock, 0)).toEqual({
+        chapters: { start: 1, end: 15 },
+        format: 'epub',
+        skip_missing: false,
+      });
+      expect(body(fetchMock, 1)).toEqual({
+        chapters: { start: 16, end: 30 },
+        format: 'epub',
+        skip_missing: false,
+      });
+      expect(await screen.findByText('2 exports queued')).toBeInTheDocument();
+      expect(onSubmitted).toHaveBeenCalledOnce();
+    });
+
+    it('leaves out files with nothing downloaded when skipping missing chapters', async () => {
+      const { fetchMock } = mount(30, run(16, 30, 'not_requested'));
+      await userEvent.clear(screen.getByLabelText('Maximum chapters per book'));
+      await userEvent.type(screen.getByLabelText('Maximum chapters per book'), '15');
+      await userEvent.click(screen.getByLabelText('Skip missing chapters'));
+      expect(screen.getByText(/nothing downloaded/)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Export now' }));
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(body(fetchMock)).toEqual({
+        chapters: { start: 1, end: 15 },
+        format: 'epub',
+        skip_missing: true,
+      });
+    });
+
+    it('rejects a maximum below 1', async () => {
+      mount(10, {});
+      await userEvent.clear(screen.getByLabelText('Maximum chapters per book'));
+      await userEvent.type(screen.getByLabelText('Maximum chapters per book'), '0');
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Maximum chapters per book must be at least 1.',
+      );
+      expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
     });
   });
 
