@@ -16,6 +16,7 @@ vi.mock('../hooks/usePush', () => ({
 }));
 
 beforeEach(() => {
+  document.title = 'novelhog';
   localStorage.clear();
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
@@ -83,6 +84,18 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
     const patches = fetchMock.mock.calls.filter((c) => c[1]?.method === 'PATCH');
     expect(patches).toHaveLength(1);
     expect(JSON.parse((patches[0]?.[1] as RequestInit).body as string)).toEqual({ seen: true });
+  });
+
+  it('puts the novel name in the browser tab title', async () => {
+    mount(makeNovel({ title: 'The Ninth Cartographer' }), makeChapters(3));
+    await screen.findByText('Page 3');
+    expect(document.title).toBe('The Ninth Cartographer · novelhog');
+  });
+
+  it('uses the host in the tab title while the novel has no title', async () => {
+    mount(makeNovel({ title: null, host: 'fanmtl.com' }), makeChapters(3));
+    await screen.findByText('Page 3');
+    expect(document.title).toBe('fanmtl.com · novelhog');
   });
 
   it('shows the first chapters by default, not the latest', async () => {

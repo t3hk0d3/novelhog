@@ -15,6 +15,7 @@ import { RangeChips } from '../components/RangeChips';
 import { SelectionBar } from '../components/SelectionBar';
 import { SelectToolbar } from '../components/SelectToolbar';
 import { useChapters } from '../hooks/useChapters';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useChapterView, type ChapterView } from '../hooks/useChapterView';
 import { useSelection, type Selection } from '../hooks/useSelection';
 import { useLiveReady } from '../hooks/useLiveEvents';
@@ -68,6 +69,7 @@ function emptyMessage(novel: NovelData): string {
 }
 
 function NovelPage({ novel }: { novel: NovelData }) {
+  useDocumentTitle(novel.title ?? novel.host);
   const chapters = useChapters(novel.id);
   // What was new before this visit marked the novel seen; frozen for the visit.
   const [newBeforeVisit] = useState(novel.new_pages);
