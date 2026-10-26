@@ -35,6 +35,30 @@ class TestFindTitle__Sources:
         assert find_title(html) == "Fallback"
 
 
+class TestFindTitle__TitleExtendingTheH1:
+    def test_find_title__drops_words_the_title_adds_after_the_h1(self) -> None:
+        html = page(
+            "<title>Star Forge Titan Novel Read Online</title>"
+            '<h1 class="novel-title">Star Forge Titan</h1>'
+        )
+        assert find_title(html) == "Star Forge Titan"
+
+    def test_find_title__keeps_the_title_when_the_h1_is_only_a_word_prefix(self) -> None:
+        html = page("<title>Starlight Road</title><h1>Star</h1>")
+        assert find_title(html) == "Starlight Road"
+
+    def test_find_title__keeps_the_title_when_it_does_not_start_with_the_h1(self) -> None:
+        html = page("<title>Glass Orchard</title><h1>Chapter List</h1>")
+        assert find_title(html) == "Glass Orchard"
+
+    def test_find_title__og_title_still_wins(self) -> None:
+        html = page(
+            '<meta property="og:title" content="Glass Orchard">'
+            "<title>Star Forge Titan Novel Read Online</title><h1>Star Forge Titan</h1>"
+        )
+        assert find_title(html) == "Glass Orchard"
+
+
 class TestFindTitle__Cleaning:
     def test_find_title__strips_xml_invalid_characters_and_whitespace(self) -> None:
         html = page('<meta property="og:title" content="  Glass\x0b Orchard\x00 ">')

@@ -5,6 +5,7 @@ import io
 import ssl
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -33,12 +34,17 @@ def make_animated(fmt: str) -> bytes:
     return out.getvalue()
 
 
+Route = tuple[int, dict[str, str], bytes]  # status, headers, body
+
+
 class Server:
-    """Local HTTP server whose routes map a path to (status, headers, body) or a callable."""
+    """Local HTTP server whose routes map a path to a `Route`, or to a callable that takes the
+    request's headers and returns one."""
 
     def __init__(self, tls: tuple[Path, Path] | None = None) -> None:
-        self.routes: dict[str, tuple[int, dict[str, str], bytes]] = {}
+        self.routes: dict[str, Route | Callable[[dict[str, str]], Route]] = {}
         self.hits: list[tuple[str, str | None]] = []
+        self.headers: list[dict[str, str]] = []  # every request's headers, in order
         self.drip: dict[str, float] = {}  # path -> seconds between body bytes
         self.sni: list[str | None] = []
         outer = self
@@ -48,7 +54,11 @@ class Server:
 
             def do_GET(self) -> None:
                 outer.hits.append((self.path, self.headers.get("Host")))
-                status, headers, body = outer.routes.get(self.path, (404, {}, b""))
+                outer.headers.append(dict(self.headers.items()))
+                route = outer.routes.get(self.path, (404, {}, b""))
+                if callable(route):
+                    route = route(outer.headers[-1])
+                status, headers, body = route
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)

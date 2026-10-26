@@ -108,13 +108,25 @@ def _clean(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _without_trailing_words(title: str | None, h1: str | None) -> str | None:
+    """The `<h1>` when `title` is the `<h1>` followed by more words ("X Novel Read Online")."""
+    if title is None or h1 is None or not title.startswith(h1) or title == h1:
+        return title
+    return h1 if title[len(h1)].isspace() else title
+
+
 def _find_title(toc_html: str) -> str | None:
-    """Detect the novel title: og:title, then `<title>` without its site suffix, then `<h1>`."""
+    """Detect the novel title: og:title, then `<title>` without its site suffix, then `<h1>`.
+
+    A `<title>` that is the `<h1>` followed by more words gives the `<h1>`.
+    """
     page = _parse(toc_html)
+    h1 = _clean(page.h1)
+    title = _clean(_SITE_SUFFIX.sub("", strip_xml_invalid(page.title).strip()))
     return (
         _clean(" ".join((page.meta.get("og:title") or "").split()))
-        or _clean(_SITE_SUFFIX.sub("", strip_xml_invalid(page.title).strip()))
-        or _clean(page.h1)
+        or _without_trailing_words(title, h1)
+        or h1
     )
 
 

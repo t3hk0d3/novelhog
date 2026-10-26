@@ -16,6 +16,7 @@ from novelhog import log, net
 from novelhog.api import serve
 from novelhog.api.app import create_app
 from novelhog.config import Settings, load
+from novelhog.flaresolverr import FlareSolverr
 from novelhog.image_fetcher import ImageFetcher
 from novelhog.notifications.channels import RegistryHolder
 from novelhog.repo import Repo, SchemaOutdated
@@ -104,14 +105,17 @@ def _api(settings: Settings, *, migrate: bool, port: int) -> int:
 def _worker(settings: Settings) -> int:
     repo = _repo(settings)
     session = net.GuardedSession(allow_private=settings.allow_private_fetch)
+    # One FlareSolverr session and clearance cache per worker, for pages and images alike.
+    flaresolverr = FlareSolverr(settings.flaresolverr_url, settings.worker_id)
     worker = Worker(
         repo,
-        ScraperAdapter(settings),
+        ScraperAdapter(settings, flaresolverr=flaresolverr),
         ImageFetcher(
             session,
             max_bytes=settings.max_image_bytes,
             max_pixels=settings.max_image_pixels,
             max_dimension=settings.image_max_dimension,
+            flaresolverr=flaresolverr,
         ),
         LocalStaticStorage(settings.static_dir, settings.static_base_url),
         RegistryHolder(settings, repo, session).get,
@@ -128,6 +132,7 @@ def _worker(settings: Settings) -> int:
     except SchemaOutdated as error:
         return _report_outdated(error)
     finally:
+        flaresolverr.close()
         repo.engine.dispose()
     return 0
 

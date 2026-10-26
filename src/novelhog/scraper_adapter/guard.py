@@ -1,13 +1,16 @@
 """Request hooks on the scraper's `RequestHelper` (spec sections 6.7 and 6.8).
 
-Two jobs share the one patched `get_url_content`: the TOC loop guard (a per-operation page
-budget) and the Cloudflare fallback (a direct request that meets a challenge is retried through
-FlareSolverr, and later requests for that host go through it too). The patched request methods
-add the outbound guard: a direct request goes through `net.GuardedSession` (every redirect hop is
-checked), and a URL's host is checked before the URL is handed to FlareSolverr.
+The patched `get_url_content` adds the TOC loop guard (a per-operation page budget). The patched
+request methods add the outbound guard and the Cloudflare handling:
+
+- a direct request goes through `net.GuardedSession` (every redirect hop is checked) and sends the
+  worker's cached Cloudflare clearance for the host, if any. When it meets a challenge anyway, the
+  page is loaded through the worker's `FlareSolverr` instead, which records a fresh clearance for
+  the next direct requests;
+- a host the scraper's config forces through FlareSolverr is loaded in the worker's FlareSolverr
+  session (never one of the scraper's own), after its host is checked.
 """
 
-import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,10 +21,14 @@ from urllib.parse import urlparse
 
 import requests
 
-from novelhog import log, net
+from novelhog import net
+from novelhog.clearance import Clearance
+from novelhog.flaresolverr import FlareSolverr, FlareSolverrFailed, FlareSolverrUnavailable
 from novelhog.scraper_adapter.errors import SiteError, TocLoopError
 from novelhog.scraper_adapter.scraper import (
     CommonGetRequestError,
+    FlaresolverrConnectionError,
+    FlaresolverrRequestError,
     RequestHelper,
     ResponseIsEmptyError,
     ScraperError,
@@ -47,7 +54,7 @@ class _Budget:
 
 
 class CloudflareChallengeError(ScraperError):  # type: ignore[misc]
-    """A direct request got a Cloudflare challenge page. Not retried directly (it would repeat)."""
+    """A Cloudflare challenge that FlareSolverr did not solve (or no FlareSolverr). Not retried."""
 
 
 class ThrottledResponseError(ScraperError):  # type: ignore[misc]
@@ -93,13 +100,7 @@ class _Outbound:
 _active: ContextVar[_Budget | None] = ContextVar("novelhog_page_budget", default=None)
 _GUARDED = _Outbound(allow_private=False, resolver=net.default_resolver)
 _outbound: ContextVar[_Outbound] = ContextVar("novelhog_outbound", default=_GUARDED)
-_flaresolverr_url: ContextVar[str | None] = ContextVar("novelhog_flaresolverr_url", default=None)
-_sticky_hosts: set[str] = set()  # hosts routed through FlareSolverr for the rest of the process
-_sticky_lock = threading.Lock()
-
-
-def _host_of(url: str) -> str:
-    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+_flaresolverr: ContextVar[FlareSolverr | None] = ContextVar("novelhog_flaresolverr", default=None)
 
 
 def _is_challenge(response: requests.Response) -> bool:
@@ -122,17 +123,16 @@ def _unresolvable(url: str, error: net.Unresolvable) -> CommonGetRequestError:
     return CommonGetRequestError(f'Request Failed for URL "{url}": {error}')
 
 
-def _guarded_common_request(self: RequestHelper, url: str) -> str:
-    """The direct request through the outbound guard; a challenge raises at once.
-
-    Mirrors the scraper's own direct request (any status but 200 or an empty body fails).
-    """
+def _direct(self: RequestHelper, url: str, clearance: Clearance | None) -> requests.Response:
+    """One direct request through the outbound guard, sending `clearance` when given."""
     outbound = _outbound.get()
+    headers = None if clearance is None else {"User-Agent": clearance.user_agent}
+    cookies = self.request_cookies if clearance is None else clearance.jar(self.request_cookies)
     with net.GuardedSession(
         allow_private=outbound.allow_private, resolver=outbound.resolver
     ) as session:
         try:
-            response = session.get(url, timeout=self.request_timeout, cookies=self.request_cookies)
+            return session.get(url, timeout=self.request_timeout, cookies=cookies, headers=headers)
         except net.NonPublic as error:
             raise _blocked(error.host) from error
         except net.Unresolvable as error:
@@ -142,10 +142,40 @@ def _guarded_common_request(self: RequestHelper, url: str) -> str:
         except requests.exceptions.RequestException as error:
             msg = f'Request Failed for URL "{url}": {error}'
             raise CommonGetRequestError(msg) from error
+
+
+def _load(self: RequestHelper, solver: FlareSolverr, url: str) -> str:
+    """The page as FlareSolverr loads it in the worker's session, in the scraper's errors."""
+    try:
+        return solver.get(url, self.request_cookies).html
+    except FlareSolverrUnavailable as error:
+        raise FlaresolverrConnectionError(str(error)) from error
+    except FlareSolverrFailed as error:
+        raise FlaresolverrRequestError(str(error)) from error
+
+
+def _guarded_common_request(self: RequestHelper, url: str) -> str:
+    """The direct request; a Cloudflare challenge is handed to FlareSolverr.
+
+    Mirrors the scraper's own direct request (any status but 200 or an empty body fails). A
+    challenge despite a cached clearance forgets it. FlareSolverr failing to load the page raises
+    `CloudflareChallengeError`; FlareSolverr being down raises its connection error.
+    """
+    solver = _flaresolverr.get()
+    clearance = None if solver is None else solver.clearances.for_url(url)
+    response = _direct(self, url, clearance)
     if response.status_code != 200:
         msg = f'Request Failed for URL "{url}", Status Code is {response.status_code}.'
         if _is_challenge(response):
-            raise CloudflareChallengeError(msg)
+            if solver is None:
+                raise CloudflareChallengeError(msg)
+            if clearance is not None:
+                solver.clearances.forget(clearance)
+            try:
+                return _load(self, solver, response.url)
+            except FlaresolverrRequestError as error:
+                unsolved = f"{msg} FlareSolverr: {error}"
+                raise CloudflareChallengeError(unsolved) from error
         if response.status_code in _THROTTLE_STATUSES:
             raise ThrottledResponseError(msg, _retry_after(response.headers.get("Retry-After")))
         if response.status_code >= 500:
@@ -159,7 +189,7 @@ def _guarded_common_request(self: RequestHelper, url: str) -> str:
 
 
 def _guarded_flaresolverr_request(self: RequestHelper, url: str) -> str:
-    """Check the URL's host before FlareSolverr fetches it, then send the request."""
+    """Check the URL's host, then load it in the worker's FlareSolverr session."""
     outbound = _outbound.get()
     if not outbound.allow_private:
         host = urlparse(url).hostname or ""
@@ -169,39 +199,22 @@ def _guarded_flaresolverr_request(self: RequestHelper, url: str) -> str:
             raise _blocked(error.host) from error
         except net.Unresolvable as error:
             raise _unresolvable(url, error) from error
-    content: str = RequestHelper.novelhog_original_flaresolverr_request(self, url)
+    solver = _flaresolverr.get()
+    if solver is None:
+        msg = "No FlareSolverr for a host forced through it"
+        raise FlaresolverrConnectionError(msg)
+    content = _load(self, solver, url)
+    if content == "":
+        msg = f'Request for URL "{url}" using Flaresolverr returned no content.'
+        raise ResponseIsEmptyError(msg)
     return content
-
-
-def _enable_sticky(host: str) -> None:
-    with _sticky_lock:
-        first = host not in _sticky_hosts
-        _sticky_hosts.add(host)
-    if first:
-        log.get().info("flaresolverr_fallback_enabled", host=host)
 
 
 def _guarded_get_url_content(self: RequestHelper, url: str) -> str:
     budget = _active.get()
     if budget is not None:
         budget.record(url)
-    flaresolverr = _flaresolverr_url.get()
-    host = _host_of(url)
-    if flaresolverr is not None and not self.use_flaresolverr and host in _sticky_hosts:
-        self.enable_flaresolverr(flaresolverr)
-    try:
-        result: str = RequestHelper.novelhog_original_get_url_content(self, url)
-    except CloudflareChallengeError:
-        if flaresolverr is None:
-            raise
-        # Retry once through FlareSolverr; the host is marked only if that works.
-        self.enable_flaresolverr(flaresolverr)
-        try:
-            result = RequestHelper.novelhog_original_get_url_content(self, url)
-        except Exception:
-            self.use_flaresolverr = False
-            raise
-        _enable_sticky(host)
+    result: str = RequestHelper.novelhog_original_get_url_content(self, url)
     return result
 
 
@@ -210,22 +223,7 @@ if not hasattr(RequestHelper, "novelhog_original_get_url_content"):
     RequestHelper.novelhog_original_get_url_content = RequestHelper.get_url_content
     RequestHelper.get_url_content = _guarded_get_url_content
     RequestHelper._get_url_common_request = _guarded_common_request
-    RequestHelper.novelhog_original_flaresolverr_request = (
-        RequestHelper._get_url_flaresolverr_request
-    )
     RequestHelper._get_url_flaresolverr_request = _guarded_flaresolverr_request
-
-
-def reset_fallback() -> None:
-    """Forget every host routed through FlareSolverr (tests start each case without any)."""
-    with _sticky_lock:
-        _sticky_hosts.clear()
-
-
-def fallback_hosts() -> frozenset[str]:
-    """The hosts currently routed through FlareSolverr."""
-    with _sticky_lock:
-        return frozenset(_sticky_hosts)
 
 
 @contextmanager
@@ -255,10 +253,10 @@ def outbound_guard(
 
 
 @contextmanager
-def flaresolverr_fallback(flaresolverr_url: str) -> Iterator[None]:
-    """Let direct requests in this block fall back to FlareSolverr at `flaresolverr_url`."""
-    token = _flaresolverr_url.set(flaresolverr_url)
+def flaresolverr_fallback(flaresolverr: FlareSolverr) -> Iterator[None]:
+    """Load challenged and forced pages in this block through `flaresolverr`."""
+    token = _flaresolverr.set(flaresolverr)
     try:
         yield
     finally:
-        _flaresolverr_url.reset(token)
+        _flaresolverr.reset(token)

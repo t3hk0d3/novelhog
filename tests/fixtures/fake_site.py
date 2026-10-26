@@ -12,7 +12,9 @@ class FakeSite:
     Every requested path is kept in `requests`. With `challenge` set, every request gets a
     Cloudflare challenge instead: `"header"` is a 403 with `cf-mitigated: challenge`, `"body"` a
     503 from `Server: cloudflare` with a "Just a moment..." page. `reply` (status, headers, body)
-    answers every request with exactly that, for responses that are not challenges.
+    answers every request with exactly that, for responses that are not challenges. A request
+    carrying the clearance in `cleared_by` (the `cf_clearance` value and the user agent) is served
+    despite `challenge`; every request's headers are kept in `headers`.
     """
 
     def __init__(
@@ -20,9 +22,12 @@ class FakeSite:
         pages: dict[str, str],
         challenge: str | None = None,
         reply: tuple[int, dict[str, str], str] | None = None,
+        cleared_by: tuple[str, str] | None = None,
     ) -> None:
         self.pages = pages
         self.challenge = challenge
+        self.cleared_by = cleared_by
+        self.headers: list[dict[str, str]] = []
         self.reply = reply
         self.requests: list[str] = []
         site = self
@@ -30,10 +35,13 @@ class FakeSite:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - http.server naming
                 site.requests.append(self.path)
+                site.headers.append(dict(self.headers.items()))
                 html = site.pages.get(self.path)
                 status = 200 if html is not None else 404
                 headers: dict[str, str] = {}
-                if site.challenge == "header":
+                if site.cleared_by is not None and self._cleared(*site.cleared_by):
+                    pass
+                elif site.challenge == "header":
                     status, html, headers = 403, "denied", {"cf-mitigated": "challenge"}
                 elif site.challenge == "body":
                     status, html = 503, "<html><title>Just a moment...</title></html>"
@@ -48,6 +56,13 @@ class FakeSite:
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
+
+            def _cleared(self, token: str, user_agent: str) -> bool:
+                cookies = self.headers.get("Cookie", "")
+                return (
+                    f"cf_clearance={token}" in cookies
+                    and self.headers.get("User-Agent") == user_agent
+                )
 
             def version_string(self) -> str:
                 return "cloudflare" if site.challenge == "body" else super().version_string()

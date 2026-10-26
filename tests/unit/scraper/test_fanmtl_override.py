@@ -1,6 +1,6 @@
 """The fanmtl.com next-page override (spec section 6.7)."""
 
-from novelhog.scraper_adapter.overrides import FORCE_FLARESOLVERR_HOSTS, fanmtl_com, register_all
+from novelhog.scraper_adapter.overrides import fanmtl_com, register_all
 from novelhog.scraper_adapter.scraper import ProcessorRegistry
 
 LINK = '<ul><li><a href="/e/extend/fy.php?page=1&amp;wjm=abc">{}</a></li></ul>'
@@ -33,8 +33,3 @@ class TestRegisterAll__OnRepeatedCalls:
         register_all()
         processor = ProcessorRegistry.get_processor("fanmtl.com", "next_page")
         assert isinstance(processor, fanmtl_com.FanmtlNextPageProcessor)
-
-
-class TestFanmtlOverride__ForcesFlaresolverr:
-    def test_force_flaresolverr_hosts__include_fanmtl(self) -> None:
-        assert fanmtl_com.HOST in FORCE_FLARESOLVERR_HOSTS

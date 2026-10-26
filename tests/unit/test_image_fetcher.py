@@ -5,15 +5,20 @@ import random
 import socket
 import threading
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
 from PIL import Image
+from structlog.testing import capture_logs
 
 from novelhog import images, net
-from novelhog.image_fetcher import ImageFetcher
-from tests.fixtures.images.helpers import Server, make_animated, make_image
+from novelhog.flaresolverr import FlareSolverr
+from novelhog.image_fetcher import USER_AGENT, ImageFetcher
+from tests.fixtures.fake_flaresolverr import FakeFlareSolverr
+from tests.fixtures.images.helpers import Route, Server, make_animated, make_image
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "images"
 
@@ -276,3 +281,134 @@ class TestImageFetcherFetch__TransportErrors:
         monkeypatch.setattr(net, "READ_TIMEOUT", 0.3)
         port = _serve_raw(head, body, linger)
         assert fetcher().fetch(f"http://127.0.0.1:{port}/") is None
+
+
+CHALLENGE = (403, {"cf-mitigated": "challenge", "Content-Type": "text/html"}, b"<html>")
+
+
+def cleared_fetcher(solver: FlareSolverr) -> ImageFetcher:
+    session = net.GuardedSession(allow_private=True, resolver=lambda h: ["127.0.0.1"])
+    return ImageFetcher(
+        session, max_bytes=10**6, max_pixels=10**6, max_dimension=0, flaresolverr=solver
+    )
+
+
+def solver_clearance(domain: str = "site.test") -> dict[str, Any]:
+    cookie = {"name": "cf_clearance", "value": "token", "domain": f".{domain}", "path": "/"}
+    return {"userAgent": "Solver UA", "cookies": [cookie]}
+
+
+def cloudflare(image: bytes) -> Callable[[dict[str, str]], Route]:
+    """A route that challenges every request without the clearance cookie."""
+
+    def route(headers: dict[str, str]) -> Route:
+        cleared = headers.get("Cookie") == "cf_clearance=token"
+        if cleared and headers.get("User-Agent") == "Solver UA":
+            return 200, {}, image
+        return CHALLENGE
+
+    return route
+
+
+@pytest.fixture
+def flaresolverr() -> Iterator[FakeFlareSolverr]:
+    with FakeFlareSolverr({}) as fake:
+        fake.solution = solver_clearance()
+        yield fake
+
+
+class TestImageFetcherFetch__Challenged:
+    def test_fetch__solves_the_challenge_and_retries_with_the_clearance(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        url = http_server.url("/a.png", host="site.test")
+        flaresolverr.pages[url] = "<html><img></html>"
+        http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
+        result = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1")).fetch(url)
+        assert result is not None
+        assert result.mime == "image/png"
+        assert flaresolverr.requested_urls == [url]
+        assert http_server.headers[1]["Cookie"] == "cf_clearance=token"
+        assert http_server.headers[1]["User-Agent"] == "Solver UA"
+
+    def test_fetch__next_image_of_the_site_reuses_the_cached_clearance(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        first = http_server.url("/a.png", host="site.test")
+        flaresolverr.pages[first] = "<html><img></html>"
+        http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
+        http_server.routes["/b.png"] = cloudflare(make_image("PNG"))
+        fetcher = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1"))
+        fetcher.fetch(first)
+        assert fetcher.fetch(http_server.url("/b.png", host="cdn.site.test")) is not None
+        assert flaresolverr.requested_urls == [first]
+        assert [path for path, _ in http_server.hits] == ["/a.png", "/a.png", "/b.png"]
+
+    def test_fetch__other_site_gets_neither_cookie_nor_solver_user_agent(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        solver.clearances.record("Solver UA", solver_clearance()["cookies"])
+        http_server.routes["/a.png"] = (200, {}, make_image("PNG"))
+        cleared_fetcher(solver).fetch(http_server.url("/a.png", host="other.test"))
+        assert "Cookie" not in http_server.headers[0]
+        assert http_server.headers[0]["User-Agent"] == USER_AGENT
+
+    def test_fetch__redirect_to_another_site_drops_the_cookie(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        solver.clearances.record("Solver UA", solver_clearance()["cookies"])
+        target = http_server.url("/b.png", host="other.test")
+        http_server.routes["/a.png"] = (302, {"Location": target}, b"")
+        http_server.routes["/b.png"] = (200, {}, make_image("PNG"))
+        assert cleared_fetcher(solver).fetch(http_server.url("/a.png", host="site.test"))
+        assert http_server.headers[0]["Cookie"] == "cf_clearance=token"
+        assert "Cookie" not in http_server.headers[1]
+
+    def test_fetch__unsolved_challenge_returns_none_without_retrying(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        url = http_server.url("/a.png", host="site.test")
+        http_server.routes["/a.png"] = CHALLENGE
+        assert cleared_fetcher(FlareSolverr(flaresolverr.url, "w1")).fetch(url) is None
+        assert len(http_server.hits) == 1
+
+    def test_fetch__clearance_still_challenged_is_forgotten(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        url = http_server.url("/a.png", host="site.test")
+        flaresolverr.pages[url] = "<html><img></html>"
+        http_server.routes["/a.png"] = CHALLENGE
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        with capture_logs() as logs:
+            assert cleared_fetcher(solver).fetch(url) is None
+        assert len(http_server.hits) == 2
+        assert solver.clearances.for_url(url) is None
+        assert "image_clearance_refused" in [e["event"] for e in logs]
+
+    def test_fetch__stale_cached_clearance_is_solved_again(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        url = http_server.url("/a.png", host="site.test")
+        flaresolverr.pages[url] = "<html><img></html>"
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        stale = solver_clearance()
+        stale["cookies"] = [{**stale["cookies"][0], "value": "stale"}]
+        solver.clearances.record("Solver UA", stale["cookies"])
+        http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
+        assert cleared_fetcher(solver).fetch(url) is not None
+        assert flaresolverr.requested_urls == [url]
+        assert http_server.headers[0]["Cookie"] == "cf_clearance=stale"
+
+    def test_fetch__other_refusal_never_asks_flaresolverr(
+        self, http_server: Server, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        http_server.routes["/a.png"] = (403, {}, b"")
+        fetcher = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1"))
+        assert fetcher.fetch(http_server.url("/a.png", host="site.test")) is None
+        assert flaresolverr.requested_urls == []
+
+    def test_fetch__challenge_without_a_cache_returns_none(self, http_server: Server) -> None:
+        http_server.routes["/a.png"] = CHALLENGE
+        assert fetcher().fetch(http_server.url("/a.png", host="site.test")) is None

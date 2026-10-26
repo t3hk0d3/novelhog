@@ -52,6 +52,7 @@ with warnings.catch_warnings():
     from web_novel_scraper.exceptions import (
         CommonGetRequestError,
         FlaresolverrConnectionError,
+        FlaresolverrRequestError,
         ResponseIsEmptyError,
         ScraperError,
     )
@@ -66,6 +67,7 @@ __all__ = [
     "CommonGetRequestError",
     "CustomProcessor",
     "FlaresolverrConnectionError",
+    "FlaresolverrRequestError",
     "Novel",
     "ProcessorRegistry",
     "RequestHelper",

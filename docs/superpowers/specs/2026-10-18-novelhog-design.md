@@ -1184,14 +1184,24 @@ dispatch_notifications():
   FlareSolverr, `request_time_between_requests`), with `NOVELHOG_FLARESOLVERR_URL`
   overriding the FlareSolverr address. The adapter enforces at least 1 retry
   (the scraper crashes with 0).
-- **FlareSolverr fallback.** A site override may force FlareSolverr for its
-  host (v1: `fanmtl_com` does). In addition, when a direct request returns a
-  Cloudflare challenge (HTTP 403 or 503 with a `cf-mitigated: challenge`
-  header, or `Server: cloudflare` with a challenge page body such as
-  "Just a moment…" / `cf-chl` markers), the adapter retries that request
-  through FlareSolverr once and, if it succeeds, routes every later request
-  for that host through FlareSolverr for the rest of the worker process
-  (logged once as `flaresolverr_fallback_enabled` with the host).
+- **FlareSolverr and Cloudflare.** Each worker has one FlareSolverr client
+  (`novelhog.flaresolverr`) shared by page and image requests. It opens one
+  FlareSolverr session, `novelhog-<worker_id>`, on first use and reuses it for
+  every page; FlareSolverr replaces the session's browser after 30 minutes, a
+  session FlareSolverr lost is created again once, and the worker destroys it
+  on shutdown. The scraper never opens sessions of its own.
+  - Hosts the scraper's host config forces through FlareSolverr (pages that
+    may need a browser) are loaded in that session.
+  - Every other host is requested directly, sending the worker's cached
+    Cloudflare clearance for it, if any (the `cf_clearance` cookie and the
+    user agent it was issued to, §8.2). When a direct request still returns a
+    challenge (HTTP 403 or 503 with a `cf-mitigated: challenge` header, or
+    `Server: cloudflare` with a challenge page body such as "Just a moment…" /
+    `cf-chl` markers), the cached clearance is forgotten and the page is
+    loaded through FlareSolverr instead; the clearance it earns is cached for
+    the host's next direct requests and images. FlareSolverr failing to load
+    the page is an unsolved challenge (`SiteChallenged`); FlareSolverr down is
+    an `InfrastructureError`.
 - `sync_toc(novel) → TocResult{title, language, cover_url, urls}`:
   `Novel.sync_toc()` (which applies the decoder's TOC rules, URL processors,
   pagination and descending-order flags), then reads the first TOC page's HTML
@@ -1207,7 +1217,9 @@ dispatch_notifications():
   content selector matched; lists and images outside those are lost (documented
   limitation). The chapter's cached HTML file is deleted afterwards.
 - `find_title(toc_html)`: `og:title`, then `<title>` with a trailing site suffix
-  (" - Site", " | Site") removed, then the first `<h1>`; `null` if none. An
+  (" - Site", " | Site") removed, then the first `<h1>`; `null` if none. A
+  `<title>` that is the `<h1>` followed by more words ("Star Forge Titan Novel
+  Read Online") gives the `<h1>`. An
   override may register a host-specific rule first.
 - `find_cover_url(toc_html, toc_url, title)`: `og:image` / `twitter:image` meta;
   schema.org `image`; common selectors (`.cover img`, `.book img`,
@@ -1219,13 +1231,6 @@ dispatch_notifications():
   `SiteUnreachable` (an `InfrastructureError`; see §6.1 for the retry
   threshold); anything else from the scraper (HTTP status, decode
   failure, empty TOC, missing content) → `SiteError` with a short message.
-- **Accepted limitations (v1):**
-  - The scraper's request helper discards FlareSolverr's cookies and user
-    agent, so images are fetched without them; an image host behind Cloudflare
-    gives `[image unavailable]`.
-  - The scraper names FlareSolverr sessions with one random letter and opens a
-    browser session per chapter. Because every worker has its own FlareSolverr
-    (§2), session names never collide.
 
 ### 6.8 Outbound HTTP guard
 
@@ -1265,7 +1270,7 @@ Package `novelhog`, under `src/novelhog/`.
 | `domain` | Pure rules shared by everything: errors (`NotFound`, `Conflict`, `ValidationFailed`), chapter state rules and selector validation, refresh interval rule, export formats and file names (§8.3), URL normalisation and static URL building (`domain.urls`), XML-invalid character stripping (`domain.text`), payload models for REST and SSE (`domain.payloads`), `Host` and `Subscription` types |
 | `repo` | The database interface on SQLAlchemy Core: `schema.py` (tables), `types.py` (`UTCDateTime`), `db.py` (engine, transactions, migrate, revisions), `claims.py` (compare-and-set claim, renew, release, recover, fencing), `migrations/`, novels, chapters, chapter contents, work claiming, exports, event log and clock, consumers, subscriptions, settings, hosts, storage trash. The only package that talks to the database. Importable on its own (depends only on the standard library, `sqlalchemy`, `alembic`, `ids` and `domain`), so the API, the worker and future services (e.g. a Telegram bot) share it. It never logs; it returns results and raises domain errors |
 | `scraper_adapter` | The only importer of `web_novel_scraper` (§6.7): `supported_hosts()`, `sync_toc(novel)`, `fetch_chapter(novel, url)`, `find_title`, `find_cover_url`, error classification, TOC loop guard. Used only by the worker |
-| `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (2.13.1's next-page rule only matches `>`, the site now writes `&gt;`; forces FlareSolverr for the host) |
+| `scraper_adapter.overrides` | One module per host with fixes for scraper defects, registered when the adapter is imported. v1: `fanmtl_com` (2.13.1's next-page rule only matches `>`, the site now writes `&gt;`) |
 | `net` | Outbound HTTP guard (§6.8) |
 | `html_to_markdown` | Chapter body → Markdown (§8.1) |
 | `image_fetcher` | Image download through `net`; validation (§8.2) |
@@ -1330,8 +1335,17 @@ Package `novelhog`, under `src/novelhog/`.
 
 ### 8.2 Images (chapter images and covers)
 
-- Fetched through the outbound guard (§6.8) with a browser user agent; no
-  FlareSolverr cookies (§6.7).
+- Fetched through the outbound guard (§6.8) with a browser user agent.
+- **Cloudflare:** an image request sends the worker's cached clearance for the
+  host, if any. A request answered by a challenge (`403`/`503` with
+  `cf-mitigated: challenge`) has the worker's FlareSolverr session (§6.7) open
+  the challenged URL and is sent once more with the `cf_clearance` cookie (and
+  the other cookies of its domain) and the user agent of that solution. The
+  clearance cache is shared with page requests, in memory per worker process,
+  per cookie domain (a subdomain uses its parent's), until the cookie expires
+  or the site challenges it again. A failed solve, or a challenge despite a
+  fresh clearance, gives no image. The cookies are domain-bound, so a redirect
+  to another site never carries them.
 - Type detected from magic bytes; allowed: PNG, JPEG, GIF, WebP. SVG and anything
   else are rejected.
 - Size cap `NOVELHOG_MAX_IMAGE_BYTES` (default 2 MiB), checked while streaming
@@ -1827,8 +1841,6 @@ desktop chapters, export dialog, phone normal and select mode).
   design already supports it, and every worker brings its own FlareSolverr;
   still needed: shared static storage (S3), and per-site download limits across
   workers (e.g. claimable host slots).
-- **FlareSolverr cookies for images** (own FlareSolverr client or an upstream
-  scraper change), so images behind Cloudflare can be fetched.
 - **S3 static backend** (`S3StaticStorage`), setting `Content-Type` and
   `Content-Disposition` per object.
 - **Image table**: move inline images of chapters with `has_images` into a
