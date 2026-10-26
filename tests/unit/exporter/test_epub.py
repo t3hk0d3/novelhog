@@ -57,6 +57,13 @@ def _opf(z: zipfile.ZipFile) -> ET.Element:
     return ET.fromstring(z.read(path))
 
 
+def _spine(z: zipfile.ZipFile) -> list[str]:
+    """The spine's documents by href, in reading order."""
+    opf = _opf(z)
+    hrefs = {i.get("id"): i.get("href") for i in opf.findall(".//o:manifest/o:item", NS)}
+    return [str(hrefs[r.get("idref")]) for r in opf.findall(".//o:spine/o:itemref", NS)]
+
+
 def _chapter_docs(z: zipfile.ZipFile) -> list[str]:
     return sorted(n for n in z.namelist() if "chapter_" in n)
 
@@ -122,6 +129,32 @@ class TestEpubExporter:
         covers = [n for n in z.namelist() if "cover" in n and n.endswith((".jpg", ".png"))]
         assert covers
         assert not any(n.endswith(".webp") for n in z.namelist())
+
+    def test_build__cover_page_opens_the_book(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book(CH, cover=(_img("JPEG"), "image/jpeg")))
+        spine = _spine(z)
+        assert spine[:2] == ["cover.xhtml", "nav.xhtml"]
+        assert all(r.get("linear") != "no" for r in _opf(z).findall(".//o:spine/o:itemref", NS))
+        page = ET.fromstring(z.read("EPUB/cover.xhtml"))
+        assert page.find(".//x:img", NS).get("src") == "cover.jpg"  # type: ignore[union-attr]
+
+    def test_build__cover_page_is_the_guides_and_landmarks_cover(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book(CH, cover=(_img("JPEG"), "image/jpeg")))
+        references = _opf(z).findall(".//o:guide/o:reference", NS)
+        assert [(r.get("type"), r.get("href")) for r in references] == [("cover", "cover.xhtml")]
+        nav = ET.fromstring(z.read("EPUB/nav.xhtml"))
+        landmarks = [n for n in nav.findall(".//x:nav", NS) if "landmarks" in str(n.attrib)]
+        assert [a.get("href") for a in landmarks[0].findall(".//x:a", NS)] == ["cover.xhtml"]
+
+    def test_build__without_a_cover_the_book_opens_at_the_nav(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book(CH))
+        assert _spine(z)[0] == "nav.xhtml"
+        assert _opf(z).find(".//o:guide", NS) is None
+
+    def test_build__unusable_cover_adds_no_cover_page(self, tmp_path: Path) -> None:
+        z = _build(tmp_path, _book(CH, cover=(b"GIF89a", "image/gif")))
+        assert _spine(z)[0] == "nav.xhtml"
+        assert "EPUB/cover.xhtml" not in z.namelist()
 
     def test_build__inline_images_become_items(self, tmp_path: Path) -> None:
         md = _data_md(_img("PNG"), "image/png")
