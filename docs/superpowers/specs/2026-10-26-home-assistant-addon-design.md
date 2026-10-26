@@ -26,8 +26,8 @@ Builds on `docs/superpowers/specs/2026-10-26-readme-docs-publishing-design.md`: 
 
 `homeassistant/novelhog/run.sh` (bash, `set -euo pipefail`; passes `shellcheck`), the image's entrypoint behind `tini`.
 
-- Reads the options file, `/data/options.json` (path overridable with `OPTIONS_FILE`, for tests), with `jq`, and exports the same environment variables the application reads today: `public_url` -> `NOVELHOG_PUBLIC_URL`, `vapid_subject` -> `NOVELHOG_VAPID_SUBJECT`, `allowed_hosts` (a list) -> `NOVELHOG_ALLOWED_HOSTS` (comma-joined), `flaresolverr_url` -> `NOVELHOG_FLARESOLVERR_URL`. An empty or absent option is not exported, so the application default applies (with no FlareSolverr URL, the worker reports an infrastructure error only for Cloudflare-protected sites, as today).
-- Exports `NOVELHOG_DATA_DIR=/data` (the image already uses `/data/db` and `/data/static`); the database stays SQLite.
+- Reads the options file, `/data/options.json` (path overridable with `OPTIONS_FILE`, for tests), with `jq`, and exports the same environment variables the application reads today: `public_url` -> `NOVELHOG_PUBLIC_URL`, `vapid_subject` -> `NOVELHOG_VAPID_SUBJECT`, `allowed_hosts` (a list) -> `NOVELHOG_ALLOWED_HOSTS` (comma-joined), `flaresolverr_url` -> `NOVELHOG_FLARESOLVERR_URL`, `database_url` -> `NOVELHOG_DATABASE_URL`. An empty or absent option is not exported, so the application default applies (with no FlareSolverr URL, the worker reports an infrastructure error only for Cloudflare-protected sites, as today; with no database URL, the database is SQLite in `/data/db`, as in the normal image).
+- Exports `NOVELHOG_DATA_DIR=/data` (the image already uses `/data/db` and `/data/static`: covers and exports always live there). A non-empty `database_url` (for example `postgresql+psycopg://user:password@host:5432/novelhog`; the PostgreSQL driver is already in the image) moves only the database; both the migration and the two roles see it, because it is exported before any of them starts.
 - Runs `novelhog db migrate` and stops with its exit code if that fails.
 - Starts `novelhog web` and `novelhog worker` in the background, and waits for the first to exit.
 - On SIGTERM or SIGINT forwards TERM to both and waits for them (the worker finishes its chapter; the Supervisor's stop timeout applies), then exits 0.
@@ -38,7 +38,7 @@ Builds on `docs/superpowers/specs/2026-10-26-readme-docs-publishing-design.md`: 
 
 `homeassistant/novelhog/`:
 
-- `config.yaml`: `name`, `slug: novelhog`, `description`, `version` (equals the project version), `arch: [amd64, aarch64]`, `image: ghcr.io/t3hk0d3/novelhog-addon`, `init: false`, `startup: application`, `boot: auto`, `ports: {"8080/tcp": 8080}` with a description, `webui: "http://[HOST]:[PORT:8080]"`, `options` (defaults) and `schema` (`public_url: url?`, `vapid_subject: str?`, `allowed_hosts: [str]?`, `flaresolverr_url: url?`), `map: [data]` if the build-time check shows it is needed.
+- `config.yaml`: `name`, `slug: novelhog`, `description`, `version` (equals the project version), `arch: [amd64, aarch64]`, `image: ghcr.io/t3hk0d3/novelhog-addon`, `init: false`, `startup: application`, `boot: auto`, `ports: {"8080/tcp": 8080}` with a description, `webui: "http://[HOST]:[PORT:8080]"`, `options` (defaults) and `schema` (`public_url: url?`, `vapid_subject: str?`, `allowed_hosts: [str]?`, `flaresolverr_url: url?`, `database_url: password?`; the `password` type keeps the connection string, which holds a credential, masked in the Home Assistant UI), `map: [data]` if the build-time check shows it is needed.
 - `Dockerfile` and `run.sh` (above), `icon.png` and `logo.png` (from `docs/assets`), `DOCS.md` (what Home Assistant shows on the add-on's Documentation tab: options, the no-login warning, push needs HTTPS, FlareSolverr), `CHANGELOG.md`.
 - `repository.yaml` at the repository root: `name`, `url`, `maintainer`, so users add `https://github.com/t3hk0d3/novelhog` as an add-on repository.
 
@@ -56,10 +56,12 @@ The script is tested as it ships: a pytest module runs `run.sh` in a subprocess 
 homeassistant/novelhog/run.sh
     With every option set
         - novelhog web and novelhog worker see NOVELHOG_PUBLIC_URL, NOVELHOG_VAPID_SUBJECT,
-          NOVELHOG_ALLOWED_HOSTS (comma-joined) and NOVELHOG_FLARESOLVERR_URL
+          NOVELHOG_ALLOWED_HOSTS (comma-joined), NOVELHOG_FLARESOLVERR_URL and NOVELHOG_DATABASE_URL
+        - novelhog db migrate sees NOVELHOG_DATABASE_URL too
         - they see NOVELHOG_DATA_DIR=/data
     With empty options
-        - NOVELHOG_FLARESOLVERR_URL, NOVELHOG_PUBLIC_URL and NOVELHOG_VAPID_SUBJECT are not set
+        - NOVELHOG_FLARESOLVERR_URL, NOVELHOG_PUBLIC_URL, NOVELHOG_VAPID_SUBJECT and
+          NOVELHOG_DATABASE_URL are not set (the application's SQLite default applies)
     With no options file
         - starts with defaults
     With a malformed options file
@@ -89,14 +91,14 @@ homeassistant/novelhog/config.yaml (contract, tests/addon/test_config.py)
 addon image (container smoke, gated like the others: NOVELHOG_CONTAINER_TESTS=1)
     - built FROM the main image, it starts and serves GET /api/v1/settings on 8080
     - with an options file mounted at /data/options.json, the options reach the app
-    - with a root-owned /data mounted, the database is written under /data/db
+    - with a root-owned /data mounted and no database_url, the database is written under /data/db
 ```
 
 `config.yaml` is parsed in the test (PyYAML in the `dev` group). CI also runs `shellcheck` on `run.sh` and the official add-on linter (`frenck/action-addon-linter`) on `homeassistant/novelhog`. Style follows `STYLEGUIDE.md` (module docstrings, full typing, `test_<unit>__<behaviour>`, scenario classes).
 
 ## 5. Docs
 
-- `docs/home-assistant.md` (nav: after Install): add the repository, install, options table, first start, the no-login warning, HTTPS/push notes (a reverse proxy or Home Assistant's own Nabu Casa URL is the user's choice), FlareSolverr via an external add-on, backups (the add-on's `/data` is included in Home Assistant backups).
+- `docs/home-assistant.md` (nav: after Install): add the repository, install, options table, first start, the no-login warning, HTTPS/push notes (a reverse proxy or Home Assistant's own Nabu Casa URL is the user's choice), FlareSolverr via an external add-on, the options table (including `database_url`, empty by default for SQLite, with a PostgreSQL example), and backups: the add-on's `/data` is included in Home Assistant backups, but an external database is not, so back it up separately (`pg_dump`).
 - A short Home Assistant mention and badge-style link in the README ("Add to Home Assistant" button URL `https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Ft3hk0d3%2Fnovelhog`).
 - `STYLEGUIDE.md` layout line gains `homeassistant/` and `tests/addon/`.
 
