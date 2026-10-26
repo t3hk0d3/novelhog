@@ -1217,7 +1217,9 @@ dispatch_notifications():
   content selector matched; lists and images outside those are lost (documented
   limitation). The chapter's cached HTML file is deleted afterwards.
 - `find_title(toc_html)`: `og:title`, then `<title>` with a trailing site suffix
-  (" - Site", " | Site") removed, then the first `<h1>`; `null` if none. An
+  (" - Site", " | Site") removed, then the first `<h1>`; `null` if none. A
+  `<title>` that is the `<h1>` followed by more words ("Star Forge Titan Novel
+  Read Online") gives the `<h1>`. An
   override may register a host-specific rule first.
 - `find_cover_url(toc_html, toc_url, title)`: `og:image` / `twitter:image` meta;
   schema.org `image`; common selectors (`.cover img`, `.book img`,
