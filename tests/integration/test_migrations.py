@@ -98,8 +98,8 @@ class TestMigrate__FromAnotherWorkingDirectory:
 _REBUILD = """
     from alembic import op
 
-    revision = "0004"
-    down_revision = "0003"
+    revision = "0005"
+    down_revision = "0004"
     branch_labels = None
     depends_on = None
 
@@ -119,7 +119,7 @@ def _script_location(tmp_path: Path, extra: str = "") -> Path:
     location = tmp_path / "migrations"
     shutil.copytree(db.MIGRATIONS_DIR, location, ignore=shutil.ignore_patterns("__pycache__"))
     body = textwrap.dedent(_REBUILD).format(extra=extra or "pass")
-    (location / "versions" / "0004_rebuild_novels.py").write_text(body)
+    (location / "versions" / "0005_rebuild_novels.py").write_text(body)
     return location
 
 
@@ -145,7 +145,7 @@ class TestMigrate__WithABatchRebuildOnSqlite:
     ) -> None:
         head = db.migrate(sqlite_with_data, script_location=_script_location(tmp_path))
 
-        assert head == "0004"
+        assert head == "0005"
         with db.read(sqlite_with_data) as connection:
             assert len(connection.execute(select(chapters.c.id)).all()) == 2
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
@@ -159,7 +159,7 @@ class TestMigrate__WithABatchRebuildOnSqlite:
             db.migrate(sqlite_with_data, script_location=location)
 
         state = db.revisions(sqlite_with_data)
-        assert state.current == "0003"
+        assert state.current == "0004"
         with db.read(sqlite_with_data) as connection:
             assert len(connection.execute(select(novels.c.id)).all()) == 1
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
@@ -244,6 +244,28 @@ class TestMigration0003__HostReach:
         assert not _REACH_COLUMNS & _columns(empty_engine, "hosts")
         assert "retries" not in _columns(empty_engine, "tasks")
         assert db.revisions(empty_engine).current == "0002"
+
+
+class TestMigration0004__TitleLocked:
+    def test_upgrade__existing_novels_have_a_detected_title(self, empty_engine: Engine) -> None:
+        db.migrate(empty_engine)
+        _downgrade(empty_engine, "0003")
+        with db.write(empty_engine) as connection:
+            insert_host(connection)
+            connection.execute(insert(novels).values(**novel_row(title="Detected")))
+
+        db.migrate(empty_engine)
+
+        with db.read(empty_engine) as connection:
+            assert connection.execute(select(novels.c.title_locked)).scalar_one() is False
+
+    def test_downgrade__to_0003_drops_the_column(self, empty_engine: Engine) -> None:
+        db.migrate(empty_engine)
+
+        _downgrade(empty_engine, "0003")
+
+        assert "title_locked" not in _columns(empty_engine, "novels")
+        assert db.revisions(empty_engine).current == "0003"
 
 
 _V1_NOVELS = sa.table(
@@ -1435,7 +1457,7 @@ class TestRequireCurrent:
         with db.write(empty_engine) as connection:
             connection.execute(text("UPDATE alembic_version SET version_num = '9999'"))
 
-        with pytest.raises(SchemaOutdated, match="at 9999, this build needs 0003"):
+        with pytest.raises(SchemaOutdated, match="at 9999, this build needs 0004"):
             db.require_current(empty_engine)
 
     def test_revisions__reports_an_older_database_against_a_newer_build(
@@ -1445,14 +1467,14 @@ class TestRequireCurrent:
 
         state = db.revisions(empty_engine, script_location=_script_location(tmp_path))
 
-        assert (state.current, state.head, state.is_current) == ("0003", "0004", False)
+        assert (state.current, state.head, state.is_current) == ("0004", "0005", False)
 
     def test_require_current__raises_on_an_older_database(
         self, empty_engine: Engine, tmp_path: Path
     ) -> None:
         db.migrate(empty_engine)
 
-        with pytest.raises(SchemaOutdated, match="at 0003, this build needs 0004"):
+        with pytest.raises(SchemaOutdated, match="at 0004, this build needs 0005"):
             db.require_current(empty_engine, script_location=_script_location(tmp_path))
 
 

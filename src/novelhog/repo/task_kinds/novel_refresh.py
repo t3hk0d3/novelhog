@@ -233,7 +233,7 @@ class NovelRefreshHandler:
                 max_s=result.max_s,
             )
             values: dict[str, object] = {
-                "title": row.title if row.title is not None else result.title,
+                "title": row.title if row.title_locked or not result.title else result.title,
                 "language": result.language if result.language else row.language,
                 "cover_key": result.cover_key if result.cover_key else row.cover_key,
                 "import_error": None,

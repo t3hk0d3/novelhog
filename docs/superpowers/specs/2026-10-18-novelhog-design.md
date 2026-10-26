@@ -220,6 +220,7 @@ CREATE TABLE novels (
                       CHECK (length(id) = 14 AND substr(id, 1, 2) = 'NV'
                              AND substr(id, 3) NOT GLOB '*[^a-z0-9]*'),
     title             TEXT,                      -- display only; NULL until detected or set
+    title_locked      INTEGER NOT NULL DEFAULT 0 CHECK (title_locked IN (0, 1)),  -- renamed; sync keeps it
     host              TEXT NOT NULL REFERENCES hosts (host),
     toc_url           TEXT NOT NULL UNIQUE,      -- normalised (§4 URL normalisation)
     language          TEXT,                      -- BCP 47 from the TOC page's <html lang>, if any
@@ -681,8 +682,9 @@ Codes are `snake_case`.
   `next_refresh_at = now`. The worker's initial import fills in title, cover and
   chapters; a failure sets `import_error`.
 - `PATCH {title}` renames the novel (display only, non-empty after trimming,
-  XML-invalid characters removed). A later sync never overwrites a title that is
-  already set.
+  XML-invalid characters removed) and sets `title_locked`. Every sync replaces the
+  title with the detected one unless it is locked; a sync that detects no title
+  keeps the current one.
 - `POST /sync` sets `next_refresh_at = now` and `sync_requested = 1`; a sync
   that is already running then schedules the next one immediately instead of
   after the interval (§6.2). The result arrives over SSE.
@@ -1009,7 +1011,7 @@ finish_sync(...):                                     # ONE fenced transaction; 
             known url     → position = its index (+1); a removed chapter that came back gets removed_at = null
             missing url   → position = null, removed_at = now (state and content kept, except that a
                             pending chapter is dequeued; logged as a warning)
-        title = toc.title if novel.title is null; language = toc.language; cover_key if found
+        title = toc.title if found and not novel.title_locked; language = toc.language; cover_key if found
         import_error = null; last_refreshed_at = now
         interval = MIN if (new chapters and not initial) else min(interval * 2, MAX)
     always:

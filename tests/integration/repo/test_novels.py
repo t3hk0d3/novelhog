@@ -303,6 +303,7 @@ class TestUpdate:
         view = published.novels.update(novel.id, title="  My\x00 Novel \n")
         assert view.title == "My Novel"
         assert _row(published, novel.id).title == "My Novel"
+        assert _row(published, novel.id).title_locked is True
         assert len(_events(published)) == 2
 
     @pytest.mark.parametrize("title", ["", "   ", "\x00\x01"])
