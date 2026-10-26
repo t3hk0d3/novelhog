@@ -79,6 +79,12 @@ Mouse drags and trackpad swipes do not turn chapters; the gestures are for touch
 The settings open in a dialog (a bottom sheet on a phone). Every choice applies at once and is remembered in this
 browser.
 
+![The reading settings on a desktop-width window: text size and line width above, themes and fonts side by side below](images/reader-settings.png)
+
+On a phone the same settings open as a bottom sheet, stacked, without the line width:
+
+![The reading settings as a bottom sheet on a phone](images/reader-settings-phone.png)
+
 | Setting | Choices |
 |---|---|
 | **Text size** | Four steps, from small to extra large (the default is 18 px). |
