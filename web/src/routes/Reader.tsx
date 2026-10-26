@@ -12,6 +12,7 @@ import { chapterContentQuery, useChapterContent } from '../hooks/useChapterConte
 import { EXIT_MS, useChapterGestures } from '../hooks/useChapterGestures';
 import { useChapters } from '../hooks/useChapters';
 import { useBarVisibility } from '../hooks/useBarVisibility';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useReadingPosition } from '../hooks/useReadingPosition';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useReaderSettings, type FontSize, type Width } from '../hooks/useReaderSettings';
@@ -275,14 +276,7 @@ export function Reader() {
   }, [theme]);
 
   const title = chapter ? (chapter.title ?? `Chapter ${String(chapter.position)}`) : null;
-  useEffect(() => {
-    if (title === null) return;
-    const before = document.title;
-    document.title = `${title} · novelhog`;
-    return () => {
-      document.title = before;
-    };
-  }, [title]);
+  useDocumentTitle(title);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {

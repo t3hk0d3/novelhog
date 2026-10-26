@@ -63,6 +63,7 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
       .toBeGreaterThan(0); // the cover is served from /static
     await card.getByRole('link', { name: TITLE }).click();
     await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible();
+    await expect(page).toHaveTitle(`${TITLE} · novelhog`); // the tab says which novel it is
   });
 
   await test.step('select a range and Download; states go queued, then downloaded', async () => {
