@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Chapter } from '../api/client';
 import { FakeEventSource } from '../test/FakeEventSource';
 import { makeChapter } from '../test/fixtures';
-import { useChapterContent } from './useChapterContent';
+import { chapterContentQuery, useChapterContent } from './useChapterContent';
 import { useLiveEvents } from './useLiveEvents';
 
 const NOVEL = 'NV000000000001';
@@ -99,6 +99,27 @@ describe('useChapterContent', () => {
       const fetchMock = stubContent();
       mount(makeChapter(3));
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the cached text of a chapter', () => {
+    it('is never stale: asking again for the same chapter does not fetch it again', async () => {
+      const fetchMock = stubContent();
+      const client = new QueryClient();
+      const chapter = makeChapter(3);
+      await client.query(chapterContentQuery(NOVEL, chapter));
+      await client.query(chapterContentQuery(NOVEL, chapter));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('is fetched again once the chapter was downloaded again (a new key)', async () => {
+      const fetchMock = stubContent();
+      const client = new QueryClient();
+      await client.query(chapterContentQuery(NOVEL, makeChapter(3)));
+      await client.query(
+        chapterContentQuery(NOVEL, makeChapter(3, { updated_at: '2026-10-02T10:00:00.000Z' })),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 });

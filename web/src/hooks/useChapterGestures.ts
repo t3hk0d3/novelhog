@@ -158,6 +158,10 @@ export function useChapterGestures(options: Options) {
       surface.removeEventListener('touchend', onEnd);
       surface.removeEventListener('touchcancel', abandon);
       timers.forEach(clearTimeout);
+      // The timers that would have cleared these are gone with the surface; a page that comes
+      // back must not start out slid away or with a stale slide-in.
+      setExiting(null);
+      setEntering(null);
     };
   }, [surface]);
 

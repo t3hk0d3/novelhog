@@ -11,6 +11,9 @@ export function chapterContentQuery(novelId: string, chapter: Chapter | undefine
   return {
     queryKey: ['chapter-content', novelId, chapter?.id, chapter?.updated_at],
     queryFn: () => api.getChapterContent(novelId, chapter?.id ?? ''),
+    // The key carries `updated_at`, so an entry never goes stale: a re-download has a new key.
+    // Without this every refocus or remount would refetch text that can hold megabytes of images.
+    staleTime: Infinity,
   };
 }
 

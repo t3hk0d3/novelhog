@@ -1664,11 +1664,11 @@ manifest makes the app installable.
        one-item list.
      - **Preview** (downloaded chapters): an inline "Content: Preview" row
        among the fields that opens the whole chapter, from
-       `GET /chapters/{id}/content` rendered from Markdown, in a dialog of its
-       own over the details (a bottom sheet on phones): a scrollable,
-       keyboard-focusable region (up to 60 dvh; "Loading content…" or the error
-       message in its place) and a **Back** button to the details. Nothing is
-       requested until it is opened.
+       `GET /novels/{id}/chapters/{chapter_id}/content` rendered from
+       Markdown, in a dialog of its own over the details (a bottom sheet on
+       phones): a scrollable, keyboard-focusable region (up to 60 dvh;
+       "Loading content…" or the error message in its place) and a **Back**
+       button to the details. Nothing is requested until it is opened.
      - **Read** (downloaded chapters) is the last, primary button of the action
        row (after "Open on site" and the state-dependent action) and opens the
        reader page.
