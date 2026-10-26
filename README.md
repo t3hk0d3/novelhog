@@ -1,171 +1,77 @@
-# novelhog
+<p align="center">
+  <img src="docs/assets/logo.png" alt="novelhog" width="180">
+</p>
 
-Self-hosted web-novel downloader: a web UI and a worker around
-[web-novel-scraper](https://pypi.org/project/web-novel-scraper/). Import a novel by its table-of-contents
-URL, follow it, download chapters and export EPUBs.
+<h1 align="center">novelhog</h1>
 
-## Reading
+<p align="center">
+  <strong>Your web novels, on your server, in your pocket.</strong><br>
+  Download, follow and read the novels you love, in a library you fully own.
+</p>
 
-Downloaded chapters open in a reading page built for phones: swipe to turn chapters, themes and fonts (your own
-too), the place you left off in every chapter, and a bottom bar that gets out of the way. See
-[the reader guide](docs/reader.md).
+<p align="center">
+  <a href="https://t3hk0d3.github.io/novelhog/">Documentation</a> ·
+  <a href="https://t3hk0d3.github.io/novelhog/install/">Install</a> ·
+  <a href="https://t3hk0d3.github.io/novelhog/reader/">The reader</a>
+</p>
 
-## Deploy with Compose
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/library-desktop-dark.png">
+    <img src="docs/assets/screenshots/library-desktop.png" alt="The novelhog library: novels with covers and download progress" width="780">
+  </picture>
+</p>
 
-```sh
-git clone <this repository> novelhog && cd novelhog
-export NOVELHOG_PUBLIC_URL=https://novelhog.example.com   # needed for Web Push and the host check
-export NOVELHOG_VAPID_SUBJECT=mailto:you@example.com      # needed for Web Push
-docker compose up -d --build
-```
+Paste a novel's table-of-contents link. novelhog fetches the chapters, keeps checking for new ones, lets you read
+them in a reader made for phones, and packs them into EPUBs for your e-reader. It runs on your own hardware as a
+single Docker image, so your library is yours: no accounts, no ads, nothing to lose when a site goes down.
 
-`compose.yaml` builds one Dockerfile (cached, so once) into an image per service and runs it in three roles plus a
-FlareSolverr:
+## Why you will like it
 
-| Service | Command | Notes |
-|---|---|---|
-| `novelhog-migrate` | `novelhog db migrate` | One-shot; `web` and `worker` wait for it to exit 0, so every `up` migrates exactly once |
-| `novelhog-web` | `novelhog web` | Caddy (the only published port, `8080` by default) and the API on `127.0.0.1:8000`, under `tini` |
-| `novelhog-worker` | `novelhog worker` | Scraper, exports, notifications; `stop_grace_period: 2m` lets a chapter finish. Its work runs as tasks, readable at `GET /api/v1/tasks` |
-| `flaresolverr` | | On a private network shared only with the worker; `NOVELHOG_FLARESOLVERR_URL` points at it |
+- 📚 **Import by URL.** One link, and the novel, its cover and all its chapters are in your library.
+- 🔔 **Follow and forget.** New chapters are downloaded as they appear, and you get a push notification.
+- 📖 **A reader that is a joy on a phone.** Swipe between chapters, pick a theme and a font (your own too), and
+  every chapter reopens where you left off.
+- 📦 **EPUB export.** Split a long novel into books and send them to any e-reader.
+- 🛡️ **Cloudflare-protected sites.** A FlareSolverr comes paired with the worker out of the box.
+- 🥧 **Runs anywhere.** Images for `amd64` and `arm64`: a Raspberry Pi, a NAS or a Mac mini is plenty. SQLite out
+  of the box, PostgreSQL if you want it.
+- 📲 **Installable.** Add it to your home screen like an app; it updates live as downloads progress.
 
-Every worker is paired 1:1 with its own FlareSolverr. Do not use `--scale` on the worker; add another
-worker/FlareSolverr pair in an override file instead.
+<table>
+  <tr>
+    <td align="center"><picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/reader-mobile-dark.png">
+      <img src="docs/assets/screenshots/reader-mobile.png" alt="The reader on a phone" width="240">
+    </picture></td>
+    <td align="center"><img src="docs/assets/screenshots/reader-sepia-mobile.png" alt="The reader with the Sepia theme and an Old style font" width="240"></td>
+    <td align="center"><picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/novel-mobile-dark.png">
+      <img src="docs/assets/screenshots/novel-mobile.png" alt="A novel's page with its chapters and an exported EPUB" width="240">
+    </picture></td>
+  </tr>
+</table>
 
-Settings are environment variables prefixed `NOVELHOG_`. The common ones:
+## Try it in a minute
 
-| Variable | Default | |
-|---|---|---|
-| `NOVELHOG_HTTP_PORT` | `8080` | Caddy's listen port and the published port |
-| `NOVELHOG_PUBLIC_URL` | unset | External HTTPS URL; its host passes the API's host check |
-| `NOVELHOG_VAPID_SUBJECT` | unset | `mailto:` contact for Web Push |
-| `NOVELHOG_ALLOWED_HOSTS` | unset | Extra comma-separated host names the API accepts |
-| `NOVELHOG_DATABASE_URL` | `sqlite:////data/db/app.db` | Use `postgresql+psycopg://...` for Postgres |
-
-The API answers only requests addressed to an IP address, `localhost`, the host of `NOVELHOG_PUBLIC_URL` or a
-name in `NOVELHOG_ALLOWED_HOSTS`. To open novelhog on your LAN by a host name, for example
-`http://homeserver:8080`, add that name: `NOVELHOG_ALLOWED_HOSTS=homeserver`. Otherwise the page shows
-"This host name is not allowed".
-
-The image runs as a non-root user (uid 10001).
-
-### Reverse proxy
-
-Terminate HTTPS in front of novelhog (service workers and push require it). The proxy must pass the original
-`Host` header (including a non-default port) and must not buffer `/api/v1/events`.
-
-Caddy:
-
-```caddyfile
-novelhog.example.com {
-	reverse_proxy 127.0.0.1:8080 {
-		flush_interval -1
-	}
-}
-```
-
-nginx:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name novelhog.example.com;
-    # ssl_certificate / ssl_certificate_key ...
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location /api/v1/events {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 1h;
-    }
-}
-```
-
-`$http_host` (not `$host`) keeps the port, so the API's origin check passes when the site is served on a
-non-default port.
-
-## Volumes
-
-| Path in the containers | Compose volume | Access |
-|---|---|---|
-| `/data/db` | `novelhog-db` | read-write for all three services (SQLite creates `app.db-wal` and `app.db-shm` next to the database); unused with Postgres |
-| `/data/static` | `novelhog-static` | read-write for `novelhog-worker`, read-only for `novelhog-web`; covers and exports |
-| `/var/lib/novelhog/scraper` | none | worker-local scraper cache; safe to delete at any time |
-
-Bind-mounted host directories (instead of the named volumes) must be writable by uid 10001, for example
-`chown 10001 ./data`.
-
-There is no login. `compose.yaml` publishes the port on all interfaces; when the reverse proxy runs on the same
-host, change the mapping to `127.0.0.1:8080:8080` in an override file so only the proxy can reach it.
-
-## Backups
-
-- SQLite: while running, write a consistent copy, copy it out of the container and delete it:
-
-  ```sh
-  docker compose exec novelhog-web python -c "import sqlite3; s = sqlite3.connect('/data/db/app.db'); s.execute(\"VACUUM INTO '/data/db/backup.db'\")"
-  docker compose cp novelhog-web:/data/db/backup.db .
-  docker compose exec novelhog-web rm /data/db/backup.db
-  ```
-
-  Never copy `app.db` while the WAL is live.
-- Postgres: `pg_dump` your database.
-- Static files: copy the `novelhog-static` volume (`/data/static`).
-
-Restoring an older database restores its VAPID keys and subscriptions; browsers whose subscription no longer
-matches re-subscribe.
-
-## Upgrades
-
-Stop the workers before upgrading, so none runs while the database migrates (also any extra worker from an
-override file):
+You need Docker. Then:
 
 ```sh
-git pull
-docker compose stop novelhog-worker
-docker compose up -d --build
+curl -fsSLO https://raw.githubusercontent.com/t3hk0d3/novelhog/main/compose.yaml
+docker compose up -d
 ```
 
-`novelhog-migrate` runs `novelhog db migrate` first. To run it by hand: `docker compose run --rm novelhog-migrate`.
+Open <http://localhost:8080> and add your first novel. To put it online behind HTTPS, with push notifications,
+see the [install guide](https://t3hk0d3.github.io/novelhog/install/).
 
-`NOVELHOG_BATCH_SIZE` is removed. If it is still set, it is ignored and the worker logs `config_ignored` at
-startup.
+> [!NOTE]
+> novelhog has no login. Run it on a trusted network, or behind a reverse proxy that authenticates.
 
-A site that throttles, blocks or stops answering is paused for a while (up to an hour, growing with each failure)
-instead of failing chapters; its work waits and resumes on its own. `GET /api/v1/hosts` shows a paused host's
-`reach_after`.
+## Learn more
 
-`VACUUM` is a manual operation if the database file has grown after large deletions. On SQLite, stop the worker
-while it runs:
+Everything else lives in the [documentation](https://t3hk0d3.github.io/novelhog/): configuration, reverse-proxy
+recipes, backups and upgrades, and how to hack on novelhog itself.
 
-```sh
-docker compose stop novelhog-worker
-docker compose exec novelhog-web python -c "import sqlite3; sqlite3.connect('/data/db/app.db').execute('VACUUM')"
-docker compose start novelhog-worker
-```
+## License
 
-On Postgres, autovacuum reclaims space; run `VACUUM FULL` with `psql` only if you need the disk space back.
-
-## Development
-
-```sh
-uv sync
-uv run scripts/check.sh          # all gates
-scripts/test_pg.sh               # database tests on PostgreSQL 16
-NOVELHOG_CONTAINER_TESTS=1 uv run pytest tests/container   # builds the image; needs Docker
-```
-
-`docker compose up --build --watch` rebuilds and restarts a container when its sources change: a change under
-`web/` or to `docker/Caddyfile` only touches `novelhog-web`; a change under `src/`, to `pyproject.toml`, `uv.lock` or
-`docker/Dockerfile` touches both `novelhog-web` and `novelhog-worker`. Migrations are not re-run: after adding one,
-run `docker compose run --rm novelhog-migrate`.
+novelhog is free software under the [GNU AGPL v3](LICENSE).
