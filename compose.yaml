@@ -1,8 +1,9 @@
-# novelhog: one image, three roles, plus a FlareSolverr paired 1:1 with the worker (spec section 2).
+# novelhog: one Dockerfile, three roles, plus a FlareSolverr paired 1:1 with the worker (spec section 2).
 # Scale by adding worker/FlareSolverr pairs in an override file, never with `--scale`.
 
+# No shared `image:` tag: each service gets its own image (`<project>-<service>`), so a watch rebuild
+# of one service never changes another's image, which made Compose recreate and leave it stopped.
 x-novelhog: &novelhog
-  image: novelhog:local
   build:
     context: .
     dockerfile: docker/Dockerfile
