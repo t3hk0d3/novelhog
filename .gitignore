@@ -20,3 +20,6 @@ web/coverage/
 .env
 test-results/
 playwright-report/
+
+# MkDocs build output
+site/
