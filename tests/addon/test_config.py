@@ -43,7 +43,7 @@ class TestConfigYaml__Parsed:
 
     def test_config__every_default_option_has_a_schema_entry(self) -> None:
         config = _config()
-        assert set(config["options"]) <= set(config["schema"])
+        assert set(config.get("options", {})) <= set(config["schema"])
 
     def test_config__every_schema_entry_is_optional_or_has_a_default(self) -> None:
         # The Supervisor rejects options that miss a required entry. `?` marks an optional one (for
@@ -54,7 +54,7 @@ class TestConfigYaml__Parsed:
             for key, kind in config["schema"].items()
             if not (kind[0] if isinstance(kind, list) else kind).endswith("?")
         ]
-        assert [key for key in required if key not in config["options"]] == []
+        assert [key for key in required if key not in config.get("options", {})] == []
 
 
 class TestRepositoryYaml__Parsed:
