@@ -38,6 +38,7 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
     scheme === 'dark',
   );
   await expect(page.getByText('Your library is empty.')).toBeVisible();
+  await expect(page).toHaveTitle('0 novels · novelhog');
   // The theme really applies: the page background is light or dark, not just the media query.
   const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   const [red = 0, green = 0, blue = 0] = (background.match(/\d+/g) ?? []).map(Number);
