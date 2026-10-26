@@ -21,12 +21,14 @@ class FakeFlareSolverr:
     `pages` maps a requested URL to the HTML FlareSolverr would return for it. A URL missing from
     the map gets an error response, like a failed navigation. Every command received is kept in
     `commands` (the decoded JSON bodies) so tests can inspect what the scraper sent. `solution`
-    holds extra solution fields sent with every page (`cookies`, `userAgent`).
+    holds extra solution fields sent with every page (`cookies`, `userAgent`). `sessions` holds the
+    open sessions; a `request.get` naming one that is not open fails like FlareSolverr's does.
     """
 
     def __init__(self, pages: dict[str, str]) -> None:
         self.pages = pages
         self.solution: dict[str, Any] = {}
+        self.sessions: set[str] = set()
         self.commands: list[dict[str, Any]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
@@ -38,6 +40,10 @@ class FakeFlareSolverr:
     def url(self) -> str:
         """Base URL of the server, e.g. `http://127.0.0.1:41234`."""
         return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def commands_named(self, name: str) -> list[dict[str, Any]]:
+        """Every command received with `cmd` equal to `name`, in order."""
+        return [c for c in self.commands if c.get("cmd") == name]
 
     @property
     def requested_urls(self) -> list[str]:
@@ -95,10 +101,17 @@ class FakeFlareSolverr:
 
     def _respond(self, command: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         match command.get("cmd"):
-            case "sessions.create" | "sessions.destroy":
-                return 200, {"status": "ok", "message": "", "session": command.get("session")}
+            case "sessions.create":
+                self.sessions.add(command["session"])
+                return 200, {"status": "ok", "message": "", "session": command["session"]}
+            case "sessions.destroy":
+                self.sessions.discard(command["session"])
+                return 200, {"status": "ok", "message": "The session has been removed."}
             case "request.get":
                 url = command["url"]
+                session = command.get("session")
+                if session is not None and session not in self.sessions:
+                    return 500, {"status": "error", "message": "This session does not exist."}
                 if url not in self.pages:
                     return 500, {"status": "error", "message": f"Error solving {url}"}
                 solution = {"url": url, "status": 200, "response": self.pages[url], **self.solution}

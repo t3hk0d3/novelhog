@@ -11,12 +11,11 @@ from pathlib import Path
 
 import pytest
 import requests
-from structlog.testing import capture_logs
 
 from novelhog import config, net
 from novelhog.config import Settings
 from novelhog.domain.hosts import FailureKind
-from novelhog.scraper_adapter import ScraperAdapter, guard
+from novelhog.scraper_adapter import ScraperAdapter
 from novelhog.scraper_adapter.errors import (
     HostFailureError,
     InfrastructureError,
@@ -474,8 +473,18 @@ def challenge(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
 
+SOLVER_CLEARANCE = {
+    "userAgent": "Solver UA",
+    "cookies": [{"name": "cf_clearance", "value": "token", "domain": "127.0.0.1"}],
+}
+CHAPTER_HTML = (
+    '<html><body><ul><li class="active">One</li></ul>'
+    '<div class="reading-content"><p>Hello there.</p></div></body></html>'
+)
+
+
 class TestScraperAdapter__OnCloudflareChallenge:
-    def test_sync_toc__retries_the_request_through_flaresolverr_and_returns_its_result(
+    def test_sync_toc__returns_the_page_flaresolverr_loads_for_the_challenged_url(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr, challenge: str
     ) -> None:
         with FakeSite({}, challenge=challenge) as site:
@@ -487,49 +496,50 @@ class TestScraperAdapter__OnCloudflareChallenge:
         assert result.urls == [f"{site.url}/c/1", f"{site.url}/c/2"]
         assert flaresolverr.requested_urls == [f"{site.url}/toc"]
 
-    def test_sync_toc__routes_later_requests_for_the_host_through_flaresolverr(
-        self, tmp_path: Path, flaresolverr: FakeFlareSolverr, challenge: str
+    def test_sync_toc__later_requests_go_direct_with_the_clearance(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
-        with FakeSite({}, challenge=challenge) as site:
+        cleared_by = ("token", "Solver UA")
+        with FakeSite({"/c/1": CHAPTER_HTML}, challenge="header", cleared_by=cleared_by) as site:
+            site.pages["/toc"] = direct_toc(site.url)
             flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
-            flaresolverr.pages[f"{site.url}/c/1"] = (
-                '<html><body><ul><li class="active">One</li></ul>'
-                '<div class="reading-content"><p>Hello there.</p></div></body></html>'
-            )
+            flaresolverr.solution = SOLVER_CLEARANCE
             adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
             adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
             adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
             chapter = adapter.fetch_chapter(
                 "NV000000000001", DIRECT_HOST, f"{site.url}/toc", f"{site.url}/c/1"
             )
-            assert site.requests == ["/toc"]
-        assert flaresolverr.requested_urls == [f"{site.url}/toc"] * 2 + [f"{site.url}/c/1"]
+            assert site.requests == ["/toc", "/toc", "/c/1"]
+            assert [h.get("User-Agent") for h in site.headers[1:]] == ["Solver UA"] * 2
+        assert flaresolverr.requested_urls == [f"{site.url}/toc"]
         assert chapter.body_html == "<p>Hello there.</p>"
 
-    def test_sync_toc__logs_flaresolverr_fallback_enabled_once_with_the_host(
+    def test_sync_toc__a_refused_clearance_is_solved_again(
         self, tmp_path: Path, flaresolverr: FakeFlareSolverr
     ) -> None:
-        with FakeSite({}, challenge="header") as site, capture_logs() as logs:
+        with FakeSite({}, challenge="header", cleared_by=("fresh", "Solver UA")) as site:
+            site.pages["/toc"] = direct_toc(site.url)
+            flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
+            flaresolverr.solution = SOLVER_CLEARANCE  # "token", which the site no longer takes
+            adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
+            assert site.requests == ["/toc", "/toc"]
+        assert flaresolverr.requested_urls == [f"{site.url}/toc"] * 2
+
+    def test_sync_toc__reuses_one_flaresolverr_session(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        with FakeSite({}, challenge="header") as site:
             flaresolverr.pages[f"{site.url}/toc"] = direct_toc(site.url)
             adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
             adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
             adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
-        events = [e for e in logs if e["event"] == "flaresolverr_fallback_enabled"]
-        assert [e["host"] for e in events] == ["127.0.0.1"]
+        assert len(flaresolverr.commands_named("sessions.create")) == 1
+        assert flaresolverr.commands_named("sessions.destroy") == []
 
-    def test_sync_toc__failed_flaresolverr_retry_raises_site_error_and_keeps_requesting_directly(
-        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
-    ) -> None:
-        with FakeSite({}, challenge="header") as site:
-            adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
-            with pytest.raises(SiteError):
-                adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
-            assert guard.fallback_hosts() == frozenset()
-            with pytest.raises(SiteError):
-                adapter.sync_toc("NV000000000001", DIRECT_HOST, f"{site.url}/toc")
-            assert site.requests == ["/toc", "/toc"]
-
-    def test_sync_toc__unreachable_flaresolverr_retry_raises_infrastructure_error(
+    def test_sync_toc__unreachable_flaresolverr_raises_infrastructure_error(
         self, tmp_path: Path, dead_url: str
     ) -> None:
         with FakeSite({}, challenge="header") as site:
@@ -538,7 +548,20 @@ class TestScraperAdapter__OnCloudflareChallenge:
                     "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
                 )
         assert not isinstance(raised.value, SiteUnreachable)
-        assert guard.fallback_hosts() == frozenset()
+
+
+class TestScraperAdapter__OnForcedHost:
+    def test_sync_toc__pages_share_the_workers_flaresolverr_session(
+        self, tmp_path: Path, flaresolverr: FakeFlareSolverr
+    ) -> None:
+        flaresolverr.pages.update(hostednovel_pages())
+        adapter = ScraperAdapter(make_settings(tmp_path, flaresolverr.url))
+        adapter.sync_toc("NV000000000001", HN_HOST, HN_TOC)
+        adapter.sync_toc("NV000000000001", HN_HOST, HN_TOC)
+        sessions = {c["session"] for c in flaresolverr.commands_named("request.get")}
+        assert len(flaresolverr.commands_named("sessions.create")) == 1
+        assert len(sessions) == 1
+        assert flaresolverr.commands_named("sessions.destroy") == []
 
 
 NOT_CHALLENGES = {
@@ -563,7 +586,6 @@ class TestScraperAdapter__OnResponseThatIsNotAChallenge:
                 "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
             )
         assert flaresolverr.commands == []
-        assert guard.fallback_hosts() == frozenset()
 
 
 class TestScraperAdapter__OnConnectionProblems:
@@ -688,6 +710,7 @@ class TestScraperAdapter__OnAnUnsolvedChallenge:
                 ScraperAdapter(make_settings(tmp_path, flaresolverr.url)).sync_toc(
                     "NV000000000001", DIRECT_HOST, f"{site.url}/toc"
                 )
+            assert site.requests == ["/toc"]
         assert raised.value.kind is FailureKind.CHALLENGED
 
 

@@ -1,9 +1,9 @@
 """Image fetcher for covers and the HTML to Markdown converter (spec section 8.2).
 
-A direct request that meets a Cloudflare challenge has FlareSolverr solve the challenged URL and
-is sent once more with the cookies and user agent of that clearance. The clearance is cached
-(`ClearanceCache`), so the site's next images go straight through with it; one the site challenges
-anyway is forgotten.
+A direct request that meets a Cloudflare challenge has FlareSolverr load the challenged URL and
+is sent once more with the cookies and user agent of the clearance it earned. The clearance is
+cached (`FlareSolverr.clearances`), so the site's next images and pages go straight through with
+it; one the site challenges anyway is forgotten.
 """
 
 import io
@@ -14,7 +14,8 @@ import requests
 from urllib3.exceptions import HTTPError
 
 from novelhog import images, log
-from novelhog.clearance import Clearance, ClearanceCache
+from novelhog.clearance import Clearance
+from novelhog.flaresolverr import FlareSolverr, FlareSolverrFailed, FlareSolverrUnavailable
 from novelhog.images import FetchedImage
 from novelhog.net import Refused
 
@@ -54,14 +55,14 @@ class ImageFetcher:
         max_pixels: int,
         max_dimension: int,
         deadline: float = DOWNLOAD_DEADLINE,
-        clearances: ClearanceCache | None = None,
+        flaresolverr: FlareSolverr | None = None,
     ) -> None:
         self._session = session
         self._max_bytes = max_bytes
         self._max_pixels = max_pixels
         self._max_dimension = max_dimension
         self._deadline = deadline
-        self._clearances = clearances
+        self._flaresolverr = flaresolverr
 
     def fetch(self, url: str) -> FetchedImage | None:
         """Return the image, or None when it is unavailable, refused, oversized or not allowed."""
@@ -82,24 +83,36 @@ class ImageFetcher:
 
     def _download(self, url: str) -> bytes | None:
         """Download directly; on a Cloudflare challenge solve it and try once more."""
-        cache = self._clearances
-        clearance = None if cache is None else cache.for_url(url)
+        solver = self._flaresolverr
+        clearance = None if solver is None else solver.clearances.for_url(url)
         result = self._attempt(url, clearance)
         if not isinstance(result, _Challenged):
             return result
-        if cache is None:
+        if solver is None:
             return None
         if clearance is not None:
-            cache.forget(clearance)
-        clearance = cache.solve(result.url)
+            solver.clearances.forget(clearance)
+        clearance = self._solve(solver, result.url)
         if clearance is None:
             return None
         result = self._attempt(url, clearance)
         if isinstance(result, _Challenged):
-            cache.forget(clearance)
+            solver.clearances.forget(clearance)
             log.get().warning("image_clearance_refused", domain=clearance.domain, url=url)
             return None
         return result
+
+    @staticmethod
+    def _solve(solver: FlareSolverr, url: str) -> Clearance | None:
+        """The clearance FlareSolverr earns loading `url`; None (logged) when it earns none."""
+        try:
+            clearance = solver.get(url).clearance
+        except (FlareSolverrUnavailable, FlareSolverrFailed) as error:
+            log.get().warning("image_clearance_failed", url=url, error=str(error))
+            return None
+        if clearance is None:
+            log.get().warning("image_clearance_failed", url=url, error="no cf_clearance cookie")
+        return clearance
 
     def _attempt(self, url: str, clearance: Clearance | None) -> bytes | _Challenged | None:
         """One direct download, sending `clearance` when given; the deadline is per attempt."""

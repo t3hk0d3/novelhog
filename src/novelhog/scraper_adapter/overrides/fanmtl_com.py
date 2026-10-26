@@ -1,7 +1,6 @@
 """fanmtl.com overrides: the next-page link is now written `&gt;` (2.13.1's rule only matches `>`).
 
-The site is behind Cloudflare, so its requests are always forced through FlareSolverr
-(`overrides.FORCE_FLARESOLVERR_HOSTS`).
+The site is behind Cloudflare: its pages go direct with the worker's clearance (`guard`).
 """
 
 import re

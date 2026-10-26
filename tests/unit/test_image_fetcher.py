@@ -15,7 +15,7 @@ from PIL import Image
 from structlog.testing import capture_logs
 
 from novelhog import images, net
-from novelhog.clearance import ClearanceCache
+from novelhog.flaresolverr import FlareSolverr
 from novelhog.image_fetcher import USER_AGENT, ImageFetcher
 from tests.fixtures.fake_flaresolverr import FakeFlareSolverr
 from tests.fixtures.images.helpers import Route, Server, make_animated, make_image
@@ -286,10 +286,10 @@ class TestImageFetcherFetch__TransportErrors:
 CHALLENGE = (403, {"cf-mitigated": "challenge", "Content-Type": "text/html"}, b"<html>")
 
 
-def cleared_fetcher(cache: ClearanceCache) -> ImageFetcher:
+def cleared_fetcher(solver: FlareSolverr) -> ImageFetcher:
     session = net.GuardedSession(allow_private=True, resolver=lambda h: ["127.0.0.1"])
     return ImageFetcher(
-        session, max_bytes=10**6, max_pixels=10**6, max_dimension=0, clearances=cache
+        session, max_bytes=10**6, max_pixels=10**6, max_dimension=0, flaresolverr=solver
     )
 
 
@@ -324,7 +324,7 @@ class TestImageFetcherFetch__Challenged:
         url = http_server.url("/a.png", host="site.test")
         flaresolverr.pages[url] = "<html><img></html>"
         http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
-        result = cleared_fetcher(ClearanceCache(flaresolverr.url)).fetch(url)
+        result = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1")).fetch(url)
         assert result is not None
         assert result.mime == "image/png"
         assert flaresolverr.requested_urls == [url]
@@ -338,7 +338,7 @@ class TestImageFetcherFetch__Challenged:
         flaresolverr.pages[first] = "<html><img></html>"
         http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
         http_server.routes["/b.png"] = cloudflare(make_image("PNG"))
-        fetcher = cleared_fetcher(ClearanceCache(flaresolverr.url))
+        fetcher = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1"))
         fetcher.fetch(first)
         assert fetcher.fetch(http_server.url("/b.png", host="cdn.site.test")) is not None
         assert flaresolverr.requested_urls == [first]
@@ -347,22 +347,22 @@ class TestImageFetcherFetch__Challenged:
     def test_fetch__other_site_gets_neither_cookie_nor_solver_user_agent(
         self, http_server: Server, flaresolverr: FakeFlareSolverr
     ) -> None:
-        cache = ClearanceCache(flaresolverr.url)
-        cache.record("Solver UA", solver_clearance()["cookies"])
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        solver.clearances.record("Solver UA", solver_clearance()["cookies"])
         http_server.routes["/a.png"] = (200, {}, make_image("PNG"))
-        cleared_fetcher(cache).fetch(http_server.url("/a.png", host="other.test"))
+        cleared_fetcher(solver).fetch(http_server.url("/a.png", host="other.test"))
         assert "Cookie" not in http_server.headers[0]
         assert http_server.headers[0]["User-Agent"] == USER_AGENT
 
     def test_fetch__redirect_to_another_site_drops_the_cookie(
         self, http_server: Server, flaresolverr: FakeFlareSolverr
     ) -> None:
-        cache = ClearanceCache(flaresolverr.url)
-        cache.record("Solver UA", solver_clearance()["cookies"])
+        solver = FlareSolverr(flaresolverr.url, "w1")
+        solver.clearances.record("Solver UA", solver_clearance()["cookies"])
         target = http_server.url("/b.png", host="other.test")
         http_server.routes["/a.png"] = (302, {"Location": target}, b"")
         http_server.routes["/b.png"] = (200, {}, make_image("PNG"))
-        assert cleared_fetcher(cache).fetch(http_server.url("/a.png", host="site.test"))
+        assert cleared_fetcher(solver).fetch(http_server.url("/a.png", host="site.test"))
         assert http_server.headers[0]["Cookie"] == "cf_clearance=token"
         assert "Cookie" not in http_server.headers[1]
 
@@ -371,7 +371,7 @@ class TestImageFetcherFetch__Challenged:
     ) -> None:
         url = http_server.url("/a.png", host="site.test")
         http_server.routes["/a.png"] = CHALLENGE
-        assert cleared_fetcher(ClearanceCache(flaresolverr.url)).fetch(url) is None
+        assert cleared_fetcher(FlareSolverr(flaresolverr.url, "w1")).fetch(url) is None
         assert len(http_server.hits) == 1
 
     def test_fetch__clearance_still_challenged_is_forgotten(
@@ -380,11 +380,11 @@ class TestImageFetcherFetch__Challenged:
         url = http_server.url("/a.png", host="site.test")
         flaresolverr.pages[url] = "<html><img></html>"
         http_server.routes["/a.png"] = CHALLENGE
-        cache = ClearanceCache(flaresolverr.url)
+        solver = FlareSolverr(flaresolverr.url, "w1")
         with capture_logs() as logs:
-            assert cleared_fetcher(cache).fetch(url) is None
+            assert cleared_fetcher(solver).fetch(url) is None
         assert len(http_server.hits) == 2
-        assert cache.for_url(url) is None
+        assert solver.clearances.for_url(url) is None
         assert "image_clearance_refused" in [e["event"] for e in logs]
 
     def test_fetch__stale_cached_clearance_is_solved_again(
@@ -392,12 +392,12 @@ class TestImageFetcherFetch__Challenged:
     ) -> None:
         url = http_server.url("/a.png", host="site.test")
         flaresolverr.pages[url] = "<html><img></html>"
-        cache = ClearanceCache(flaresolverr.url)
+        solver = FlareSolverr(flaresolverr.url, "w1")
         stale = solver_clearance()
         stale["cookies"] = [{**stale["cookies"][0], "value": "stale"}]
-        cache.record("Solver UA", stale["cookies"])
+        solver.clearances.record("Solver UA", stale["cookies"])
         http_server.routes["/a.png"] = cloudflare(make_image("PNG"))
-        assert cleared_fetcher(cache).fetch(url) is not None
+        assert cleared_fetcher(solver).fetch(url) is not None
         assert flaresolverr.requested_urls == [url]
         assert http_server.headers[0]["Cookie"] == "cf_clearance=stale"
 
@@ -405,7 +405,7 @@ class TestImageFetcherFetch__Challenged:
         self, http_server: Server, flaresolverr: FakeFlareSolverr
     ) -> None:
         http_server.routes["/a.png"] = (403, {}, b"")
-        fetcher = cleared_fetcher(ClearanceCache(flaresolverr.url))
+        fetcher = cleared_fetcher(FlareSolverr(flaresolverr.url, "w1"))
         assert fetcher.fetch(http_server.url("/a.png", host="site.test")) is None
         assert flaresolverr.requested_urls == []
 

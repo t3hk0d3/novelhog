@@ -14,6 +14,7 @@ from novelhog import log, net
 from novelhog.config import Settings
 from novelhog.domain.errors import ValidationFailed
 from novelhog.domain.urls import UrlTooLong, normalize_url
+from novelhog.flaresolverr import FlareSolverr
 from novelhog.scraper_adapter.errors import (
     InfrastructureError,
     SiteChallenged,
@@ -31,7 +32,6 @@ from novelhog.scraper_adapter.guard import (
     outbound_guard,
     page_budget,
 )
-from novelhog.scraper_adapter.overrides import FORCE_FLARESOLVERR_HOSTS
 from novelhog.scraper_adapter.scraper import (
     Chapter,
     FlaresolverrConnectionError,
@@ -153,7 +153,7 @@ def _translated_errors(host: str) -> Iterator[None]:
     except ScraperError as exc:
         raise _classify(exc, host) from exc
     except requests.exceptions.RequestException as exc:
-        # The scraper lets only its FlareSolverr session calls escape unwrapped.
+        # Requests are wrapped in scraper errors; anything escaping is not the site's fault.
         raise InfrastructureError(str(exc)) from exc
 
 
@@ -161,10 +161,16 @@ class ScraperAdapter:
     """Syncs tables of contents and fetches chapters through the scraper's `Novel` API."""
 
     def __init__(
-        self, settings: Settings, resolver: Callable[[str], list[str]] = net.default_resolver
+        self,
+        settings: Settings,
+        resolver: Callable[[str], list[str]] = net.default_resolver,
+        flaresolverr: FlareSolverr | None = None,
     ) -> None:
         self._settings = settings
         self._resolver = resolver
+        self._flaresolverr = flaresolverr or FlareSolverr(
+            settings.flaresolverr_url, settings.worker_id
+        )
         take_over_scraper_logging()
 
     def supported_hosts(self) -> list[str]:
@@ -180,7 +186,7 @@ class ScraperAdapter:
             outbound_guard(
                 allow_private=self._settings.allow_private_fetch, resolver=self._resolver
             ),
-            flaresolverr_fallback(self._settings.flaresolverr_url),
+            flaresolverr_fallback(self._flaresolverr),
         ):
             novel = self._open(novel_id, host, toc_url)
             with page_budget(self._settings.max_toc_pages):
@@ -206,7 +212,7 @@ class ScraperAdapter:
             outbound_guard(
                 allow_private=self._settings.allow_private_fetch, resolver=self._resolver
             ),
-            flaresolverr_fallback(self._settings.flaresolverr_url),
+            flaresolverr_fallback(self._flaresolverr),
         ):
             novel = self._open(novel_id, host, toc_url)
             chapter = Chapter(chapter_url=url)
@@ -245,10 +251,7 @@ class ScraperAdapter:
             title=novel_id, scraper_config=config, toc_main_url=toc_url, host=host
         ).save_novel()
         novel = Novel.load(title=novel_id, scraper_config=config)
-        novel.set_scraper_behavior(
-            title_in_content="NO",
-            force_flaresolver=True if host in FORCE_FLARESOLVERR_HOSTS else None,
-        )
+        novel.set_scraper_behavior(title_in_content="NO")
         request_config = dict(config.config_options["request_config"])
         request_config["request_retries"] = max(1, request_config["request_retries"])
         config.config_options["request_config"] = request_config

@@ -24,16 +24,6 @@ def _reset_structlog() -> Iterator[None]:
     structlog.contextvars.clear_contextvars()
 
 
-@pytest.fixture(autouse=True)
-def _reset_flaresolverr_fallback() -> Iterator[None]:
-    """The Cloudflare fallback is remembered per process; every test starts without it."""
-    from novelhog.scraper_adapter import guard
-
-    guard.reset_fallback()
-    yield
-    guard.reset_fallback()
-
-
 class FakeClock:
     """A controllable clock: call it for the current time, `advance` to move it forward."""
 
