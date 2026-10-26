@@ -206,15 +206,35 @@ class TestNovelRefreshFinish__Succeeded:
         assert row.last_refreshed_at == clock()
         assert [c.position for c in chapter_rows(repo, novel_id)] == [1, 2]
 
-    def test_finish__keeps_an_existing_title_and_cover(self, repo: Repo, novel_id: str) -> None:
+    def test_finish__replaces_a_detected_title_and_the_cover(
+        self, repo: Repo, novel_id: str
+    ) -> None:
         with db.write(repo.engine) as conn:
-            conn.execute(update(novels).values(title="Mine", cover_key="covers/x/old.png"))
+            conn.execute(update(novels).values(title="Old", cover_key="covers/x/old.png"))
         sync = Sync(repo)
 
         sync.finish(success([u(1)], cover_key="covers/x/new.png"))
 
         row = novel_of(repo, novel_id)
-        assert (row.title, row.cover_key) == ("Mine", "covers/x/new.png")
+        assert (row.title, row.cover_key) == ("Lantern", "covers/x/new.png")
+
+    def test_finish__keeps_a_locked_title(self, repo: Repo, novel_id: str) -> None:
+        with db.write(repo.engine) as conn:
+            conn.execute(update(novels).values(title="Mine", title_locked=True))
+
+        Sync(repo).finish(success([u(1)]))
+
+        assert novel_of(repo, novel_id).title == "Mine"
+
+    def test_finish__keeps_a_detected_title_when_none_found(
+        self, repo: Repo, novel_id: str
+    ) -> None:
+        with db.write(repo.engine) as conn:
+            conn.execute(update(novels).values(title="Old"))
+
+        Sync(repo).finish(success([u(1)], title=None))
+
+        assert novel_of(repo, novel_id).title == "Old"
 
     def test_finish__keeps_title_and_language_when_none_found(
         self, repo: Repo, novel_id: str

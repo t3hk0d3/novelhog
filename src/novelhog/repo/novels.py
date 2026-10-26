@@ -264,6 +264,7 @@ class Novels:
                 values["seen_at"] = now
             if cleaned is not None:
                 values["title"] = cleaned
+                values["title_locked"] = True
             if not values:
                 return self._snapshot(conn, novel_id, now)
             conn.execute(

@@ -68,6 +68,8 @@ novels = Table(
     Column("seen_at", UTCDateTime),
     Column("created_at", UTCDateTime, nullable=False),
     Column("updated_at", UTCDateTime, nullable=False),
+    # Renamed through the API; a sync replaces the title only while this is false.
+    Column("title_locked", Boolean, nullable=False, server_default=false()),
     _id_check("ck_novels_id", "NV"),
 )
 
