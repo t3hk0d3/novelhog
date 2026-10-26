@@ -157,3 +157,8 @@ uv run scripts/check.sh          # all gates
 scripts/test_pg.sh               # database tests on PostgreSQL 16
 NOVELHOG_CONTAINER_TESTS=1 uv run pytest tests/container   # builds the image; needs Docker
 ```
+
+`docker compose up --build --watch` rebuilds and restarts a container when its sources change: a change under
+`web/` or to `docker/Caddyfile` only touches `novelhog-web`; a change under `src/`, to `pyproject.toml`, `uv.lock` or
+`docker/Dockerfile` touches both `novelhog-web` and `novelhog-worker`. Migrations are not re-run: after adding one,
+run `docker compose run --rm novelhog-migrate`.
