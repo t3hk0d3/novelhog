@@ -1,4 +1,4 @@
-# Overlay for the container smoke tests: no FlareSolverr, loopback-only port, no restarts.
+# Overlay of compose.dev.yaml for the container smoke tests: no FlareSolverr, loopback-only port, no restarts.
 services:
   novelhog-web:
     restart: "no"

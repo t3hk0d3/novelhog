@@ -52,8 +52,9 @@ src/novelhog/worker/tasks/      (per-kind processors: the network half of a task
 web/src/{routes,components,api,hooks,theme}   web/public/{sw.js,manifest.webmanifest,icons}
 tests/{unit,integration/{repo,worker,notifications},api,container,fixtures}
 tools/             (repository tooling, e.g. import-linter contract types)
-docker/{Dockerfile,Caddyfile}   compose.yaml   compose.test.yaml   STYLEGUIDE.md
-docs/superpowers/specs/
+docker/{Dockerfile,Caddyfile}   compose.yaml (users)   compose.dev.yaml   compose.test.yaml   STYLEGUIDE.md
+docs/{*.md,assets,logo}   mkdocs.yml   (the published docs site)
+docs/superpowers/{specs,plans}/   (internal; not published)
 ```
 
 ## Tests
