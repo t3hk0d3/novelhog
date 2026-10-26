@@ -42,7 +42,7 @@ from novelhog.domain.urls import normalize_url
 from novelhog.repo import db, events
 from novelhog.repo.context import RepoContext
 from novelhog.repo.novels import lock_novel
-from novelhog.repo.schema import chapters, novels, tasks
+from novelhog.repo.schema import chapter_contents, chapters, novels, tasks
 from novelhog.repo.schema import events as events_table
 
 # Imported after `novels`, which `tasks` itself imports.
@@ -362,6 +362,21 @@ def apply_toc(
     )
 
 
+@dataclass(frozen=True)
+class ChapterText:
+    """A chapter to read: the chapter, its stored Markdown and the ids of the chapters around it.
+
+    `previous_id` and `next_id` are the chapters at the positions before and after it, in any
+    state; None at either end of the table of contents.
+    """
+
+    chapter: ChapterView
+    markdown: str
+    fetched_at: datetime
+    previous_id: str | None
+    next_id: str | None
+
+
 class Chapters:
     """Reads chapters and applies client state patches (the worker's writes live elsewhere)."""
 
@@ -410,6 +425,48 @@ class Chapters:
             if row is None or row.position is None:
                 raise NotFound("chapter", chapter_id)
             return _views(conn, [row])[0]
+
+    def text(self, novel_id: str, chapter_id: str) -> ChapterText:
+        """Return the chapter of the novel with its stored Markdown, in one read.
+
+        Raise `NotFound` for an unknown novel (`novel`), a chapter that is not the novel's or was
+        removed from its table of contents (`chapter`), or one with no stored content
+        (`chapter_content`). A chapter being downloaded again keeps its earlier content.
+        """
+        if not ids.is_valid(novel_id, "NV"):
+            raise NotFound("novel", novel_id)
+        if not ids.is_valid(chapter_id, "CH"):
+            raise NotFound("chapter", chapter_id)
+        with db.read(self._engine) as conn:
+            if conn.execute(select(novels.c.id).where(novels.c.id == novel_id)).first() is None:
+                raise NotFound("novel", novel_id)
+            row = conn.execute(
+                _select_chapters().where(chapters.c.id == chapter_id, positioned(novel_id))
+            ).first()
+            if row is None:
+                raise NotFound("chapter", chapter_id)
+            stored = conn.execute(
+                select(chapter_contents.c.markdown, chapter_contents.c.fetched_at).where(
+                    chapter_contents.c.chapter_id == chapter_id
+                )
+            ).first()
+            if stored is None:
+                raise NotFound("chapter_content", chapter_id)
+            previous_id = conn.execute(
+                select(chapters.c.id)
+                .where(positioned(novel_id), chapters.c.position < row.position)
+                .order_by(chapters.c.position.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            next_id = conn.execute(
+                select(chapters.c.id)
+                .where(positioned(novel_id), chapters.c.position > row.position)
+                .order_by(chapters.c.position)
+                .limit(1)
+            ).scalar_one_or_none()
+            return ChapterText(
+                _views(conn, [row])[0], stored.markdown, stored.fetched_at, previous_id, next_id
+            )
 
     def headings(self, chapter_ids: Sequence[str]) -> dict[str, tuple[int, str | None]]:
         """Return `{id: (position, title)}` in one read for those chapters that have a position.

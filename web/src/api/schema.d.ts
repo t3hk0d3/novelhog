@@ -120,6 +120,26 @@ export interface paths {
         patch: operations["patch_chapters"];
         trace?: never;
     };
+    "/api/v1/novels/{novel_id}/chapters/{chapter_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Chapter Content
+         * @description Return a chapter's stored Markdown with the ids of the chapters before and after it.
+         */
+        get: operations["get_chapter_content"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/novels/{novel_id}/exports": {
         parameters: {
             query?: never;
@@ -334,6 +354,24 @@ export interface components {
             updated_at: string;
             /** Url */
             url: string;
+        };
+        /**
+         * ChapterContent
+         * @description `GET /api/v1/novels/{id}/chapters/{chapter_id}/content`: a downloaded chapter to read.
+         *
+         *     `markdown` is the stored chapter text, images inlined as data URIs; `previous_id` and `next_id`
+         *     are the chapters at the positions around it (any state), null at either end.
+         */
+        ChapterContent: {
+            chapter: components["schemas"]["Chapter"];
+            /** Fetched At */
+            fetched_at: string;
+            /** Markdown */
+            markdown: string;
+            /** Next Id */
+            next_id: string | null;
+            /** Previous Id */
+            previous_id: string | null;
         };
         /**
          * ChapterPage
@@ -1048,6 +1086,47 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_chapter_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                novel_id: string;
+                chapter_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChapterContent"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;

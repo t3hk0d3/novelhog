@@ -129,6 +129,20 @@ class Chapter(BaseModel):
     updated_at: str
 
 
+class ChapterContent(BaseModel):
+    """`GET /api/v1/novels/{id}/chapters/{chapter_id}/content`: a downloaded chapter to read.
+
+    `markdown` is the stored chapter text, images inlined as data URIs; `previous_id` and `next_id`
+    are the chapters at the positions around it (any state), null at either end.
+    """
+
+    chapter: Chapter
+    markdown: str
+    fetched_at: str
+    previous_id: str | None
+    next_id: str | None
+
+
 class ChapterPage(BaseModel):
     """`GET /api/v1/novels/{id}/chapters`: one page and the total matching the filter."""
 
