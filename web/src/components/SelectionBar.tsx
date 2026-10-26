@@ -15,7 +15,7 @@ interface Props {
   selected: Chapter[];
   /** Leaves select mode (called after a bulk action completes). */
   onDone: () => void;
-  /** Export EPUB…: the selection's first and last position; the export dialog is the owner's. */
+  /** Export…: the selection's first and last position; the export dialog is the owner's. */
   onExport: (from: number, to: number) => void;
 }
 
@@ -44,7 +44,7 @@ const primary =
 
 /**
  * Action bar of select mode (spec section 10): the selection's range and state summary with
- * Download, Cancel queued, Retry errors and Export EPUB… (phone: Download, Retry, More…, with the
+ * Download, Cancel queued, Retry errors and Export… (phone: Download, Retry, More…, with the
  * rest in a bottom sheet). Bulk actions are one `PATCH /chapters`; the live events update the
  * chapter cache, so nothing is written optimistically.
  */
@@ -150,7 +150,7 @@ export function SelectionBar({ novelId, selected, onDone, onExport }: Props) {
   );
   const exportButton = (
     <button type="button" disabled={none || busy} onClick={exportEpub} className={button}>
-      Export EPUB…
+      Export…
     </button>
   );
 

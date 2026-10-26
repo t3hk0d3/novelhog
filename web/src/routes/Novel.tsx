@@ -97,9 +97,17 @@ function NovelPage({ novel }: { novel: NovelData }) {
       { replace, state: chapterId === null ? null : { details: pushedByUs || !replace } },
     );
   };
-  // The first and last position Export EPUB… (action bar or header menu) asked for; the export
+  // The first and last position Export… (action bar or header) asked for; the export
   // dialog is open while it is set.
   const [exportRange, setExportRange] = useState<{ from: number; to: number } | null>(null);
+  // The exports fold: open when the page is reached through `#exports` and after an export is
+  // created, so what the user just asked for is in view.
+  const [exportsOpen, setExportsOpen] = useState(location.hash === '#exports');
+  const [seenHash, setSeenHash] = useState(location.hash);
+  if (location.hash !== seenHash) {
+    setSeenHash(location.hash);
+    if (location.hash === '#exports') setExportsOpen(true);
+  }
 
   useEffect(() => {
     if (seenSent.current) return;
@@ -134,7 +142,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
           {errorMessage(chapters.error)}
         </p>
       )}
-      <ExportsPanel novelId={novel.id} />
+      <ExportsPanel novelId={novel.id} open={exportsOpen} onToggle={setExportsOpen} />
       <OverviewBar
         chapters={all}
         ranges={view.ranges}
@@ -213,6 +221,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
           }}
           onSubmitted={() => {
             setExportRange(null);
+            setExportsOpen(true);
             selection.exit();
           }}
         />
