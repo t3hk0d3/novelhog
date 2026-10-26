@@ -14,6 +14,7 @@ vi.mock('../hooks/usePush', () => ({
 }));
 
 beforeEach(() => {
+  document.title = 'novelhog';
   localStorage.clear();
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
@@ -49,6 +50,39 @@ describe('Library (rendered through App at /)', () => {
     const fetchMock = respondWith([]);
     mountApp(fetchMock);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe('the browser tab title', () => {
+    it('is just the app name until the novels have loaded', () => {
+      mountApp(respondWith([makeNovel()]));
+      expect(document.title).toBe('novelhog');
+    });
+
+    it('counts the novels: "3 novels · novelhog"', async () => {
+      mountApp(
+        respondWith([makeNovel({ id: 'NV1' }), makeNovel({ id: 'NV2' }), makeNovel({ id: 'NV3' })]),
+      );
+      ready();
+      await waitFor(() => {
+        expect(document.title).toBe('3 novels · novelhog');
+      });
+    });
+
+    it('says "1 novel" for one', async () => {
+      mountApp(respondWith([makeNovel()]));
+      ready();
+      await waitFor(() => {
+        expect(document.title).toBe('1 novel · novelhog');
+      });
+    });
+
+    it('says "0 novels" for an empty library', async () => {
+      mountApp(respondWith([]));
+      ready();
+      await waitFor(() => {
+        expect(document.title).toBe('0 novels · novelhog');
+      });
+    });
   });
 
   it('lists novel cards in the order the API returns them (newest first)', async () => {

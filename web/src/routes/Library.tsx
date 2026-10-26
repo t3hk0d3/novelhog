@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { ConnectionStatus } from '../components/ConnectionStatus';
 import { NovelCard } from '../components/NovelCard';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useLiveReady } from '../hooks/useLiveEvents';
 import { errorMessage } from '../lib/errors';
 
@@ -12,6 +13,12 @@ export function Library({ onAddNovel }: { onAddNovel: () => void }) {
     queryFn: api.listNovels,
     enabled: useLiveReady(),
   });
+
+  // "3 novels · novelhog" once the list is in; the plain app name before.
+  const count = novels.data?.length;
+  useDocumentTitle(
+    count === undefined ? null : `${String(count)} ${count === 1 ? 'novel' : 'novels'}`,
+  );
 
   return (
     <section>

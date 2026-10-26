@@ -1572,7 +1572,9 @@ manifest makes the app installable.
    edited later on the novel page (`PATCH {title}`).
 3. **Novel (`/novels/:id`)**: sends `PATCH {seen: true}` on open.
    The browser tab's title is the novel's title (its host while it has none)
-   followed by ` · novelhog`, and follows a rename; the reader's is the chapter's.
+   followed by ` · novelhog`, and follows a rename; the reader's is the chapter's;
+   the library's is the count ("3 novels · novelhog"), plain "novelhog" until the
+   list has loaded.
    - Header: cover, title, host, TOC link, follow toggle, Sync button,
      "checked 2 h ago · next in 4 h", counters, and a "More" menu with
      **Delete novel…** (confirmation dialog naming the novel and its downloaded
