@@ -1,0 +1,25 @@
+name: novelhog
+version: "0.1.0"
+slug: novelhog
+description: Self-hosted web-novel downloader and reader, with EPUB export
+url: https://github.com/t3hk0d3/novelhog
+arch:
+  - amd64
+  - aarch64
+# The image is pulled at the tag `version`: bump it together with pyproject.toml, then tag the release.
+image: ghcr.io/t3hk0d3/novelhog-addon
+# tini is already the image's init.
+init: false
+ports:
+  8080/tcp: 8080
+ports_description:
+  8080/tcp: Web interface
+webui: "http://[HOST]:[PORT:8080]"
+# Every option is optional, so none needs a default (and the Supervisor rejects "" for url types).
+schema:
+  public_url: url?
+  vapid_subject: str?
+  allowed_hosts:
+    - str?
+  flaresolverr_url: url?
+  database_url: password?

@@ -34,6 +34,8 @@ dev = [
     "import-linter",
     "asgi-lifespan",
     "types-requests",
+    "pyyaml>=6.0.3",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 docs = [
     "mkdocs-material>=9.8.0",

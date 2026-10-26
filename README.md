@@ -64,6 +64,10 @@ docker compose up -d
 Open <http://localhost:8080> and add your first novel. To put it online behind HTTPS, with push notifications,
 see the [install guide](https://t3hk0d3.github.io/novelhog/install/).
 
+**On Home Assistant?** novelhog is an add-on too:
+
+[![Add the novelhog add-on repository to your Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Ft3hk0d3%2Fnovelhog)
+
 > [!NOTE]
 > novelhog has no login. Run it on a trusted network, or behind a reverse proxy that authenticates.
 
