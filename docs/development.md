@@ -40,6 +40,21 @@ uv run mkdocs build --strict     # what CI runs
 Pushes to `main` publish the site to GitHub Pages. Once, in the repository settings, set Pages → Source to
 "GitHub Actions". `docs/superpowers/` holds internal design notes and is not published.
 
+## Screenshots
+
+The images in `docs/assets/screenshots/` are generated, not hand-made. `npm --prefix web run screenshots` builds
+the SPA, starts `tests/fixtures/demo_backend.py` (the real API and worker on a temporary database, with a
+library of five public-domain novels, their covers and real chapter text; sources in
+`tests/fixtures/demo/SOURCES.md`), and has Playwright capture each view on a desktop and a phone, in light
+and dark. It needs Chromium (`npx --prefix web playwright install chromium`) and takes about two minutes.
+It is not part of `npm run e2e` or CI.
+
+Shrink the result before committing; the colour palette of an interface screenshot fits in 256 colours:
+
+```sh
+magick mogrify -colors 256 -dither None docs/assets/screenshots/*.png
+```
+
 ## Releases and the image
 
 CI publishes `ghcr.io/t3hk0d3/novelhog` for `linux/amd64` and `linux/arm64` after all checks pass: `latest` and

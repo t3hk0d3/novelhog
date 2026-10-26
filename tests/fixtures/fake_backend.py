@@ -30,6 +30,8 @@ from novelhog.repo import Repo
 from novelhog.scraper_adapter.adapter import FetchedChapter, TocResult
 from novelhog.storage import LocalStaticStorage
 from novelhog.worker.loop import Worker
+from novelhog.worker.tasks.base import WorkerAdapter
+from novelhog.worker.tasks.chapter_download import ImageSource
 
 HOST = "fake.test"
 TITLE = "The Fake Chronicle"
@@ -167,22 +169,23 @@ def _serve_spa(app: FastAPI, dist: Path, static_dir: Path) -> None:
         return FileResponse(root / "index.html")
 
 
-def _wait_for_hosts(repo: Repo, worker_thread: threading.Thread) -> None:
+def _wait_for_hosts(repo: Repo, worker_thread: threading.Thread, host: str) -> None:
     """Block until the worker has published its hosts, so the first Add cannot hit a 503."""
     deadline = time.monotonic() + READY_TIMEOUT_S
-    while not repo.hosts.is_supported(HOST):
+    while not repo.hosts.is_supported(host):
         if not worker_thread.is_alive() or time.monotonic() > deadline:
             msg = "the worker did not publish its hosts"
             raise RuntimeError(msg)
         time.sleep(0.05)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Serve the fake backend until stopped; the data lives in a temporary directory."""
-    parser = argparse.ArgumentParser(prog="fake_backend")
-    parser.add_argument("--dist", type=Path, required=True, help="the built SPA (web/dist)")
-    parser.add_argument("--port", type=int, default=8765)
-    args = parser.parse_args(argv)
+def serve_backend(
+    dist: Path, port: int, adapter: WorkerAdapter, images: ImageSource, host: str
+) -> None:
+    """Serve the SPA in `dist` and the real API on `port`, with a real worker over `adapter` and
+    `images`, until stopped. `host` is the one site the adapter supports. The data lives in a
+    temporary directory.
+    """
     with tempfile.TemporaryDirectory(prefix="novelhog-e2e-") as tmp:
         settings = _settings(Path(tmp))
         settings.static_dir.mkdir(parents=True)
@@ -195,8 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo.migrate()
         worker = Worker(
             repo,
-            FakeAdapter(),
-            FakeImages(),
+            adapter,
+            images,
             LocalStaticStorage(settings.static_dir, settings.static_base_url),
             {},
             settings,
@@ -204,14 +207,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         worker_thread = threading.Thread(target=worker.run, name="e2e-worker")
         worker_thread.start()
         try:
-            _wait_for_hosts(repo, worker_thread)
+            _wait_for_hosts(repo, worker_thread, host)
             app = create_app(settings, repo=repo, sse_poll_s=SSE_POLL_S)
-            _serve_spa(app, args.dist, settings.static_dir)
-            serve.run(app, host="127.0.0.1", port=args.port, graceful_s=GRACEFUL_S)
+            _serve_spa(app, dist, settings.static_dir)
+            serve.run(app, host="127.0.0.1", port=port, graceful_s=GRACEFUL_S)
         finally:
             worker.request_stop()
             worker_thread.join()
             repo.engine.dispose()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Serve the fake backend until stopped; the data lives in a temporary directory."""
+    parser = argparse.ArgumentParser(prog="fake_backend")
+    parser.add_argument("--dist", type=Path, required=True, help="the built SPA (web/dist)")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args(argv)
+    serve_backend(args.dist, args.port, FakeAdapter(), FakeImages(), HOST)
     return 0
 
 
