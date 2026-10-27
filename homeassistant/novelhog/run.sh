@@ -37,7 +37,7 @@ novelhog db migrate
 PIDS=()
 STOPPING=0
 
-# shellcheck disable=SC2329  # called by the trap below
+# shellcheck disable=SC2317,SC2329  # called by the trap below
 stop() {
     STOPPING=1
     kill -TERM "${PIDS[@]}" 2> /dev/null || true

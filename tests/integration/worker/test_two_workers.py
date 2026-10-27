@@ -45,6 +45,7 @@ class OverlapAdapter(FakeAdapter):
     def __init__(self) -> None:
         super().__init__()
         self.urls = [f"{URL}/{n}" for n in range(1, CHAPTERS + 1)]
+        self.toc_urls = list(self.urls)
         self._lock = threading.Lock()
         self.active: set[str] = set()
         self.duplicates: list[str] = []

@@ -28,7 +28,7 @@ from novelhog.chapter_store import ChapterStore
 from novelhog.config import Settings
 from novelhog.domain.tasks import TASK_REPAIR_INTERVAL
 from novelhog.notifications import dispatcher
-from novelhog.repo import Repo, utcnow
+from novelhog.repo import Repo
 from novelhog.storage import StaticStorage
 from novelhog.worker import maintenance, refresh, runtime
 from novelhog.worker.runner import Runner, RunnerBackoff
@@ -56,7 +56,7 @@ class Worker:
         settings: Settings,
         *,
         stop: threading.Event | None = None,
-        clock: Callable[[], datetime] = utcnow,
+        clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         processors: ProcessorRegistry | None = None,
     ) -> None:
@@ -66,7 +66,7 @@ class Worker:
         self._channels = channels
         self._settings = settings
         self._stop = stop if stop is not None else threading.Event()
-        self._clock = clock
+        self._clock = clock if clock is not None else repo.clock
         self._monotonic = monotonic
         self._last_maintenance: datetime | None = None
         self._last_repair: datetime | None = None
