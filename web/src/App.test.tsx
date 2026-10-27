@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe('App', () => {
-  it.each(['/', '/novels/NV123'])('renders the header with the theme menu on %s', (path) => {
+  it.each(['/', '/novels/NV123'])('renders the header with the theme switch on %s', (path) => {
     render(
       <MemoryRouter initialEntries={[path]}>
         <App />

@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ThemeMenu } from './ThemeMenu';
+import { ThemeSwitch } from './ThemeSwitch';
 
 interface HeaderProps {
   /** "Add novel" button (Task 33). */
   addNovel?: ReactNode;
-  /** Notifications bell (Task 39); sits immediately right of the theme menu. */
+  /** Notifications bell (Task 39); sits immediately right of the theme switcher. */
   bell?: ReactNode;
 }
 
@@ -16,7 +16,7 @@ export function Header({ addNovel, bell }: HeaderProps) {
         novelhog
       </Link>
       {addNovel}
-      <ThemeMenu />
+      <ThemeSwitch />
       {bell}
     </header>
   );

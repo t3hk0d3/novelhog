@@ -1860,9 +1860,9 @@ manifest makes the app installable.
   does not buffer /api/v1/events". The alert clears when `ready` arrives.
 - Works at phone width; on narrow screens the action bar becomes a bottom sheet.
 - **Theme switcher**: an icon-only button in the header, immediately left of the
-  notifications bell (`aria-haspopup="menu"`, `aria-label` "Theme: <choice>").
+  notifications bell (`aria-label` "Theme: <choice>").
   Its icon shows the current choice: monitor (System), sun (Light), moon (Dark).
-  It opens a three-item menu (`menuitemradio`, check mark on the current one).
+  Clicking cycles through the choices: System → Light → Dark → System.
   - System follows `prefers-color-scheme` and reacts to OS changes live; Light
     and Dark set `data-theme="light"|"dark"` on `<html>`.
   - The choice is stored per device in `localStorage` (`novelhog.theme`, default

@@ -18,12 +18,12 @@ describe('Header', () => {
     expect(screen.getByRole('link', { name: 'novelhog' })).toHaveAttribute('href', '/');
   });
 
-  it('shows the theme menu', () => {
+  it('shows the theme switcher', () => {
     renderHeader();
     expect(screen.getByRole('button', { name: /^Theme: / })).toBeInTheDocument();
   });
 
-  it('orders the slots: add novel, theme menu, then the bell', () => {
+  it('orders the slots: add novel, theme switcher, then the bell', () => {
     renderHeader({
       addNovel: <button>Add novel</button>,
       bell: <button>Bell</button>,
