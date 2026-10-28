@@ -28,12 +28,14 @@ export function ThemeSwitch() {
       type="button"
       aria-label={`Theme: ${label}`}
       title={`Theme: ${label}`}
-      className="inline-flex size-9 items-center justify-center rounded-full text-ink hover:bg-line"
+      className="group inline-flex size-9 items-center justify-center rounded-full text-ink transition-colors duration-200 hover:bg-line hover:text-accent"
       onClick={() => {
         setChoice(NEXT[choice]);
       }}
     >
-      <ChoiceIcon choice={choice} />
+      <span className="flex items-center justify-center transition duration-200 group-hover:scale-105 group-hover:text-accent">
+        <ChoiceIcon choice={choice} />
+      </span>
     </button>
   );
 }
