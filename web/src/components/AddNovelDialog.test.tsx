@@ -19,12 +19,37 @@ function stubFetch(status: number, body: unknown) {
   return fetchMock;
 }
 
+function setWide(wide: boolean) {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: wide,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+}
+
 async function submit(url = 'https://royalroad.com/fiction/1') {
   await userEvent.type(screen.getByLabelText('Table of contents URL'), url);
   await userEvent.click(screen.getByRole('button', { name: 'Add' }));
 }
 
 describe('AddNovelDialog', () => {
+  it('renders as a bottom sheet on a phone', () => {
+    setWide(false);
+    renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog', { name: 'Add novel' });
+    expect(dialog).toHaveClass('rounded-t-2xl', 'max-w-none');
+    expect(dialog).not.toHaveClass('rounded-2xl', 'max-w-lg');
+  });
+
+  it('renders as a centred dialog on desktop', () => {
+    setWide(true);
+    renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog', { name: 'Add novel' });
+    expect(dialog).toHaveClass('rounded-2xl', 'max-w-lg');
+    expect(dialog).not.toHaveClass('rounded-t-2xl', 'max-w-none');
+  });
+
   it('is a native modal dialog titled "Add novel" with the URL field focused', () => {
     renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
     expect(screen.getByRole('dialog', { name: 'Add novel' }).tagName).toBe('DIALOG');
