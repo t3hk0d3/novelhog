@@ -54,6 +54,7 @@ describe('AddNovelDialog', () => {
     renderWithProviders(<AddNovelDialog onClose={vi.fn()} />);
     expect(screen.getByRole('dialog', { name: 'Add novel' }).tagName).toBe('DIALOG');
     expect(screen.getByLabelText('Table of contents URL')).toHaveFocus();
+    expect(screen.getByLabelText('Table of contents URL')).toHaveClass('text-base');
   });
 
   it('has the follow toggle on by default', () => {

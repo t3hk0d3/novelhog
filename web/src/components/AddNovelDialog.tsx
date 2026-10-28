@@ -83,7 +83,7 @@ export function AddNovelDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => {
               setUrl(event.target.value);
             }}
-            className="rounded-lg border border-line bg-page px-3 py-2 font-mono text-sm"
+            className="min-h-11 rounded-lg border border-line bg-page px-3 py-2 font-mono text-base"
           />
         </div>
         <div className="flex items-center gap-3 text-sm text-ink-muted">
