@@ -81,4 +81,12 @@ describe('ThemeSwitch', () => {
     await userEvent.keyboard(' ');
     expect(screen.getByRole('button', { name: 'Theme: Dark' })).toBeInTheDocument();
   });
+
+  it('applies hover effect classes to the theme switch button and icon wrapper', () => {
+    render(<ThemeSwitch />);
+    const button = screen.getByRole('button', { name: 'Theme: System' });
+    expect(button).toHaveClass('group', 'hover:bg-line', 'hover:text-accent');
+    const iconWrapper = button.querySelector('span');
+    expect(iconWrapper).toHaveClass('group-hover:scale-105', 'group-hover:text-accent');
+  });
 });
