@@ -3,7 +3,7 @@ import { useHref } from 'react-router';
 import type { Chapter } from '../api/client';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import type { Selection } from '../hooks/useSelection';
-import { dateOnly, relative } from '../lib/time';
+import { relative } from '../lib/time';
 import { CheckIcon } from './icons';
 import { STATE_LABELS } from './StatusIcon';
 import { StatusTab } from './StatusTab';
@@ -153,18 +153,9 @@ function Row({
         )}
       </span>
       {wide && (
-        <>
-          <span className="w-24 shrink-0 self-center text-ink-muted">
-            {chapter.released_at === null ? (
-              <span title="Part of the initial import">—</span>
-            ) : (
-              dateOnly(chapter.released_at)
-            )}
-          </span>
-          <span className="w-28 shrink-0 self-center text-ink-muted">
-            {relative(chapter.updated_at)}
-          </span>
-        </>
+        <span className="w-28 shrink-0 self-center text-ink-muted">
+          {relative(chapter.updated_at)}
+        </span>
       )}
       <span aria-hidden="true" className="flex">
         <StatusTab state={chapter.state} chevron={!selecting} />
@@ -268,9 +259,6 @@ export function ChapterTable({ chapters, isNew, onOpenDetails, selection }: Prop
           </span>
           <span aria-hidden="true" className="flex-1">
             Title
-          </span>
-          <span aria-hidden="true" className="w-24 shrink-0">
-            Added
           </span>
           <span aria-hidden="true" className="w-28 shrink-0">
             Updated
