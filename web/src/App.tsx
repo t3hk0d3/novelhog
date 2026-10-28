@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Route, Routes } from 'react-router';
 import { AddNovelDialog } from './components/AddNovelDialog';
 import { Header } from './components/Header';
+import { PlusIcon } from './components/icons';
 import { NotificationsBell } from './components/NotificationsBell';
 import { PushBanner } from './components/PushBanner';
 import { ToastProvider } from './components/Toast';
@@ -38,9 +39,13 @@ function Shell() {
           <button
             type="button"
             onClick={openAdd}
-            className="rounded-lg bg-accent px-3 py-1.5 text-sm font-semibold text-accent-ink"
+            aria-label="Add novel"
+            title="Add novel"
+            className="group inline-flex size-9 items-center justify-center rounded-full text-ink transition-colors duration-200 hover:bg-line hover:text-accent"
           >
-            Add novel
+            <span className="flex items-center justify-center transition duration-200 group-hover:scale-105 group-hover:text-accent">
+              <PlusIcon />
+            </span>
           </button>
         }
         bell={<NotificationsBell push={push} />}

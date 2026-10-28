@@ -54,14 +54,23 @@ describe('App layout', () => {
 });
 
 describe('App header', () => {
-  it('Add novel opens the add-novel dialog', async () => {
+  it('Add novel is an icon button that opens the add-novel dialog', async () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <App />
       </MemoryRouter>,
     );
     const banner = screen.getByRole('banner');
-    await userEvent.click(within(banner).getByRole('button', { name: 'Add novel' }));
+    const button = within(banner).getByRole('button', { name: 'Add novel' });
+    expect(button.querySelector('svg')).toHaveAttribute('data-icon', 'plus');
+    expect(button).toHaveClass(
+      'group',
+      'size-9',
+      'rounded-full',
+      'hover:bg-line',
+      'hover:text-accent',
+    );
+    await userEvent.click(button);
     expect(screen.getByRole('dialog', { name: 'Add novel' })).toBeInTheDocument();
   });
 });
