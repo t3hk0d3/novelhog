@@ -27,32 +27,26 @@ describe('ChapterTable', () => {
     it('shows the column headings', () => {
       setWide(true);
       render(<ChapterTable chapters={[makeChapter(1)]} isNew={never} onOpenDetails={vi.fn()} />);
-      for (const heading of ['#', 'Title', 'Added', 'Updated']) {
+      for (const heading of ['#', 'Title', 'Updated']) {
         expect(screen.getByText(heading)).toBeInTheDocument();
       }
+      expect(screen.queryByText('Added')).toBeNull();
     });
 
-    it('shows the release date only and a relative update time', () => {
+    it('shows a relative update time', () => {
       setWide(true);
       const chapter = makeChapter(1, {
         released_at: '2026-10-09T12:00:00.000Z',
         updated_at: new Date(Date.now() - 12 * 60_000).toISOString(),
       });
       render(<ChapterTable chapters={[chapter]} isNew={never} onOpenDetails={vi.fn()} />);
-      expect(screen.getByText(/^2026-10-(09|10)$/)).toBeInTheDocument();
       expect(screen.getByText('12 min ago')).toBeInTheDocument();
-    });
-
-    it('shows a dash with a tooltip for the initial import', () => {
-      setWide(true);
-      const chapter = makeChapter(1, { released_at: null });
-      render(<ChapterTable chapters={[chapter]} isNew={never} onOpenDetails={vi.fn()} />);
-      expect(screen.getByText('—')).toHaveAttribute('title', 'Part of the initial import');
+      expect(screen.queryByText(/^2026-10-(09|10)$/)).toBeNull();
     });
   });
 
   describe('on a phone', () => {
-    it('shows position and title but no Added or Updated', () => {
+    it('shows position and title but no Updated', () => {
       setWide(false);
       render(<ChapterTable chapters={[makeChapter(7)]} isNew={never} onOpenDetails={vi.fn()} />);
       expect(screen.getByText('7')).toBeInTheDocument();

@@ -1604,13 +1604,11 @@ manifest makes the app installable.
      sideways.
    - **Chapter table** of the chosen range (both layouts). Error messages are
      never shown in the table; an error is visible only as the red status tab.
-     - Desktop (≥ 720 px) columns: `#` · title (with "new" dot) · **Added** ·
-       **Updated** · status tab. Added shows the date only, from
-       `released_at`; chapters from the initial import show "—" with the
-       tooltip "Part of the initial import". Updated is relative ("12 min ago")
-       from `updated_at`.
+     - Desktop (≥ 720 px) columns: `#` · title (with "new" dot) ·
+       **Updated** · status tab. Updated is relative ("12 min ago") from
+       `updated_at`.
      - Phone (< 720 px) rows: number · title (with "new" dot) · status tab. No
-       Added/Updated columns.
+       Updated column.
      - **Status tab**: a full-row-height block at the end of each row, about
        44–52 px wide, holding the status icon (display only; text label for
        screen readers). Calm states use soft tints, attention states full
@@ -2126,8 +2124,7 @@ desktop chapters, export dialog, phone normal and select mode).
   a range, Select all covers search/filter results, header checkbox none/some/
   all, Done/Escape/back and finishing a bulk action leave the mode and clear the
   selection, selection survives SSE updates), table rendering (no error text in
-  rows; status tab colour and icon per state; chevron only in normal mode;
-  Added shows date only from `released_at`, "—" for initial import), chapter
+  rows; status tab colour and icon per state; chevron only in normal mode), chapter
   details (dialog on desktop, sheet on phone, error box only in `error` state,
   copy button, previous/next, state-dependent primary action sends the right
   PATCH), overview bar (runs and proportions from chapter states, frame position,
