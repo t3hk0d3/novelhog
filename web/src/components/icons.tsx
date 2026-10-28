@@ -121,6 +121,14 @@ export function BellOffIcon() {
   );
 }
 
+export function PlusIcon({ className }: { className?: string } = {}) {
+  return (
+    <Svg name="plus" className={className}>
+      <path d="M12 5v14M5 12h14" />
+    </Svg>
+  );
+}
+
 export function CloseIcon() {
   return (
     <Svg name="close">
