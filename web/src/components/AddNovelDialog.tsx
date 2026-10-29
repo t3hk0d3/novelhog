@@ -3,8 +3,11 @@ import { useId, useState, type SubmitEvent } from 'react';
 import { Dialog } from './Dialog';
 import { Link } from 'react-router';
 import { api, ApiError } from '../api/client';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { errorMessage } from '../lib/errors';
 import { FollowToggle } from './FollowToggle';
+
+const DESKTOP = '(min-width: 720px)';
 
 function hostsOf(error: ApiError): string[] {
   const hosts = error.details?.hosts;
@@ -51,6 +54,7 @@ function ErrorNotice({ error, onClose }: { error: unknown; onClose: () => void }
 
 /** One-step dialog: table-of-contents URL, follow toggle, Add (spec section 10, screen 2). */
 export function AddNovelDialog({ onClose }: { onClose: () => void }) {
+  const wide = useMediaQuery(DESKTOP);
   const inputId = useId();
   const [url, setUrl] = useState('');
   const [followed, setFollowed] = useState(true);
@@ -65,7 +69,7 @@ export function AddNovelDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Dialog title="Add novel" onClose={onClose}>
+    <Dialog title="Add novel" sheet={!wide} onClose={onClose}>
       <form noValidate onSubmit={submit} className="mt-4 flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <label htmlFor={inputId} className="text-sm font-semibold">
@@ -79,7 +83,7 @@ export function AddNovelDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => {
               setUrl(event.target.value);
             }}
-            className="rounded-lg border border-line bg-page px-3 py-2 font-mono text-sm"
+            className="min-h-11 rounded-lg border border-line bg-page px-3 py-2 font-mono text-base"
           />
         </div>
         <div className="flex items-center gap-3 text-sm text-ink-muted">

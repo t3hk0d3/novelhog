@@ -61,10 +61,10 @@ export function Dialog({ title, onClose, children, sheet = false, large = false 
         onClose();
       }}
       onKeyDown={wrapTab}
-      className={`w-full bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50 ${
+      className={`w-full bg-surface text-ink shadow-xl backdrop:bg-black/50 ${
         sheet
-          ? 'mx-0 mb-0 mt-auto max-w-none rounded-t-2xl transition-transform duration-200 starting:translate-y-full motion-reduce:transition-none'
-          : `m-auto rounded-2xl ${large ? 'max-w-3xl' : 'max-w-lg'}`
+          ? 'fixed inset-x-0 bottom-0 top-auto mx-0 mb-0 mt-auto max-h-[calc(100dvh-2rem)] max-w-none overflow-y-auto rounded-b-none rounded-t-2xl p-6 pb-[max(1.5rem,calc(1.5rem+env(safe-area-inset-bottom)))] transition-transform duration-200 starting:translate-y-full motion-reduce:transition-none'
+          : `m-auto rounded-2xl p-6 ${large ? 'max-w-3xl' : 'max-w-lg'}`
       }`}
     >
       <div className="flex items-center justify-between">

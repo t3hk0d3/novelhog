@@ -31,7 +31,7 @@ export function ChapterFilters(props: ChapterFiltersProps) {
         onChange={(event) => {
           props.onQuery(event.target.value);
         }}
-        className="min-w-0 flex-1 basis-48 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm"
+        className="min-w-0 flex-1 basis-48 rounded-lg border border-line bg-surface px-3 py-1.5 text-base sm:text-sm"
       />
       {CHAPTER_STATES.map((state) => (
         <button

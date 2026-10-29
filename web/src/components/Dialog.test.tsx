@@ -75,13 +75,16 @@ describe('Dialog', () => {
     expect(screen.getByRole('button', { name: 'Open' })).toHaveFocus();
   });
 
-  it('anchors to the bottom edge as a sheet', () => {
+  it('anchors to the bottom edge as a sheet with safe area padding', () => {
     render(
       <Dialog title="Sheet" sheet onClose={() => undefined}>
         body
       </Dialog>,
     );
-    expect(screen.getByRole('dialog', { name: 'Sheet' }).className).toContain('mt-auto');
+    const dialog = screen.getByRole('dialog', { name: 'Sheet' });
+    expect(dialog.className).toContain('mt-auto');
+    expect(dialog.className).toContain('bottom-0');
+    expect(dialog.className).toContain('safe-area-inset-bottom');
   });
 
   it('is a medium column by default and a wide one when asked', () => {
