@@ -111,16 +111,54 @@ describe('NovelHeader', () => {
     expect(bodyOf(fetchMock)).toEqual({ followed: false });
   });
 
-  it('Sync sends POST /sync and is disabled while a sync runs', async () => {
-    const fetchMock = stubFetch();
-    const { unmount } = renderWithProviders(<NovelHeader novel={makeNovel()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Sync' }));
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/novels/NV000000000001/sync', {
-      method: 'POST',
+  describe('Sync', () => {
+    it('is not a button of its own in the header', () => {
+      renderWithProviders(<NovelHeader novel={makeNovel()} />);
+      expect(screen.queryByRole('button', { name: 'Sync' })).toBeNull();
     });
-    unmount();
-    renderWithProviders(<NovelHeader novel={makeNovel({ syncing: true })} />);
-    expect(screen.getByRole('button', { name: 'Syncing…' })).toBeDisabled();
+
+    it('More → Sync sends POST /sync and closes the menu', async () => {
+      const fetchMock = stubFetch();
+      renderWithProviders(<NovelHeader novel={makeNovel()} />);
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Sync' }));
+      expect(fetchMock).toHaveBeenCalledWith('/api/v1/novels/NV000000000001/sync', {
+        method: 'POST',
+      });
+      expect(screen.queryByRole('button', { name: 'Delete novel…' })).toBeNull();
+    });
+
+    it('says "Syncing…" in the menu and is disabled while a sync runs', async () => {
+      renderWithProviders(<NovelHeader novel={makeNovel({ syncing: true })} />);
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      expect(screen.getByRole('button', { name: 'Syncing…' })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Sync' })).toBeNull();
+    });
+
+    it('is the first item of the menu, with Delete novel… last', async () => {
+      renderWithProviders(<NovelHeader novel={makeNovel()} onExport={vi.fn()} />);
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      const items = screen
+        .getAllByRole('button')
+        .map((b) => b.textContent)
+        .filter((text) => text === 'Sync' || text === 'Delete novel…');
+      expect(items).toEqual(['Sync', 'Delete novel…']);
+    });
+
+    it('shows an error from the request in a toast', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() =>
+          Promise.resolve(
+            Response.json({ error: { code: 'x', message: 'The host is paused' } }, { status: 409 }),
+          ),
+        ),
+      );
+      renderWithProviders(<NovelHeader novel={makeNovel()} />);
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Sync' }));
+      expect(await screen.findByText('The host is paused')).toBeInTheDocument();
+    });
   });
 
   it('closes the More disclosure on Escape', async () => {
@@ -149,19 +187,19 @@ describe('NovelHeader', () => {
     expect(within(dialog).getByText(/The Ninth Cartographer/)).toBeInTheDocument();
   });
 
-  describe('Export…', () => {
+  describe('Export', () => {
     it('calls onExport', async () => {
       const onExport = vi.fn();
       renderWithProviders(
         <NovelHeader novel={makeNovel({ total_pages: 5 })} onExport={onExport} />,
       );
-      await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Export' }));
       expect(onExport).toHaveBeenCalledOnce();
     });
 
     it('is disabled with zero chapters', () => {
       renderWithProviders(<NovelHeader novel={makeNovel({ total_pages: 0 })} onExport={vi.fn()} />);
-      expect(screen.getByRole('button', { name: 'Export…' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
     });
   });
 });

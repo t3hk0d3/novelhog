@@ -99,7 +99,7 @@ function NovelPage({ novel }: { novel: NovelData }) {
       { replace, state: chapterId === null ? null : { details: pushedByUs || !replace } },
     );
   };
-  // The first and last position Export… (action bar or header) asked for; the export
+  // The first and last position Export (action bar or header) asked for; the export
   // dialog is open while it is set.
   const [exportRange, setExportRange] = useState<{ from: number; to: number } | null>(null);
   // The exports fold: open when the page is reached through `#exports` and after an export is

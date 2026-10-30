@@ -90,7 +90,15 @@ function Title({ novel, name }: { novel: Novel; name: string }) {
   );
 }
 
-function MoreMenu({ onDelete }: { onDelete: () => void }) {
+function MoreMenu({
+  syncing,
+  onSync,
+  onDelete,
+}: {
+  syncing: boolean;
+  onSync: () => void;
+  onDelete: () => void;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div
@@ -113,6 +121,17 @@ function MoreMenu({ onDelete }: { onDelete: () => void }) {
         <div className="absolute right-0 z-10 mt-1 min-w-40 rounded-lg border border-line bg-surface p-1 shadow-lg">
           <button
             type="button"
+            disabled={syncing}
+            onClick={() => {
+              setOpen(false);
+              onSync();
+            }}
+            className="block w-full rounded px-3 py-1.5 text-left text-sm disabled:opacity-40"
+          >
+            {syncing ? 'Syncing…' : 'Sync'}
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setOpen(false);
               onDelete();
@@ -127,7 +146,7 @@ function MoreMenu({ onDelete }: { onDelete: () => void }) {
   );
 }
 
-/** Cover, editable title, host, TOC link, follow, Sync, Export, schedule, counters, More (screen 3). */
+/** Cover, editable title, host, TOC link, follow, Export, schedule, counters, More with Sync and Delete (screen 3). */
 export function NovelHeader({
   novel,
   onExport,
@@ -191,16 +210,6 @@ export function NovelHeader({
               follow.mutate(followed);
             }}
           />
-          <button
-            type="button"
-            disabled={novel.syncing || sync.isPending}
-            onClick={() => {
-              sync.mutate();
-            }}
-            className="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold disabled:opacity-60"
-          >
-            {novel.syncing ? 'Syncing…' : 'Sync'}
-          </button>
           {onExport && (
             <button
               type="button"
@@ -208,10 +217,14 @@ export function NovelHeader({
               onClick={onExport}
               className="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold disabled:opacity-60"
             >
-              Export…
+              Export
             </button>
           )}
           <MoreMenu
+            syncing={novel.syncing || sync.isPending}
+            onSync={() => {
+              sync.mutate();
+            }}
             onDelete={() => {
               setDeleting(true);
             }}

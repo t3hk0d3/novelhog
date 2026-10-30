@@ -167,7 +167,7 @@ test('main flow: add, download, details, export, delete', async ({ page }, testI
   });
 
   await test.step('export with missing chapters waits, then is ready and downloads', async () => {
-    await page.getByRole('button', { name: 'Export…' }).click();
+    await page.getByRole('button', { name: 'Export', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Export' });
     await dialog.getByLabel('From').fill('3');
     await dialog.getByLabel('To').fill('5');
