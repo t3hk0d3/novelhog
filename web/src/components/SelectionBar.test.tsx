@@ -96,9 +96,9 @@ describe('SelectionBar', () => {
   });
 
   describe('on desktop', () => {
-    it('has Download, Cancel queued, Retry errors and Export…', () => {
+    it('has Download, Cancel queued, Retry errors and Export', () => {
       mount(queued(1, 2));
-      for (const name of ['Download', 'Cancel queued', 'Retry errors', 'Export…']) {
+      for (const name of ['Download', 'Cancel queued', 'Retry errors', 'Export']) {
         expect(screen.getByRole('button', { name })).toBeInTheDocument();
       }
       expect(screen.queryByRole('button', { name: 'More…' })).toBeNull();
@@ -175,11 +175,11 @@ describe('SelectionBar', () => {
       expect(screen.getByRole('button', { name: 'Cancel queued' })).toBeDisabled();
     });
 
-    it('Export… passes the first and last position to onExport', async () => {
+    it('Export passes the first and last position to onExport', async () => {
       const { onExport, fetchMock } = mount(
         [makeChapter(4), makeChapter(9), makeChapter(7)].sort((a, b) => a.position - b.position),
       );
-      await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Export' }));
       expect(onExport).toHaveBeenCalledExactlyOnceWith(4, 9);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -279,15 +279,15 @@ describe('SelectionBar', () => {
       expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'More…' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Cancel queued' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Export…' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Export' })).toBeNull();
     });
 
-    it('More… opens a bottom sheet with Cancel queued and Export…', async () => {
+    it('More… opens a bottom sheet with Cancel queued and Export', async () => {
       const { onExport } = mount(queued(10, 12), { wide: false });
       await userEvent.click(screen.getByRole('button', { name: 'More…' }));
       const sheet = screen.getByRole('dialog', { name: 'More actions' });
       expect(within(sheet).getByRole('button', { name: 'Cancel queued' })).toBeInTheDocument();
-      await userEvent.click(within(sheet).getByRole('button', { name: 'Export…' }));
+      await userEvent.click(within(sheet).getByRole('button', { name: 'Export' }));
       expect(onExport).toHaveBeenCalledExactlyOnceWith(10, 12);
       expect(screen.queryByRole('dialog')).toBeNull();
     });

@@ -436,7 +436,7 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
     it('the header button opens the dialog for the whole novel and Cancel closes it', async () => {
       mount(makeNovel({ total_pages: 3 }), makeChapters(3));
       await screen.findByText('Page 3');
-      await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Export' }));
       const dialog = screen.getByRole('dialog', { name: 'Export' });
       expect(within(dialog).getByLabelText('From')).toHaveValue(1);
       expect(within(dialog).getByLabelText('To')).toHaveValue(3);
@@ -451,7 +451,7 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
       await userEvent.click(screen.getByRole('option', { name: /^Page 3,/ }));
       await userEvent.click(
         within(screen.getByRole('region', { name: 'Selection actions' })).getByRole('button', {
-          name: 'Export…',
+          name: 'Export',
         }),
       );
       const dialog = screen.getByRole('dialog', { name: 'Export' });
@@ -467,7 +467,7 @@ describe('Novel page (rendered through App at /novels/:id)', () => {
       await userEvent.click(screen.getByRole('option', { name: /^Page 2,/ }));
       await userEvent.click(
         within(screen.getByRole('region', { name: 'Selection actions' })).getByRole('button', {
-          name: 'Export…',
+          name: 'Export',
         }),
       );
       await userEvent.click(

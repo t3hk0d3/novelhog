@@ -1575,8 +1575,10 @@ manifest makes the app installable.
    followed by ` · novelhog`, and follows a rename; the reader's is the chapter's;
    the library's is the count ("3 novels · novelhog"), plain "novelhog" until the
    list has loaded.
-   - Header: cover, title, host, TOC link, follow toggle, Sync button,
-     "checked 2 h ago · next in 4 h", counters, and a "More" menu with
+   - Header: cover, title, host, TOC link, follow toggle, **Export** button
+     (opens the export dialog for the whole novel; disabled with no chapters),
+     "checked 2 h ago · next in 4 h", counters, and a "More" menu with **Sync**
+     (`POST /sync`; it reads "Syncing…" and is disabled while a sync runs) and
      **Delete novel…** (confirmation dialog naming the novel and its downloaded
      chapter count; on `204` the app goes back to the library).
    - The `#` shown for a chapter is its current position.
@@ -1647,7 +1649,7 @@ manifest makes the app installable.
        search/filter results) and **Done**. Desktop also has a header checkbox
        (a real button with none / some / all states).
      - Action bar: "N selected · from–to · summary" with Download, Cancel
-       queued, Retry errors and Export EPUB… (phone: Download, Retry, More…).
+       queued, Retry errors and Export (phone: Download, Retry, More…).
      - Leaving: Done, Escape, the back gesture, or completing any bulk action
        (toast "Queued N · skipped M", then back to normal mode, selection
        cleared).
@@ -1778,7 +1780,7 @@ manifest makes the app installable.
        hidden or left; a chapter read to the end (97%) or left at the very top
        is forgotten and opens at the top. Chapter images are not lazy (their
        data is already in the page, and lazy images would keep unknown heights).
-   - **Export dialog** (Export EPUB… in the action bar; dialog on desktop, bottom
+   - **Export dialog** (Export in the header or the action bar; dialog on desktop, bottom
      sheet on phones): one export, one file.
      - From/To inputs prefilled from the selection's first and last chapter,
        with a small bar showing the range's chapter states.
